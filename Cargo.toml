@@ -1,0 +1,15 @@
+[package]
+name = "om_wm"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "om_wm"
+path = "src/main.rs"
+
+[dependencies]
+smithay = { version = "0.7", default-features = false, features = ["wayland_frontend", "backend_drm"] }
+libc = "0.2"
+
+[build-dependencies]
+cmake = "0.1"

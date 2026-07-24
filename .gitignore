@@ -72,3 +72,22 @@ $RECYCLE.BIN/
 # Windows shortcuts
 *.lnk
 
+### Rust ###
+# Cargo build output (also where build.rs compiles the vendored raylib)
+/target/
+
+# rustfmt backups
+**/*.rs.bk
+
+# Backtrace / debug artifacts
+*.pdb
+
+# NOTE: Cargo.lock is intentionally committed (om_wm is a binary application).
+
+### om_wm ###
+# Framebuffer screenshots captured during testing (OM_WM_SHOT=1)
+/shot.png
+
+# Local scratch / logs
+*.log
+
