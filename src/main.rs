@@ -132,10 +132,17 @@ fn main() {
         for key in state.dead_dmabufs.drain(..).collect::<Vec<_>>() {
             dmabuf_cache.evict(&egl, &key);
         }
+        wl::state::prune_held(&mut state);
 
         let committed: Vec<_> = state.committed.drain(..).collect();
         for surface in &committed {
-            render::upload_committed(&mut windows, &mut dmabuf_cache, &egl, surface);
+            render::upload_committed(
+                &mut windows,
+                &mut dmabuf_cache,
+                &egl,
+                &mut state,
+                surface,
+            );
         }
 
         // Send frame callbacks and flush BEFORE the vsync-blocking draw, so the

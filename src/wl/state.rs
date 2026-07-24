@@ -67,6 +67,11 @@ pub struct State {
     // wl_buffers destroyed by clients; the render side evicts their cached
     // EGLImages. Drained each frame.
     pub dead_dmabufs: Vec<ObjectId>,
+    // The dmabuf we are currently displaying per surface, kept alive (not
+    // released) so the client cannot overwrite it while we re-sample it each
+    // frame. Released only when a newer buffer replaces it. shm buffers are not
+    // held (we copy them out, so they are released immediately on upload).
+    pub held_dmabufs: Vec<(WlSurface, WlBuffer)>,
 }
 
 pub struct Server {
@@ -150,6 +155,7 @@ pub fn init(
         dmabuf_global,
         committed: Vec::new(),
         dead_dmabufs: Vec::new(),
+        held_dmabufs: Vec::new(),
     };
 
     let server = Server {
@@ -241,11 +247,17 @@ where
 // then release the buffer and clear the pending assignment. Returns true when a
 // dmabuf was handled. eglCreateImageKHR dups the plane fds, so releasing right
 // after the call is safe.
-pub fn take_dmabuf_buffer<F>(surface: &WlSurface, mut f: F) -> bool
+pub fn take_dmabuf_and_retain<F>(
+    state: &mut State,
+    surface: &WlSurface,
+    mut f: F,
+) -> bool
 where
     F: FnMut(ObjectId, &DmabufInfo),
 {
-    with_states(surface, |data| {
+    let mut new_buffer: Option<WlBuffer> = None;
+
+    let handled = with_states(surface, |data| {
         let mut guard = data.cached_state.get::<SurfaceAttributes>();
         let attrs = guard.current();
 
@@ -284,10 +296,48 @@ where
 
         f(key, &info);
 
-        buffer.release();
+        // Retain instead of release: we keep sampling this buffer every frame
+        // it is displayed, so it must not be released until a newer buffer
+        // replaces it (see retain_replace).
+        new_buffer = Some(buffer);
         attrs.buffer = None;
         true
-    })
+    });
+
+    if let Some(buf) = new_buffer {
+        retain_replace(&mut state.held_dmabufs, surface, buf);
+    }
+    handled
+}
+
+// Hold new_buf as the surface's displayed buffer, releasing the previous one it
+// replaces. A same-id recommit keeps the existing hold and drops the extra clone.
+fn retain_replace(
+    held: &mut Vec<(WlSurface, WlBuffer)>,
+    surface: &WlSurface,
+    new_buf: WlBuffer,
+) {
+    if let Some(slot) = held.iter_mut().find(|(s, _)| s == surface) {
+        if slot.1.id() != new_buf.id() {
+            slot.1.release();
+            slot.1 = new_buf;
+        }
+    } else {
+        held.push((surface.clone(), new_buf));
+    }
+}
+
+// Release and drop any dmabuf held for this surface (e.g. it switched to shm).
+pub fn release_held_dmabuf(state: &mut State, surface: &WlSurface) {
+    if let Some(pos) = state.held_dmabufs.iter().position(|(s, _)| s == surface) {
+        state.held_dmabufs[pos].1.release();
+        state.held_dmabufs.swap_remove(pos);
+    }
+}
+
+// Drop held buffers whose surface has died (client gone); release is a no-op then.
+pub fn prune_held(state: &mut State) {
+    state.held_dmabufs.retain(|(s, _)| s.is_alive());
 }
 
 // Signal the surface it may render its next frame.

@@ -176,16 +176,19 @@ pub fn upload_committed(
     windows: &mut Windows,
     cache: &mut DmabufCache,
     egl: &Egl,
+    state: &mut State,
     surface: &WlSurface,
 ) {
     let handled_shm = state::take_shm_buffer(surface, |w, h, stride, ptr| {
         upload_shm(windows, surface, w, h, stride, ptr);
     });
     if handled_shm {
+        // Surface is on an shm buffer now; drop any dmabuf we were holding.
+        state::release_held_dmabuf(state, surface);
         return;
     }
 
-    state::take_dmabuf_buffer(surface, |key, info| {
+    state::take_dmabuf_and_retain(state, surface, |key, info| {
         match cache.get_or_import(egl, key, info) {
             Some((tex, w, h)) => {
                 store_entry(windows, surface, tex, w, h, 0.0, false);
