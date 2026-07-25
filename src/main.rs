@@ -22,9 +22,9 @@ use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use smithay::backend::input::{ButtonState, KeyState};
+use smithay::backend::input::{Axis, AxisSource, ButtonState, KeyState};
 use smithay::input::keyboard::{FilterResult, Keycode};
-use smithay::input::pointer::{ButtonEvent, MotionEvent};
+use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
@@ -47,6 +47,8 @@ const INVERT_SCROLL: bool = true;
 const HWHEEL_PAN: f32 = 60.0;
 // Gap within which a second middle click counts as a double click.
 const DOUBLE_CLICK_MS: u32 = 400;
+// Pixels a client should scroll per wheel notch, alongside the discrete step.
+const WHEEL_STEP_PX: f32 = 15.0;
 // How long to sleep per iteration while another VT owns the display.
 const VT_IDLE_MS: u64 = 30;
 
@@ -218,6 +220,42 @@ fn release_held_keys(
             time_ms,
             |_, _, _| FilterResult::Forward,
         );
+    }
+}
+
+// Forward scrolling to the focused window: inside a window the wheel belongs to
+// the client, not to the canvas zoom. Wheels send discrete v120 steps plus the
+// pixel value clients expect, finger scroll sends pixels. Our sign convention is
+// positive up and right, Wayland's is positive down and right, so the vertical
+// axes flip back here.
+fn forward_scroll(state: &mut State, ptr: &input::Pointer, time_ms: u32) {
+    let pointer = state.pointer.clone();
+    if ptr.wheel != 0.0 || ptr.hwheel != 0.0 {
+        let mut frame = AxisFrame::new(time_ms).source(AxisSource::Wheel);
+        if ptr.wheel != 0.0 {
+            let v = -ptr.wheel;
+            frame = frame
+                .v120(Axis::Vertical, (v * 120.0) as i32)
+                .value(Axis::Vertical, (v * WHEEL_STEP_PX) as f64);
+        }
+        if ptr.hwheel != 0.0 {
+            frame = frame
+                .v120(Axis::Horizontal, (ptr.hwheel * 120.0) as i32)
+                .value(Axis::Horizontal, (ptr.hwheel * WHEEL_STEP_PX) as f64);
+        }
+        pointer.axis(state, frame);
+        pointer.frame(state);
+    }
+    if ptr.scroll_x != 0.0 || ptr.scroll_y != 0.0 {
+        let mut frame = AxisFrame::new(time_ms).source(AxisSource::Finger);
+        if ptr.scroll_y != 0.0 {
+            frame = frame.value(Axis::Vertical, -ptr.scroll_y as f64);
+        }
+        if ptr.scroll_x != 0.0 {
+            frame = frame.value(Axis::Horizontal, ptr.scroll_x as f64);
+        }
+        pointer.axis(state, frame);
+        pointer.frame(state);
     }
 }
 
@@ -490,8 +528,15 @@ fn main() {
         // client renders its next frame concurrently with our page flip instead
         // of waiting a full refresh (which would halve its frame rate).
         let time_ms = start.elapsed().as_millis() as u32;
+        // Popups get frame callbacks as well as windows. A client that waits for
+        // one before submitting a surface's next frame (Chromium does) otherwise
+        // stalls on its first menu frame: the menu never appears and its
+        // compositor complains the frame was held too long.
         for surface in wl::state::toplevel_surfaces(&state) {
             wl::state::send_frame_callbacks(&surface, time_ms);
+            for (popup, _, _) in wl::state::popups_of(&surface) {
+                wl::state::send_frame_callbacks(&popup, time_ms);
+            }
         }
         wl::state::flush(&mut server);
 
@@ -745,6 +790,9 @@ fn main() {
             moved,
             start.elapsed().as_millis() as u32,
         );
+        if focused.is_some() {
+            forward_scroll(&mut state, &ptr, start.elapsed().as_millis() as u32);
+        }
         if let Some(i) = inp.as_ref() {
             forward_keys(
                 &mut state,
