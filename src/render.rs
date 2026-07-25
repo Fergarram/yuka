@@ -10,6 +10,7 @@
 // is drawn as a shader-processed quad, centered at native size.
 //
 
+use crate::camera::{self, Camera};
 use crate::egl::{Egl, EglImage};
 use crate::ray::{self, Rectangle, Shader, Texture2D};
 use crate::wl::state::{self, State};
@@ -26,11 +27,16 @@ pub struct Windows {
     pub tex_id: Vec<u32>,
     pub tex_w: Vec<i32>,
     pub tex_h: Vec<i32>,
+    // Top-left position on the infinite canvas, assigned on first appearance.
+    pub canvas_x: Vec<f32>,
+    pub canvas_y: Vec<f32>,
     // 1.0 for shm (BGRA in memory), 0.0 for dmabuf (correct RGBA via EGL).
     pub swizzle: Vec<f32>,
     // true when we own tex_id (shm, freed via unload). false for dmabuf
     // textures, which the cache owns.
     pub owns: Vec<bool>,
+    // Running x cursor for laying new windows out in a row without overlap.
+    place_x: f32,
     // Reused scratch for repacking shm rows when stride != width*4.
     scratch: Vec<u8>,
 }
@@ -55,8 +61,11 @@ pub fn windows_new() -> Windows {
         tex_id: Vec::new(),
         tex_w: Vec::new(),
         tex_h: Vec::new(),
+        canvas_x: Vec::new(),
+        canvas_y: Vec::new(),
         swizzle: Vec::new(),
         owns: Vec::new(),
+        place_x: 0.0,
         scratch: Vec::new(),
     }
 }
@@ -99,10 +108,17 @@ fn store_entry(
             windows.owns[i] = owns;
         }
         None => {
+            // Lay windows out left to right, no overlap, sized to each window.
+            const GAP: f32 = 80.0;
+            let cx = windows.place_x;
+            let cy = 0.0;
+            windows.place_x += w as f32 + GAP;
             windows.surface.push(surface.clone());
             windows.tex_id.push(tex_id);
             windows.tex_w.push(w);
             windows.tex_h.push(h);
+            windows.canvas_x.push(cx);
+            windows.canvas_y.push(cy);
             windows.swizzle.push(swizzle);
             windows.owns.push(owns);
         }
@@ -252,8 +268,11 @@ pub fn destroy_owned(windows: &mut Windows) {
     windows.tex_id.clear();
     windows.tex_w.clear();
     windows.tex_h.clear();
+    windows.canvas_x.clear();
+    windows.canvas_y.clear();
     windows.swizzle.clear();
     windows.owns.clear();
+    windows.place_x = 0.0;
 }
 
 //
@@ -263,6 +282,7 @@ pub fn destroy_owned(windows: &mut Windows) {
 pub fn draw_toplevels(
     windows: &Windows,
     state: &State,
+    cam: &Camera,
     shader: Shader,
     alpha_loc: i32,
     swizzle_loc: i32,
@@ -290,11 +310,17 @@ pub fn draw_toplevels(
         // Both shm uploads and dmabuf EGLImages keep the buffer's top-left
         // origin, so no vertical flip is needed.
         let source = Rectangle { x: 0.0, y: 0.0, width: tw as f32, height: th as f32 };
+
+        // Place the window on the canvas, mapped through the camera. The buffer
+        // is (tw, th) canvas units; zoom scales it to screen pixels.
+        let (sx, sy) = camera::canvas_to_screen(
+            cam, screen_w, screen_h, windows.canvas_x[i], windows.canvas_y[i],
+        );
         let dest = Rectangle {
-            x: ((screen_w - tw) / 2) as f32,
-            y: ((screen_h - th) / 2) as f32,
-            width: tw as f32,
-            height: th as f32,
+            x: sx,
+            y: sy,
+            width: tw as f32 * cam.zoom,
+            height: th as f32 * cam.zoom,
         };
 
         ray::begin_shader_mode(shader);

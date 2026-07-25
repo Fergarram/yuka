@@ -16,6 +16,18 @@ pub const PIXELFORMAT_R8G8B8A8: i32 = 7;
 // SetShaderValue uniform type for a single float.
 pub const SHADER_UNIFORM_FLOAT: i32 = 0;
 
+// raylib key codes we use for camera control.
+pub const KEY_MINUS: i32 = 45;
+pub const KEY_EQUAL: i32 = 61;
+pub const KEY_A: i32 = 65;
+pub const KEY_D: i32 = 68;
+pub const KEY_S: i32 = 83;
+pub const KEY_W: i32 = 87;
+pub const KEY_KP_SUBTRACT: i32 = 333;
+pub const KEY_KP_ADD: i32 = 334;
+pub const KEY_LEFT_CONTROL: i32 = 341;
+pub const KEY_RIGHT_CONTROL: i32 = 345;
+
 //
 // Types
 //
@@ -77,6 +89,8 @@ extern "C" {
     fn ClearBackground(color: Color);
     fn GetScreenWidth() -> c_int;
     fn GetScreenHeight() -> c_int;
+    fn GetFrameTime() -> f32;
+    fn IsKeyDown(key: c_int) -> bool;
     fn TakeScreenshot(file_name: *const c_char);
 
     fn DrawTexturePro(
@@ -160,6 +174,14 @@ pub fn screen_width() -> i32 {
 
 pub fn screen_height() -> i32 {
     unsafe { GetScreenHeight() }
+}
+
+pub fn frame_time() -> f32 {
+    unsafe { GetFrameTime() }
+}
+
+pub fn is_key_down(key: i32) -> bool {
+    unsafe { IsKeyDown(key) }
 }
 
 pub fn take_screenshot(path: &str) {

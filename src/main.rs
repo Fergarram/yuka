@@ -7,6 +7,7 @@
 // Infinite canvas and input come next.
 //
 
+mod camera;
 mod egl;
 mod ray;
 mod render;
@@ -95,9 +96,20 @@ fn main() {
 
     let mut windows = render::windows_new();
     let mut dmabuf_cache = render::dmabuf_cache_new();
-    let client_cmd =
-        std::env::args().nth(1).unwrap_or_else(|| "weston-simple-egl".to_string());
-    let mut child = spawn_client(&server.socket_name, &client_cmd);
+    let mut cam = camera::camera_new();
+
+    // Spawn a few test clients (shm terminals + dmabuf triangles) so the canvas
+    // has several windows to pan and zoom around.
+    let test_clients = [
+        "weston-terminal",
+        "weston-simple-egl",
+        "weston-terminal",
+        "weston-simple-egl",
+    ];
+    let mut children: Vec<Child> = test_clients
+        .iter()
+        .filter_map(|c| spawn_client(&server.socket_name, c))
+        .collect();
 
     let start = Instant::now();
     let clear = ray::Color { r: 24, g: 24, b: 32, a: 255 };
@@ -154,9 +166,11 @@ fn main() {
         }
         wl::state::flush(&mut server);
 
+        camera::camera_update(&mut cam);
+
         ray::begin_drawing();
         ray::clear_background(clear);
-        render::draw_toplevels(&windows, &state, shader, alpha_loc, swizzle_loc);
+        render::draw_toplevels(&windows, &state, &cam, shader, alpha_loc, swizzle_loc);
         if screenshot && frame == SHOT_FRAME {
             ray::take_screenshot("shot.png");
         }
@@ -171,7 +185,7 @@ fn main() {
         max_dt_ms,
         slow_frames
     );
-    if let Some(mut c) = child.take() {
+    for mut c in children.drain(..) {
         let _ = c.kill();
         let _ = c.wait();
     }
