@@ -90,6 +90,7 @@ fn route_input(
     kb: Option<&kbd::Keyboard>,
     pressed: bool,
     released: bool,
+    moved: bool,
     time_ms: u32,
 ) {
     let Some((cxp, cyp)) = cursor_pos else { return };
@@ -138,15 +139,19 @@ fn route_input(
         }
     }
 
-    // While focused, forward pointer motion (hover/drag) into that window.
+    // While focused, forward pointer motion (hover/drag) into that window, but
+    // only when the cursor actually moved. Forwarding every frame makes clients
+    // treat a still pointer as continuous motion (e.g. weston-smoke never stops
+    // emitting).
     if let Some(surf) = focused.clone() {
         match render::window_origin(windows, &surf) {
-            Some((ox, oy)) => {
+            Some((ox, oy)) if moved => {
                 let origin = Point::<f64, Logical>::from((ox as f64, oy as f64));
                 let serial = SERIAL_COUNTER.next_serial();
                 pointer.motion(state, Some((surf.clone(), origin)), &MotionEvent { location: loc, serial, time: time_ms });
                 pointer.frame(state);
             }
+            Some(_) => {} // focused, cursor still: nothing to forward
             None => leave(state, focused), // focused window went away
         }
     }
@@ -247,6 +252,10 @@ fn main() {
     let mut focused: Option<WlSurface> = None;
     // Active Super+drag: (window, offset from cursor to the window's origin).
     let mut drag: Option<(WlSurface, f32, f32)> = None;
+    // Last cursor position we forwarded, to avoid spamming clients with motion
+    // events every frame while the pointer is still (weston-smoke, for one,
+    // emits smoke on every motion event it receives).
+    let mut last_cursor: Option<(i32, i32)> = None;
     // Windows easing back down after a drop. Each entry is the surface plus its
     // world center and z at release; we hold the visual (screen) center fixed as
     // z returns to 0 so perspective does not slide it toward the screen center.
@@ -445,6 +454,8 @@ fn main() {
             });
         }
 
+        let moved = cursor_pos != last_cursor;
+        last_cursor = cursor_pos;
         route_input(
             &mut state,
             &mut windows,
@@ -454,6 +465,7 @@ fn main() {
             keyboard.as_ref(),
             pressed,
             released,
+            moved,
             start.elapsed().as_millis() as u32,
         );
         if let Some(kb) = keyboard.as_ref() {
