@@ -334,11 +334,10 @@ fn main() {
              ctrl+alt+backspace quits"
         );
     }
-    // The trackpad, when it is ours to read raw rather than libinput's.
-    let mut touchpad = match inp.as_ref() {
-        Some(i) if input::trackpad_custom(i) => touch::open(),
-        _ => None,
-    };
+    // The trackpad, when it is ours to read raw rather than libinput's. libinput
+    // says which node that is and when it changes, so the loop opens it on its
+    // first pass and there is no second path here to keep in step.
+    let mut touchpad: Option<touch::Touchpad> = None;
     // The window we are interacting with; while Some, pan/zoom is disabled.
     let mut focused: Option<WlSurface> = None;
     // Active Super+drag: (window, offset from cursor to the window's origin).
@@ -500,6 +499,16 @@ fn main() {
                 println!("om_wm: switching to vt{target}");
                 continue;
             }
+        }
+
+        // Follow libinput on which trackpad, if any, is ours to read raw: it tells
+        // us when one appears or goes away, which covers hotplug and the
+        // close/reopen a session switch does.
+        if inp.as_mut().map(input::trackpad_changed).unwrap_or(false) {
+            if let Some(tp) = touchpad.as_mut() {
+                touch::close(tp);
+            }
+            touchpad = inp.as_ref().and_then(input::trackpad_node).and_then(touch::open);
         }
 
         let super_down = inp.as_ref().map(input::super_down).unwrap_or(false);

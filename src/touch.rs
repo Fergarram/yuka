@@ -11,7 +11,6 @@
 //
 
 use std::ffi::{c_void, CString};
-use std::fs;
 
 use crate::camera::{self, Camera};
 use crate::cursor::{self, Cursor};
@@ -154,9 +153,10 @@ pub struct Touchpad {
 // Open
 //
 
-pub fn open() -> Option<Touchpad> {
-    let path = find_touchpad()?;
-    let c = CString::new(path.clone()).ok()?;
+// The node comes from libinput, which already knows which device is a touchpad,
+// so there is no discovery here to get wrong.
+pub fn open(path: &str) -> Option<Touchpad> {
+    let c = CString::new(path).ok()?;
     let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
     if fd < 0 {
         eprintln!("om_wm: touchpad open failed: {path}");
@@ -232,35 +232,13 @@ fn abs_span(fd: i32, axis: u16) -> Option<f32> {
     }
 }
 
-// Find the trackpad's event node via /proc/bus/input/devices (a multitouch
-// device by name). Returns e.g. "/dev/input/event4".
-fn find_touchpad() -> Option<String> {
-    let text = fs::read_to_string("/proc/bus/input/devices").ok()?;
-    for block in text.split("\n\n") {
-        let mut is_pad = false;
-        let mut event: Option<String> = None;
-        for line in block.lines() {
-            if let Some(name) = line.strip_prefix("N: Name=") {
-                let low = name.to_lowercase();
-                is_pad = low.contains("bcm5974")
-                    || low.contains("trackpad")
-                    || low.contains("touchpad");
-            }
-            if let Some(handlers) = line.strip_prefix("H: Handlers=") {
-                for tok in handlers.split_whitespace() {
-                    if let Some(n) = tok.strip_prefix("event") {
-                        event = Some(n.to_string());
-                    }
-                }
-            }
-        }
-        if is_pad {
-            if let Some(n) = event {
-                return Some(format!("/dev/input/event{n}"));
-            }
-        }
+// Close the device, for when it is unplugged or libinput hands us a different
+// one.
+pub fn close(tp: &mut Touchpad) {
+    if tp.fd >= 0 {
+        unsafe { libc::close(tp.fd) };
+        tp.fd = -1;
     }
-    None
 }
 
 //

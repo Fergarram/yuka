@@ -148,6 +148,13 @@ pub struct Input {
     frac_y: f32,
     keyboards: u32,
     pointers: u32,
+    // Device node of the trackpad we muted for touch.rs, as libinput reports it.
+    // None when there is none, or when the trackpad is libinput's to drive.
+    trackpad: Option<String>,
+    // Set whenever that trackpad appeared or went away, so the raw reader is
+    // reopened rather than left on a stale fd. An unplug and replug can land on
+    // the same node, so the node alone is not enough to notice.
+    trackpad_changed: bool,
 }
 
 // libinput opens device nodes through us.
@@ -225,6 +232,8 @@ pub fn init(grab: bool) -> Option<Input> {
         frac_y: 0.0,
         keyboards: 0,
         pointers: 0,
+        trackpad: None,
+        trackpad_changed: false,
     };
     // Drain the initial device list, so devices are counted and the trackpad is
     // muted before the first frame rather than after it.
@@ -417,14 +426,18 @@ fn added(inp: &mut Input, dev: &Device) {
     }
     let pad = is_touchpad(dev);
     if pad && inp.mode == TrackpadMode::Custom {
-        // Mute it here; touch.rs reads the same device raw for gestures.
+        // Mute it here; touch.rs reads the same device raw for gestures. libinput
+        // found it and names its node, so nothing has to guess at either.
         if dev.config_send_events_set_mode(SendEventsMode::DISABLED).is_err() {
             eprintln!(
                 "om_wm: input: could not mute {} in libinput, it will fight touch.rs",
                 dev.name()
             );
         } else {
-            println!("om_wm: input + {} (trackpad, muted for touch.rs)", dev.name());
+            let node = node_of(dev);
+            println!("om_wm: input + {} (trackpad {node}, muted for touch.rs)", dev.name());
+            inp.trackpad = Some(node);
+            inp.trackpad_changed = true;
             return;
         }
     }
@@ -432,6 +445,10 @@ fn added(inp: &mut Input, dev: &Device) {
 }
 
 fn removed(inp: &mut Input, dev: &Device) {
+    if inp.trackpad.as_deref() == Some(node_of(dev).as_str()) {
+        inp.trackpad = None;
+        inp.trackpad_changed = true;
+    }
     if dev.has_capability(DeviceCapability::Keyboard) {
         inp.keyboards = inp.keyboards.saturating_sub(1);
     }
@@ -439,6 +456,11 @@ fn removed(inp: &mut Input, dev: &Device) {
         inp.pointers = inp.pointers.saturating_sub(1);
     }
     println!("om_wm: input - {}", dev.name());
+}
+
+// Where the device lives, from libinput's sysname (e.g. "event8").
+fn node_of(dev: &Device) -> String {
+    format!("/dev/input/{}", dev.sysname())
 }
 
 // libinput's own test for a touchpad: a pointer that reports a tap finger count.
@@ -478,10 +500,17 @@ pub fn alt_down(inp: &Input) -> bool {
     down(inp, KEY_LEFTALT) || down(inp, KEY_RIGHTALT)
 }
 
-// Whether the trackpad is ours to read raw, which is what decides if touch.rs
-// gets opened at all.
-pub fn trackpad_custom(inp: &Input) -> bool {
-    inp.mode == TrackpadMode::Custom
+// The trackpad node touch.rs should be reading, if any.
+pub fn trackpad_node(inp: &Input) -> Option<&str> {
+    inp.trackpad.as_deref()
+}
+
+// Whether that trackpad came or went since this was last asked. Read and clear,
+// so the caller reopens exactly once per change.
+pub fn trackpad_changed(inp: &mut Input) -> bool {
+    let changed = inp.trackpad_changed;
+    inp.trackpad_changed = false;
+    changed
 }
 
 //
