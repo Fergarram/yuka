@@ -11,6 +11,7 @@ mod camera;
 mod egl;
 mod ray;
 mod render;
+mod touch;
 mod wl;
 
 use std::ffi::c_int;
@@ -97,6 +98,7 @@ fn main() {
     let mut windows = render::windows_new();
     let mut dmabuf_cache = render::dmabuf_cache_new();
     let mut cam = camera::camera_new();
+    let mut touchpad = touch::open();
 
     // Spawn a few test clients (shm terminals + dmabuf triangles) so the canvas
     // has several windows to pan and zoom around.
@@ -166,6 +168,9 @@ fn main() {
         }
         wl::state::flush(&mut server);
 
+        if let Some(tp) = touchpad.as_mut() {
+            touch::update(tp, &mut cam);
+        }
         camera::camera_update(&mut cam);
 
         ray::begin_drawing();
