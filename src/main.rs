@@ -36,6 +36,8 @@ use wl::state::State;
 // Constants
 //
 
+// Default frame for OM_WM_SHOT; OM_WM_SHOT=<n> picks another, which matters when
+// what you want to see only exists a few seconds in.
 const SHOT_FRAME: u32 = 200;
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
@@ -296,7 +298,13 @@ fn main() {
     let swizzle_loc = ray::shader_location(shader, "swizzleBgra");
 
     let (mut server, mut state) =
-        wl::state::init(dmabuf_formats, render_node_dev).expect("wayland init");
+        wl::state::init(
+            dmabuf_formats,
+            render_node_dev,
+            ray::screen_width(),
+            ray::screen_height(),
+        )
+        .expect("wayland init");
     println!("om_wm: WAYLAND_DISPLAY={}", server.socket_name);
 
     let mut windows = render::windows_new();
@@ -367,7 +375,12 @@ fn main() {
     let start = Instant::now();
     let clear = ray::Color { r: 24, g: 24, b: 32, a: 255 };
     let mut frame: u32 = 0;
-    let screenshot = std::env::var("OM_WM_SHOT").is_ok();
+    let shot_env = std::env::var("OM_WM_SHOT");
+    let screenshot = shot_env.is_ok();
+    let shot_frame: u32 = shot_env
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(SHOT_FRAME);
     let max_frames: u32 = std::env::var("OM_WM_MAX_FRAMES")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -734,7 +747,7 @@ fn main() {
         ray::begin_drawing();
         ray::clear_background(clear);
         render::draw_windows(&windows, cam3d, shader, alpha_loc, swizzle_loc);
-        if screenshot && frame == SHOT_FRAME {
+        if screenshot && frame == shot_frame {
             ray::take_screenshot("shot.png");
         }
         ray::end_drawing();

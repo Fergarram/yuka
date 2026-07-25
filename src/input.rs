@@ -371,17 +371,31 @@ fn pointer_event(inp: &mut Input, p: &mut Pointer, event: PointerEvent) {
         }
         // Vertical axes are negated here: libinput counts down as positive, we
         // count up as positive (see Pointer).
+        // Each axis has to be checked before it is read: asking for an axis the
+        // event does not carry is a client bug and libinput says so, loudly.
         PointerEvent::ScrollWheel(e) => {
-            p.wheel -= e.scroll_value_v120(Axis::Vertical) as f32 / V120_PER_NOTCH;
-            p.hwheel += e.scroll_value_v120(Axis::Horizontal) as f32 / V120_PER_NOTCH;
+            if e.has_axis(Axis::Vertical) {
+                p.wheel -= e.scroll_value_v120(Axis::Vertical) as f32 / V120_PER_NOTCH;
+            }
+            if e.has_axis(Axis::Horizontal) {
+                p.hwheel += e.scroll_value_v120(Axis::Horizontal) as f32 / V120_PER_NOTCH;
+            }
         }
         PointerEvent::ScrollFinger(e) => {
-            p.scroll_x += e.scroll_value(Axis::Horizontal) as f32;
-            p.scroll_y -= e.scroll_value(Axis::Vertical) as f32;
+            if e.has_axis(Axis::Horizontal) {
+                p.scroll_x += e.scroll_value(Axis::Horizontal) as f32;
+            }
+            if e.has_axis(Axis::Vertical) {
+                p.scroll_y -= e.scroll_value(Axis::Vertical) as f32;
+            }
         }
         PointerEvent::ScrollContinuous(e) => {
-            p.scroll_x += e.scroll_value(Axis::Horizontal) as f32;
-            p.scroll_y -= e.scroll_value(Axis::Vertical) as f32;
+            if e.has_axis(Axis::Horizontal) {
+                p.scroll_x += e.scroll_value(Axis::Horizontal) as f32;
+            }
+            if e.has_axis(Axis::Vertical) {
+                p.scroll_y -= e.scroll_value(Axis::Vertical) as f32;
+            }
         }
         // Absolute pointers (tablets, touchscreens) are not mapped yet.
         _ => {}

@@ -309,6 +309,10 @@ fn store_entry(
             windows.swizzle.push(swizzle);
             windows.owns.push(owns);
             windows.popup.push(popup);
+            println!(
+                "om_wm: {} + {w}x{h} at {cx:.0},{cy:.0}",
+                if popup { "popup" } else { "window" }
+            );
         }
     }
 }

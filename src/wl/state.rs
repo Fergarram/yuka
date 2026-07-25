@@ -19,6 +19,9 @@ use smithay::reexports::wayland_server::{
 };
 use smithay::desktop::{PopupKind, PopupManager};
 use smithay::input::keyboard::{KeyboardHandle, XkbConfig};
+use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
+use smithay::reexports::wayland_server::backend::GlobalId;
+use smithay::wayland::output::{OutputHandler, OutputManagerState};
 use smithay::input::pointer::{CursorImageStatus, PointerHandle};
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::utils::Serial;
@@ -29,8 +32,8 @@ use smithay::wayland::compositor::{
 };
 use smithay::wayland::shm::with_buffer_contents;
 use smithay::wayland::shell::xdg::{
-    PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler,
-    XdgShellState,
+    PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface,
+    XdgShellHandler, XdgShellState,
 };
 use smithay::wayland::dmabuf::{
     get_dmabuf, DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState,
@@ -39,8 +42,8 @@ use smithay::wayland::dmabuf::{
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::{
-    delegate_compositor, delegate_dmabuf, delegate_seat, delegate_shm,
-    delegate_viewporter, delegate_xdg_shell,
+    delegate_compositor, delegate_dmabuf, delegate_output, delegate_seat,
+    delegate_shm, delegate_viewporter, delegate_xdg_shell,
 };
 
 use smithay::backend::allocator::dmabuf::Dmabuf;
@@ -59,6 +62,14 @@ pub struct State {
     #[allow(dead_code)]
     pub viewporter_state: ViewporterState,
     pub seat_state: SeatState<State>,
+    // The wl_output clients size themselves against, plus its global and the
+    // xdg_output manager. Held to keep them registered.
+    #[allow(dead_code)]
+    pub output: Output,
+    #[allow(dead_code)]
+    pub output_global: GlobalId,
+    #[allow(dead_code)]
+    pub output_manager_state: OutputManagerState,
     // Held to keep the wl_seat global alive; used for the keyboard next.
     #[allow(dead_code)]
     pub seat: Seat<State>,
@@ -112,6 +123,8 @@ impl ClientData for ClientState {
 pub fn init(
     dmabuf_formats: Vec<(u32, u64)>,
     render_node_dev: Option<u64>,
+    screen_w: i32,
+    screen_h: i32,
 ) -> Result<(Server, State), Box<dyn std::error::Error>> {
     let display: Display<State> = Display::new()?;
     let dh = display.handle();
@@ -120,6 +133,26 @@ pub fn init(
     let shm_state = ShmState::new::<State>(&dh, vec![]);
     let xdg_state = XdgShellState::new::<State>(&dh);
     let viewporter_state = ViewporterState::new::<State>(&dh);
+
+    // A wl_output, and xdg_output alongside it. Toolkits that derive their scale
+    // and window sizing from an output (GTK, Chromium) never map a window without
+    // one, so its absence looks exactly like a client that silently does nothing.
+    // One output the size of the screen, even though the canvas is unbounded: it
+    // is what clients size themselves against.
+    let output = Output::new(
+        "om_wm-0".to_string(),
+        PhysicalProperties {
+            size: (0, 0).into(),
+            subpixel: Subpixel::Unknown,
+            make: "om_wm".to_string(),
+            model: "canvas".to_string(),
+        },
+    );
+    let mode = Mode { size: (screen_w, screen_h).into(), refresh: 60_000 };
+    output.change_current_state(Some(mode), None, None, Some((0, 0).into()));
+    output.set_preferred(mode);
+    let output_global = output.create_global::<State>(&dh);
+    let output_manager_state = OutputManagerState::new_with_xdg_output::<State>(&dh);
     let mut seat_state = SeatState::new();
     // wl_seat with a pointer so clients can receive pointer events.
     let mut seat = seat_state.new_wl_seat(&dh, "seat0");
@@ -167,6 +200,9 @@ pub fn init(
         xdg_state,
         viewporter_state,
         seat_state,
+        output,
+        output_global,
+        output_manager_state,
         seat,
         pointer,
         keyboard,
@@ -244,14 +280,41 @@ pub fn is_popup(state: &State, surface: &WlSurface) -> bool {
     state.popups.find_popup(surface).is_some()
 }
 
-// The popups of a toplevel, each with its offset from that toplevel's origin.
-// Smithay resolves the positioner and the nesting; this is just the read.
+// The popups of a toplevel, each with the offset of its surface's top-left from
+// that toplevel's surface top-left. Smithay resolves the positioner and the
+// nesting; the two geometry terms convert between window geometry and surface
+// coordinates, which differ by however much each client pads for shadows:
+//
+//   surface offset = parent geometry loc + popup offset - popup geometry loc
+//
+// Without them a menu lands wherever the client's shadow margins happen to put
+// it rather than at the pointer.
 pub fn popups_of(root: &WlSurface) -> Vec<(WlSurface, f32, f32)> {
+    let (rx, ry) = geometry_loc(root);
     PopupManager::popups_for_surface(root)
         .map(|(popup, offset)| {
-            (popup.wl_surface().clone(), offset.x as f32, offset.y as f32)
+            let g = popup.geometry().loc;
+            (
+                popup.wl_surface().clone(),
+                rx + (offset.x - g.x) as f32,
+                ry + (offset.y - g.y) as f32,
+            )
         })
         .collect()
+}
+
+// Where a surface's window geometry starts relative to the surface itself, as set
+// by xdg_surface::set_window_geometry. Non-zero for clients that draw shadows.
+fn geometry_loc(surface: &WlSurface) -> (f32, f32) {
+    with_states(surface, |states| {
+        states
+            .cached_state
+            .get::<SurfaceCachedState>()
+            .current()
+            .geometry
+            .map(|g| (g.loc.x as f32, g.loc.y as f32))
+            .unwrap_or((0.0, 0.0))
+    })
 }
 
 // Tell every open popup it is done, which is how a menu closes when the click
@@ -443,6 +506,9 @@ impl CompositorHandler for State {
     }
 }
 
+// Nothing to do on bind: one static output, no per-client state.
+impl OutputHandler for State {}
+
 impl BufferHandler for State {
     fn buffer_destroyed(&mut self, buffer: &WlBuffer) {
         self.dead_dmabufs.push(buffer.id());
@@ -525,3 +591,4 @@ delegate_xdg_shell!(State);
 delegate_viewporter!(State);
 delegate_dmabuf!(State);
 delegate_seat!(State);
+delegate_output!(State);
