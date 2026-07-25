@@ -23,7 +23,7 @@ use smithay::reexports::wayland_server::Resource;
 //
 
 // How high (canvas units) a window rises while lifted, and how fast z animates.
-const LIFT_HEIGHT: f32 = 250.0;
+const LIFT_HEIGHT: f32 = 125.0;
 const LIFT_RATE: f32 = 14.0;
 
 //
@@ -161,6 +161,29 @@ pub fn window_at(
 // Canvas origin of a specific surface, if present.
 pub fn window_origin(windows: &Windows, surface: &WlSurface) -> Option<(f32, f32)> {
     index_of(windows, surface).map(|i| (windows.canvas_x[i], windows.canvas_y[i]))
+}
+
+// Current lifted z of a specific surface, if present.
+pub fn window_z(windows: &Windows, surface: &WlSurface) -> Option<f32> {
+    index_of(windows, surface).map(|i| windows.z[i])
+}
+
+// Canvas position of a window's center (origin + half its texture size).
+pub fn window_center(windows: &Windows, surface: &WlSurface) -> Option<(f32, f32)> {
+    index_of(windows, surface).map(|i| {
+        (
+            windows.canvas_x[i] + windows.tex_w[i] as f32 * 0.5,
+            windows.canvas_y[i] + windows.tex_h[i] as f32 * 0.5,
+        )
+    })
+}
+
+// Place a window so its center sits at the given canvas position.
+pub fn set_window_center(windows: &mut Windows, surface: &WlSurface, cx: f32, cy: f32) {
+    if let Some(i) = index_of(windows, surface) {
+        windows.canvas_x[i] = cx - windows.tex_w[i] as f32 * 0.5;
+        windows.canvas_y[i] = cy - windows.tex_h[i] as f32 * 0.5;
+    }
 }
 
 // Move a window to a canvas position.

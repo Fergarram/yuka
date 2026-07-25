@@ -247,6 +247,10 @@ fn main() {
     let mut focused: Option<WlSurface> = None;
     // Active Super+drag: (window, offset from cursor to the window's origin).
     let mut drag: Option<(WlSurface, f32, f32)> = None;
+    // Windows easing back down after a drop. Each entry is the surface plus its
+    // world center and z at release; we hold the visual (screen) center fixed as
+    // z returns to 0 so perspective does not slide it toward the screen center.
+    let mut settling: Vec<(WlSurface, f32, f32, f32)> = Vec::new();
 
     // Spawn a few test clients (shm terminals + dmabuf triangles) so the canvas
     // has several windows to pan and zoom around.
@@ -371,30 +375,74 @@ fn main() {
         let cam3d = camera::camera_3d(&cam, ray::screen_height());
         let cursor_pos = cursor.as_ref().map(cursor::pos);
 
-        // Super+drag: grab the window under the cursor, lift it toward the
-        // camera, and move it on the z=0 plane. Consumes the click so it is not
-        // also focused/forwarded.
+        // Super+drag: grab the window under the cursor and lift it toward the
+        // camera. Consumes the click so it is not also focused/forwarded. The
+        // window is positioned by projecting the cursor onto the plane at its
+        // current lifted z, so the grabbed point stays under the cursor at any
+        // zoom (projecting onto z=0 while drawing lifted makes it out-run the
+        // cursor via perspective parallax).
         let (sxp, syp) = cursor_pos
             .map(|(x, y)| (x as f32, y as f32))
             .unwrap_or((0.0, 0.0));
-        let (ccx, ccy) =
-            camera::screen_to_plane(cam3d, sxp, syp, 0.0).unwrap_or((0.0, 0.0));
         if pressed && super_down && drag.is_none() {
             if let Some((surf, ox, oy)) =
                 render::window_at(&windows, cam3d, sxp, syp)
             {
+                // Re-grabbing a still-settling window: cancel its settle.
+                settling.retain(|(s, ..)| s != &surf);
+                // Offset from the window origin to the grabbed point, captured
+                // on the z=0 plane (constant in world units, independent of z).
+                let (gx, gy) = camera::screen_to_plane(cam3d, sxp, syp, 0.0)
+                    .unwrap_or((ox, oy));
                 render::raise(&mut windows, &surf);
-                drag = Some((surf, ox - ccx, oy - ccy));
+                drag = Some((surf, ox - gx, oy - gy));
                 pressed = false;
             }
         }
         if let Some((surf, offx, offy)) = drag.clone() {
-            render::set_window_pos(&mut windows, &surf, ccx + offx, ccy + offy);
+            let z = render::window_z(&windows, &surf).unwrap_or(0.0);
+            if let Some((px, py)) = camera::screen_to_plane(cam3d, sxp, syp, z) {
+                render::set_window_pos(&mut windows, &surf, px + offx, py + offy);
+            }
             if released || !surf.is_alive() {
+                // Snapshot the visual center so it stays put while lowering.
+                if surf.is_alive() {
+                    if let (Some((cx, cy)), Some(z)) = (
+                        render::window_center(&windows, &surf),
+                        render::window_z(&windows, &surf),
+                    ) {
+                        settling.push((surf.clone(), cx, cy, z));
+                    }
+                }
                 render::settle(&mut windows, &surf);
                 drag = None;
                 released = false;
             }
+        }
+
+        // Ease dropped windows straight down: reproject the release-time screen
+        // center onto the plane at each window's current z, so it lowers in
+        // place instead of sliding toward the screen center. dist and the camera
+        // center come straight from the perspective camera.
+        {
+            let px = cam3d.position.x;
+            let py = cam3d.position.y;
+            let dist = -cam3d.position.z;
+            settling.retain(|(surf, cx0, cy0, z0)| {
+                if !surf.is_alive() {
+                    return false;
+                }
+                let Some(z) = render::window_z(&windows, surf) else {
+                    return false;
+                };
+                let keep = z.abs() > 0.5;
+                let zz = if keep { z } else { 0.0 };
+                let k = (zz + dist) / (*z0 + dist);
+                let cx = px + (*cx0 - px) * k;
+                let cy = py + (*cy0 - py) * k;
+                render::set_window_center(&mut windows, surf, cx, cy);
+                keep
+            });
         }
 
         route_input(
