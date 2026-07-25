@@ -262,6 +262,16 @@ fn forward_keys(
 //
 
 fn main() {
+    // Smithay and wayland-server report everything through tracing, including
+    // client protocol errors, and without a subscriber all of it is dropped. That
+    // is why a client dying used to leave no trace at all. OM_WM_LOG overrides the
+    // filter (e.g. OM_WM_LOG=debug, or OM_WM_LOG=smithay=trace).
+    let filter = std::env::var("OM_WM_LOG").unwrap_or_else(|_| "info".to_string());
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+        .with_writer(std::io::stderr)
+        .init();
+
     ray::init_window(0, 0, "om_wm");
     // No SetTargetFPS: the DRM page flip in EndDrawing already vsyncs to the
     // display. A second 60 Hz cap would beat against it and cause stutter.

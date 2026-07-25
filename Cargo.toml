@@ -11,6 +11,7 @@ path = "src/main.rs"
 smithay = { version = "0.7", default-features = false, features = ["wayland_frontend", "backend_drm", "desktop"] }
 libc = "0.2"
 input = "0.10.0"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [build-dependencies]
 cmake = "0.1"
