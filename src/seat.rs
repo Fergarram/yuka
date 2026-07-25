@@ -31,7 +31,7 @@
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::fs;
 
-use crate::kbd;
+use crate::input;
 
 //
 // Constants
@@ -345,8 +345,8 @@ pub fn chord(s: &Seat, events: &[(u16, bool)], ctrl: bool, alt: bool) -> Option<
             }
         }
         match code {
-            kbd::KEY_LEFT => return step(s, -1),
-            kbd::KEY_RIGHT => return step(s, 1),
+            input::KEY_LEFT => return step(s, -1),
+            input::KEY_RIGHT => return step(s, 1),
             _ => {}
         }
     }
@@ -355,9 +355,9 @@ pub fn chord(s: &Seat, events: &[(u16, bool)], ctrl: bool, alt: bool) -> Option<
 
 fn fkey_vt(code: u16) -> Option<u16> {
     match code {
-        kbd::KEY_F1..=kbd::KEY_F10 => Some(code - kbd::KEY_F1 + 1),
-        kbd::KEY_F11 => Some(11),
-        kbd::KEY_F12 => Some(12),
+        input::KEY_F1..=input::KEY_F10 => Some(code - input::KEY_F1 + 1),
+        input::KEY_F11 => Some(11),
+        input::KEY_F12 => Some(12),
         _ => None,
     }
 }

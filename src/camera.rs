@@ -7,7 +7,7 @@
 // gestures live in the touch module.
 //
 
-use crate::kbd::{self, Keyboard};
+use crate::input::{self, Input};
 use crate::ray;
 
 //
@@ -45,31 +45,31 @@ pub fn camera_new() -> Camera {
 // Advance the camera from held keys. Pan speed is constant in screen pixels, so
 // it feels the same at any zoom; zoom is exponential and keeps the screen center
 // fixed.
-pub fn camera_update(cam: &mut Camera, kb: Option<&Keyboard>) {
+pub fn camera_update(cam: &mut Camera, kb: Option<&Input>) {
     let Some(kb) = kb else {
         return;
     };
     let dt = ray::frame_time();
 
     let pan = PAN_PX_PER_SEC * dt / cam.zoom;
-    if kbd::down(kb, kbd::KEY_W) {
+    if input::down(kb, input::KEY_W) {
         cam.cy -= pan;
     }
-    if kbd::down(kb, kbd::KEY_S) {
+    if input::down(kb, input::KEY_S) {
         cam.cy += pan;
     }
-    if kbd::down(kb, kbd::KEY_A) {
+    if input::down(kb, input::KEY_A) {
         cam.cx -= pan;
     }
-    if kbd::down(kb, kbd::KEY_D) {
+    if input::down(kb, input::KEY_D) {
         cam.cx += pan;
     }
 
-    if kbd::super_down(kb) {
+    if input::super_down(kb) {
         let zoom_in =
-            kbd::down(kb, kbd::KEY_EQUAL) || kbd::down(kb, kbd::KEY_KPPLUS);
+            input::down(kb, input::KEY_EQUAL) || input::down(kb, input::KEY_KPPLUS);
         let zoom_out =
-            kbd::down(kb, kbd::KEY_MINUS) || kbd::down(kb, kbd::KEY_KPMINUS);
+            input::down(kb, input::KEY_MINUS) || input::down(kb, input::KEY_KPMINUS);
         let step = 1.0 + ZOOM_RATE_PER_SEC * dt;
         if zoom_in {
             cam.zoom *= step;

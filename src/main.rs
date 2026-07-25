@@ -10,8 +10,7 @@
 mod camera;
 mod cursor;
 mod egl;
-mod kbd;
-mod mouse;
+mod input;
 mod ray;
 mod render;
 mod seat;
@@ -39,8 +38,11 @@ use wl::state::State;
 
 const SHOT_FRAME: u32 = 200;
 const BTN_LEFT: u32 = 0x110;
+const BTN_RIGHT: u32 = 0x111;
 // Invert mouse-wheel direction (Mac-natural). Config toggle for now.
 const INVERT_SCROLL: bool = true;
+// Canvas pixels panned per horizontal wheel notch, at zoom 1.0.
+const HWHEEL_PAN: f32 = 60.0;
 // How long to sleep per iteration while another VT owns the display.
 const VT_IDLE_MS: u64 = 30;
 
@@ -78,46 +80,6 @@ fn spawn_client(socket_name: &str, cmd: &str) -> Option<Child> {
 }
 
 //
-// Input grabs
-//
-// Only for the no-session fallback. With a session, logind puts our VT in K_OFF
-// and keystrokes reach nobody but us, so grabbing would only take the devices
-// away from whoever owns the display while we are switched away. Without one, an
-// exclusive grab is the only thing keeping what we type out of the console.
-
-fn grab_all_input(
-    kb: &mut Option<kbd::Keyboard>,
-    mouse: &mut Option<mouse::Mouse>,
-    touchpad: &mut Option<touch::Touchpad>,
-) {
-    if let Some(kb) = kb.as_mut() {
-        kbd::set_grab(kb, true);
-    }
-    if let Some(m) = mouse.as_mut() {
-        mouse::set_grab(m, true);
-    }
-    if let Some(tp) = touchpad.as_mut() {
-        touch::set_grab(tp, true);
-    }
-}
-
-fn reset_input(
-    kb: &mut Option<kbd::Keyboard>,
-    mouse: &mut Option<mouse::Mouse>,
-    touchpad: &mut Option<touch::Touchpad>,
-) {
-    if let Some(kb) = kb.as_mut() {
-        kbd::reset(kb);
-    }
-    if let Some(m) = mouse.as_mut() {
-        mouse::reset(m);
-    }
-    if let Some(tp) = touchpad.as_mut() {
-        touch::reset(tp);
-    }
-}
-
-//
 // Pointer routing
 //
 // Turns the cursor position + click edges into Wayland pointer events for the
@@ -130,9 +92,11 @@ fn route_input(
     cam3d: ray::Camera3D,
     cursor_pos: Option<(i32, i32)>,
     focused: &mut Option<WlSurface>,
-    kb: Option<&kbd::Keyboard>,
+    kb: Option<&input::Input>,
     pressed: bool,
     released: bool,
+    right_pressed: bool,
+    right_released: bool,
     moved: bool,
     time_ms: u32,
 ) {
@@ -153,7 +117,7 @@ fn route_input(
 
     // Super+Escape unfocuses.
     let super_escape = kb
-        .map(|kb| kbd::super_down(kb) && kbd::down(kb, kbd::KEY_ESC))
+        .map(|kb| input::super_down(kb) && input::down(kb, input::KEY_ESC))
         .unwrap_or(false);
     if super_escape && focused.is_some() {
         leave(state, focused);
@@ -204,6 +168,20 @@ fn route_input(
         pointer.button(state, &ButtonEvent { serial, time: time_ms, button: BTN_LEFT, state: ButtonState::Released });
         pointer.frame(state);
     }
+
+    // Right button goes to whatever is already focused (context menus), it never
+    // changes focus itself.
+    if focused.is_some() && (right_pressed || right_released) {
+        if right_pressed {
+            let serial = SERIAL_COUNTER.next_serial();
+            pointer.button(state, &ButtonEvent { serial, time: time_ms, button: BTN_RIGHT, state: ButtonState::Pressed });
+        }
+        if right_released {
+            let serial = SERIAL_COUNTER.next_serial();
+            pointer.button(state, &ButtonEvent { serial, time: time_ms, button: BTN_RIGHT, state: ButtonState::Released });
+        }
+        pointer.frame(state);
+    }
 }
 
 // Tell the focused window that every key we think is held is up. Called before
@@ -212,7 +190,7 @@ fn route_input(
 // user types next.
 fn release_held_keys(
     state: &mut State,
-    kb: &kbd::Keyboard,
+    kb: &input::Input,
     focused: &Option<WlSurface>,
     time_ms: u32,
 ) {
@@ -220,7 +198,7 @@ fn release_held_keys(
         return;
     }
     let keyboard = state.keyboard.clone();
-    let held: Vec<u16> = kbd::keys(kb)
+    let held: Vec<u16> = input::keys(kb)
         .iter()
         .enumerate()
         .filter(|(_, down)| **down)
@@ -243,7 +221,7 @@ fn release_held_keys(
 // compositor shortcut (unfocus, handled in route_input) so it is not forwarded.
 fn forward_keys(
     state: &mut State,
-    kb: &kbd::Keyboard,
+    kb: &input::Input,
     focused: &Option<WlSurface>,
     time_ms: u32,
 ) {
@@ -251,8 +229,8 @@ fn forward_keys(
         return;
     }
     let keyboard = state.keyboard.clone();
-    for &(code, pressed) in kbd::events(kb) {
-        if code == kbd::KEY_ESC && kbd::super_down(kb) {
+    for &(code, pressed) in input::events(kb) {
+        if code == input::KEY_ESC && input::super_down(kb) {
             continue;
         }
         let key_state = if pressed {
@@ -320,42 +298,43 @@ fn main() {
     let mut windows = render::windows_new();
     let mut dmabuf_cache = render::dmabuf_cache_new();
     let mut cam = camera::camera_new();
-    let mut touchpad = touch::open();
-    let mut mouse = mouse::open();
     let mut cursor = cursor::init(ray::screen_width(), ray::screen_height());
-    let mut keyboard = kbd::open();
+
     // Session control. With it, logind owns our VT (K_OFF, KD_GRAPHICS) so the
     // switch chords are ours to implement and input needs no grab.
     //
     // Taking control makes us the only thing that can switch VTs, so we refuse it
-    // when we have no keyboard of our own to switch with: silencing the console
-    // then would leave the machine with no way off this VT at all. OM_WM_NO_SEAT
-    // opts out by hand, which is also what non-interactive runs want.
+    // when the machine has no keyboard to switch with: silencing the console then
+    // would leave no way off this VT at all. OM_WM_NO_SEAT opts out by hand, which
+    // is also what non-interactive runs want.
     let no_seat = std::env::var("OM_WM_NO_SEAT").is_ok();
-    let mut seat = if keyboard.is_some() && !no_seat {
+    let mut seat = if input::any_keyboard_present() && !no_seat {
         seat::init()
     } else {
-        if keyboard.is_none() {
+        if !input::any_keyboard_present() {
             eprintln!(
-                "om_wm: no keyboard of our own, so not taking session control: the \
-                 console keeps its own ctrl+alt+Fn. Is this shell in the input \
-                 group? Relaunch with: sg input -c './target/debug/om_wm'"
+                "om_wm: no keyboard on this machine, so not taking session control: \
+                 the console keeps its own ctrl+alt+Fn"
             );
         }
         None
     };
-    if seat.is_none() {
-        // No session: an exclusive grab is the only thing keeping what we type out
-        // of the console, and it costs us VT switching. ctrl+alt+backspace is then
-        // the only way out, so say so.
-        grab_all_input(&mut keyboard, &mut mouse, &mut touchpad);
-        if keyboard.is_some() {
-            println!(
-                "om_wm: no session control: input grabbed, no vt switching, \
-                 ctrl+alt+backspace quits"
-            );
-        }
+
+    // libinput drives keyboards and pointers. Without a session it grabs them as
+    // it opens them, since the console would otherwise read everything we type,
+    // and that costs us VT switching: ctrl+alt+backspace is then the way out.
+    let mut inp = input::init(seat.is_none());
+    if seat.is_none() && inp.is_some() {
+        println!(
+            "om_wm: no session control: input grabbed, no vt switching, \
+             ctrl+alt+backspace quits"
+        );
     }
+    // The trackpad, when it is ours to read raw rather than libinput's.
+    let mut touchpad = match inp.as_ref() {
+        Some(i) if input::trackpad_custom(i) => touch::open(),
+        _ => None,
+    };
     // The window we are interacting with; while Some, pan/zoom is disabled.
     let mut focused: Option<WlSurface> = None;
     // Active Super+drag: (window, offset from cursor to the window's origin).
@@ -415,15 +394,25 @@ fn main() {
                     if let Some(c) = cursor.as_mut() {
                         cursor::rearm(c);
                     }
-                    // Input that arrived while another VT had the display was not
-                    // meant for us.
-                    reset_input(&mut keyboard, &mut mouse, &mut touchpad);
+                    // libinput reopens the devices; input that arrived while
+                    // another VT had them was not meant for us.
+                    if let Some(i) = inp.as_mut() {
+                        input::resume(i);
+                    }
+                    if let Some(tp) = touchpad.as_mut() {
+                        touch::reset(tp);
+                    }
                     last = Instant::now();
                     println!("om_wm: back on vt{}", seat::our_vt(s));
                 } else {
-                    if let Some(kb) = keyboard.as_ref() {
+                    if let Some(i) = inp.as_ref() {
                         let t = start.elapsed().as_millis() as u32;
-                        release_held_keys(&mut state, kb, &focused, t);
+                        release_held_keys(&mut state, i, &focused, t);
+                    }
+                    // Let go of the devices so the session taking over can have
+                    // them.
+                    if let Some(i) = inp.as_mut() {
+                        input::suspend(i);
                     }
                     println!("om_wm: session inactive, display released");
                 }
@@ -475,17 +464,17 @@ fn main() {
         }
         wl::state::flush(&mut server);
 
-        if let Some(kb) = keyboard.as_mut() {
-            kbd::poll(kb);
+        if let Some(i) = inp.as_mut() {
+            input::poll(i);
         }
 
         // Quit chord (ctrl+alt+backspace, the traditional one). While we hold the
         // keyboard grab, ctrl+c in the shell that launched us cannot reach it, so
         // without this there is no way to stop om_wm from the keyboard at all.
-        if let Some(kb) = keyboard.as_ref() {
-            let quit = kbd::ctrl_down(kb)
-                && kbd::alt_down(kb)
-                && kbd::events(kb).iter().any(|&(c, p)| p && c == kbd::KEY_BACKSPACE);
+        if let Some(i) = inp.as_ref() {
+            let quit = input::ctrl_down(i)
+                && input::alt_down(i)
+                && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_BACKSPACE);
             if quit {
                 println!("om_wm: ctrl+alt+backspace, quitting");
                 RUNNING.store(false, Ordering::Relaxed);
@@ -494,9 +483,9 @@ fn main() {
 
         // VT switch chord (ctrl+alt+Fn, alt+left/right). The deactivation itself
         // comes back through libseat, which is where the display is released.
-        let vt_target = match (seat.as_ref(), keyboard.as_ref()) {
-            (Some(s), Some(kb)) => {
-                seat::chord(s, kbd::events(kb), kbd::ctrl_down(kb), kbd::alt_down(kb))
+        let vt_target = match (seat.as_ref(), inp.as_ref()) {
+            (Some(s), Some(i)) => {
+                seat::chord(s, input::events(i), input::ctrl_down(i), input::alt_down(i))
             }
             _ => None,
         };
@@ -507,7 +496,7 @@ fn main() {
             }
         }
 
-        let super_down = keyboard.as_ref().map(kbd::super_down).unwrap_or(false);
+        let super_down = inp.as_ref().map(input::super_down).unwrap_or(false);
         let gestures_enabled = focused.is_none();
         // Suppress trackpad gestures while Super is held (reserved for window
         // manipulation) so a pinch does not zoom the canvas.
@@ -521,28 +510,50 @@ fn main() {
             None => (false, false),
         };
 
-        // External mouse: relative motion moves the cursor, click adds to the
-        // click edges, wheel zooms the canvas at the cursor when unfocused.
-        if let Some(m) = mouse.as_mut() {
-            let mf = mouse::poll(m);
-            if let Some(cur) = cursor.as_mut() {
-                cursor::move_by(cur, mf.dx, mf.dy);
-            }
-            // Wheel-click drag also pans; moving the cursor by the same delta
-            // keeps the grabbed canvas point exactly under the cursor.
-            if mf.middle && gestures_enabled {
-                cam.cx -= mf.dx as f32 / cam.zoom;
-                cam.cy -= mf.dy as f32 / cam.zoom;
-            }
-            pressed |= mf.pressed;
-            released |= mf.released;
-            if gestures_enabled && mf.wheel != 0 {
-                let (cxp, cyp) = cursor.as_ref().map(cursor::pos).unwrap_or((0, 0));
-                let wheel = if INVERT_SCROLL { -mf.wheel } else { mf.wheel };
-                let factor = 1.15_f32.powi(wheel);
+        // Pointers, as libinput reports them: motion moves the cursor, clicks add
+        // to the click edges, the wheel zooms at the cursor when unfocused. In
+        // Libinput trackpad mode the scroll and pinch fields carry the trackpad
+        // too; in Custom mode they stay zero because the device is muted there.
+        let ptr = inp.as_ref().map(input::pointer).unwrap_or_default();
+        if let Some(cur) = cursor.as_mut() {
+            cursor::move_by(cur, ptr.dx as i32, ptr.dy as i32);
+        }
+        // Wheel-click drag also pans; moving the cursor by the same delta keeps
+        // the grabbed canvas point exactly under the cursor.
+        if ptr.middle && gestures_enabled {
+            cam.cx -= ptr.dx / cam.zoom;
+            cam.cy -= ptr.dy / cam.zoom;
+        }
+        pressed |= ptr.left_pressed;
+        released |= ptr.left_released;
+        if gestures_enabled {
+            let (cxp, cyp) = cursor.as_ref().map(cursor::pos).unwrap_or((0, 0));
+            if ptr.wheel != 0.0 {
+                let wheel = if INVERT_SCROLL { -ptr.wheel } else { ptr.wheel };
                 camera::zoom_at(
                     &mut cam,
-                    factor,
+                    1.15_f32.powf(wheel),
+                    cxp as f32,
+                    cyp as f32,
+                    ray::screen_width() as f32,
+                    ray::screen_height() as f32,
+                );
+            }
+            if ptr.hwheel != 0.0 {
+                let hwheel = if INVERT_SCROLL { -ptr.hwheel } else { ptr.hwheel };
+                cam.cx += hwheel * HWHEEL_PAN / cam.zoom;
+            }
+            // Finger scroll pans, pinch zooms at the cursor. The camera moves
+            // against the fingers so the canvas travels with them, matching
+            // touch.rs.
+            if ptr.scroll_x != 0.0 || ptr.scroll_y != 0.0 {
+                cam.cx -= ptr.scroll_x / cam.zoom;
+                cam.cy += ptr.scroll_y / cam.zoom;
+            }
+            if ptr.pinch != 1.0 {
+                camera::zoom_at(
+                    &mut cam,
+                    ptr.pinch,
                     cxp as f32,
                     cyp as f32,
                     ray::screen_width() as f32,
@@ -552,7 +563,7 @@ fn main() {
         }
 
         if gestures_enabled {
-            camera::camera_update(&mut cam, keyboard.as_ref());
+            camera::camera_update(&mut cam, inp.as_ref());
         }
         render::prune_dead(&mut windows);
         render::animate(&mut windows, ray::frame_time());
@@ -637,16 +648,18 @@ fn main() {
             cam3d,
             cursor_pos,
             &mut focused,
-            keyboard.as_ref(),
+            inp.as_ref(),
             pressed,
             released,
+            ptr.right_pressed,
+            ptr.right_released,
             moved,
             start.elapsed().as_millis() as u32,
         );
-        if let Some(kb) = keyboard.as_ref() {
+        if let Some(i) = inp.as_ref() {
             forward_keys(
                 &mut state,
-                kb,
+                i,
                 &focused,
                 start.elapsed().as_millis() as u32,
             );

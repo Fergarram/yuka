@@ -32,8 +32,6 @@ const BTN_LEFT: u16 = 0x110;
 // struct input_event is 24 bytes on 64-bit Linux: 16-byte timeval, u16 type,
 // u16 code, i32 value.
 const EVENT_SIZE: usize = 24;
-// EVIOCGRAB = _IOW('E', 0x90, int): grab a device exclusively.
-const EVIOCGRAB: libc::c_ulong = 0x4004_4590;
 
 const MAX_SLOTS: usize = 16;
 
@@ -114,7 +112,8 @@ pub fn open() -> Option<Touchpad> {
         eprintln!("om_wm: touchpad open failed: {path}");
         return None;
     }
-    unsafe { libc::ioctl(fd, EVIOCGRAB, 1 as libc::c_int) };
+    // Not grabbed: in Custom mode libinput already has this device muted, and a
+    // grab here would only starve libinput's own handle on it.
     println!("om_wm: touchpad {path}");
     Some(Touchpad {
         fd,
@@ -167,14 +166,8 @@ fn find_touchpad() -> Option<String> {
 }
 
 //
-// Grab
+// Reset
 //
-
-// Hold or release the exclusive grab (dropped while another VT owns the display).
-pub fn set_grab(tp: &mut Touchpad, on: bool) {
-    let arg: libc::c_int = if on { 1 } else { 0 };
-    unsafe { libc::ioctl(tp.fd, EVIOCGRAB, arg) };
-}
 
 // Drain queued events and forget all finger/gesture state, so returning from
 // another VT does not replay a stale gesture into the camera.
