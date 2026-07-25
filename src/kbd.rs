@@ -19,6 +19,8 @@ use std::fs;
 const EV_KEY: u16 = 0x01;
 const EVENT_SIZE: usize = 24;
 const KEY_ARRAY: usize = 768;
+// EVIOCGRAB = _IOW('E', 0x90, int): grab a device exclusively.
+const EVIOCGRAB: libc::c_ulong = 0x4004_4590;
 
 // Linux evdev keycodes (input-event-codes.h) we care about.
 pub const KEY_ESC: u16 = 1;
@@ -40,6 +42,8 @@ pub const KEY_RIGHTMETA: u16 = 126;
 pub struct Keyboard {
     fd: i32,
     keys: Vec<bool>,
+    // Press/release edges this frame: (evdev keycode, pressed). Repeat is skipped.
+    events: Vec<(u16, bool)>,
 }
 
 //
@@ -54,8 +58,10 @@ pub fn open() -> Option<Keyboard> {
         eprintln!("om_wm: keyboard open failed: {path}");
         return None;
     }
+    // Grab exclusively so keystrokes do not also reach the tty console.
+    unsafe { libc::ioctl(fd, EVIOCGRAB, 1 as libc::c_int) };
     println!("om_wm: keyboard {path}");
-    Some(Keyboard { fd, keys: vec![false; KEY_ARRAY] })
+    Some(Keyboard { fd, keys: vec![false; KEY_ARRAY], events: Vec::new() })
 }
 
 // A device named like a keyboard that exposes the "kbd" handler.
@@ -94,6 +100,7 @@ fn find_keyboard() -> Option<String> {
 //
 
 pub fn poll(kb: &mut Keyboard) {
+    kb.events.clear();
     let mut buf = [0u8; EVENT_SIZE];
     loop {
         let n = unsafe {
@@ -106,17 +113,25 @@ pub fn poll(kb: &mut Keyboard) {
         if etype != EV_KEY {
             continue;
         }
-        let code = u16::from_ne_bytes([buf[18], buf[19]]) as usize;
+        let code = u16::from_ne_bytes([buf[18], buf[19]]);
         let value = i32::from_ne_bytes([buf[20], buf[21], buf[22], buf[23]]);
-        if code < kb.keys.len() {
+        if (code as usize) < kb.keys.len() {
             // value 0 = up, 1 = down, 2 = repeat.
-            kb.keys[code] = value != 0;
+            kb.keys[code as usize] = value != 0;
+        }
+        // Forward only real press/release edges (not autorepeat).
+        if value == 0 || value == 1 {
+            kb.events.push((code, value == 1));
         }
     }
 }
 
 pub fn down(kb: &Keyboard, code: u16) -> bool {
     kb.keys.get(code as usize).copied().unwrap_or(false)
+}
+
+pub fn events(kb: &Keyboard) -> &[(u16, bool)] {
+    &kb.events
 }
 
 pub fn super_down(kb: &Keyboard) -> bool {

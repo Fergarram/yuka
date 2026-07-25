@@ -11,6 +11,7 @@ mod camera;
 mod cursor;
 mod egl;
 mod kbd;
+mod mouse;
 mod ray;
 mod render;
 mod touch;
@@ -21,7 +22,8 @@ use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use smithay::backend::input::ButtonState;
+use smithay::backend::input::{ButtonState, KeyState};
+use smithay::input::keyboard::{FilterResult, Keycode};
 use smithay::input::pointer::{ButtonEvent, MotionEvent};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
@@ -36,6 +38,8 @@ use wl::state::State;
 
 const SHOT_FRAME: u32 = 200;
 const BTN_LEFT: u32 = 0x110;
+// Invert mouse-wheel direction (Mac-natural). Config toggle for now.
+const INVERT_SCROLL: bool = true;
 
 //
 // State
@@ -94,11 +98,13 @@ fn route_input(
     let (ccx, ccy) = camera::screen_to_canvas(cam, cxp as f32, cyp as f32, sw, sh);
     let loc = Point::<f64, Logical>::from((ccx as f64, ccy as f64));
     let pointer = state.pointer.clone();
+    let keyboard = state.keyboard.clone();
 
     let leave = |state: &mut State, focused: &mut Option<WlSurface>| {
         let serial = SERIAL_COUNTER.next_serial();
         pointer.motion(state, None, &MotionEvent { location: loc, serial, time: time_ms });
         pointer.frame(state);
+        keyboard.set_focus(state, None, SERIAL_COUNTER.next_serial());
         *focused = None;
     };
 
@@ -116,6 +122,7 @@ fn route_input(
         match render::window_at(windows, ccx, ccy) {
             Some((surf, ox, oy)) => {
                 *focused = Some(surf.clone());
+                keyboard.set_focus(state, Some(surf.clone()), SERIAL_COUNTER.next_serial());
                 let origin = Point::<f64, Logical>::from((ox as f64, oy as f64));
                 let serial = SERIAL_COUNTER.next_serial();
                 pointer.motion(state, Some((surf.clone(), origin)), &MotionEvent { location: loc, serial, time: time_ms });
@@ -148,6 +155,40 @@ fn route_input(
         let serial = SERIAL_COUNTER.next_serial();
         pointer.button(state, &ButtonEvent { serial, time: time_ms, button: BTN_LEFT, state: ButtonState::Released });
         pointer.frame(state);
+    }
+}
+
+// Forward keyboard press/release edges to the focused window. Super+Escape is a
+// compositor shortcut (unfocus, handled in route_input) so it is not forwarded.
+fn forward_keys(
+    state: &mut State,
+    kb: &kbd::Keyboard,
+    focused: &Option<WlSurface>,
+    time_ms: u32,
+) {
+    if focused.is_none() {
+        return;
+    }
+    let keyboard = state.keyboard.clone();
+    for &(code, pressed) in kbd::events(kb) {
+        if code == kbd::KEY_ESC && kbd::super_down(kb) {
+            continue;
+        }
+        let key_state = if pressed {
+            KeyState::Pressed
+        } else {
+            KeyState::Released
+        };
+        let serial = SERIAL_COUNTER.next_serial();
+        // Smithay expects the xkb keycode (evdev + 8).
+        keyboard.input::<(), _>(
+            state,
+            Keycode::new(code as u32 + 8),
+            key_state,
+            serial,
+            time_ms,
+            |_, _, _| FilterResult::Forward,
+        );
     }
 }
 
@@ -195,6 +236,7 @@ fn main() {
     let mut dmabuf_cache = render::dmabuf_cache_new();
     let mut cam = camera::camera_new();
     let mut touchpad = touch::open();
+    let mut mouse = mouse::open();
     let mut cursor = cursor::init(ray::screen_width(), ray::screen_height());
     let mut keyboard = kbd::open();
     // The window we are interacting with; while Some, pan/zoom is disabled.
@@ -204,9 +246,9 @@ fn main() {
     // has several windows to pan and zoom around.
     let test_clients = [
         "weston-terminal",
-        "weston-simple-egl",
-        "weston-terminal",
-        "weston-simple-egl",
+        "weston-editor",
+        "weston-clickdot",
+        "weston-smoke",
     ];
     let mut children: Vec<Child> = test_clients
         .iter()
@@ -272,12 +314,43 @@ fn main() {
             kbd::poll(kb);
         }
         let gestures_enabled = focused.is_none();
-        let (pressed, released) = match touchpad.as_mut() {
+        let (mut pressed, mut released) = match touchpad.as_mut() {
             Some(tp) => {
                 touch::update(tp, &mut cam, cursor.as_mut(), gestures_enabled)
             }
             None => (false, false),
         };
+
+        // External mouse: relative motion moves the cursor, click adds to the
+        // click edges, wheel zooms the canvas at the cursor when unfocused.
+        if let Some(m) = mouse.as_mut() {
+            let mf = mouse::poll(m);
+            if let Some(cur) = cursor.as_mut() {
+                cursor::move_by(cur, mf.dx, mf.dy);
+            }
+            // Wheel-click drag also pans; moving the cursor by the same delta
+            // keeps the grabbed canvas point exactly under the cursor.
+            if mf.middle && gestures_enabled {
+                cam.cx -= mf.dx as f32 / cam.zoom;
+                cam.cy -= mf.dy as f32 / cam.zoom;
+            }
+            pressed |= mf.pressed;
+            released |= mf.released;
+            if gestures_enabled && mf.wheel != 0 {
+                let (cxp, cyp) = cursor.as_ref().map(cursor::pos).unwrap_or((0, 0));
+                let wheel = if INVERT_SCROLL { -mf.wheel } else { mf.wheel };
+                let factor = 1.15_f32.powi(wheel);
+                camera::zoom_at(
+                    &mut cam,
+                    factor,
+                    cxp as f32,
+                    cyp as f32,
+                    ray::screen_width() as f32,
+                    ray::screen_height() as f32,
+                );
+            }
+        }
+
         if gestures_enabled {
             camera::camera_update(&mut cam, keyboard.as_ref());
         }
@@ -294,6 +367,14 @@ fn main() {
             released,
             start.elapsed().as_millis() as u32,
         );
+        if let Some(kb) = keyboard.as_ref() {
+            forward_keys(
+                &mut state,
+                kb,
+                &focused,
+                start.elapsed().as_millis() as u32,
+            );
+        }
 
         ray::begin_drawing();
         ray::clear_background(clear);

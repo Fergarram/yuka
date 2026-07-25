@@ -365,11 +365,12 @@ pub fn draw_toplevels(
         let (sx, sy) = camera::canvas_to_screen(
             cam, screen_w, screen_h, windows.canvas_x[i], windows.canvas_y[i],
         );
+        // Snap to integer pixels so windows stay crisp at fractional zoom.
         let dest = Rectangle {
-            x: sx,
-            y: sy,
-            width: tw as f32 * cam.zoom,
-            height: th as f32 * cam.zoom,
+            x: sx.round(),
+            y: sy.round(),
+            width: (tw as f32 * cam.zoom).round(),
+            height: (th as f32 * cam.zoom).round(),
         };
 
         ray::begin_shader_mode(shader);

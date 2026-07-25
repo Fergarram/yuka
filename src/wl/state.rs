@@ -17,6 +17,7 @@ use smithay::reexports::wayland_server::{
     protocol::{wl_buffer::WlBuffer, wl_seat::WlSeat, wl_surface::WlSurface},
     Client, Display, ListeningSocket, Resource,
 };
+use smithay::input::keyboard::{KeyboardHandle, XkbConfig};
 use smithay::input::pointer::{CursorImageStatus, PointerHandle};
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::utils::Serial;
@@ -61,6 +62,7 @@ pub struct State {
     #[allow(dead_code)]
     pub seat: Seat<State>,
     pub pointer: PointerHandle<State>,
+    pub keyboard: KeyboardHandle<State>,
     pub dmabuf_state: DmabufState,
     #[allow(dead_code)]
     pub dmabuf_global: DmabufGlobal,
@@ -118,6 +120,9 @@ pub fn init(
     // wl_seat with a pointer so clients can receive pointer events.
     let mut seat = seat_state.new_wl_seat(&dh, "seat0");
     let pointer = seat.add_pointer();
+    let keyboard = seat
+        .add_keyboard(XkbConfig::default(), 600, 25)
+        .expect("keyboard");
 
     // Advertise the dmabuf formats EGL reported as importable.
     let formats: Vec<Format> = dmabuf_formats
@@ -160,6 +165,7 @@ pub fn init(
         seat_state,
         seat,
         pointer,
+        keyboard,
         dmabuf_state,
         dmabuf_global,
         committed: Vec::new(),
