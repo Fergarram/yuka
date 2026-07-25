@@ -80,6 +80,18 @@ pub fn camera_update(cam: &mut Camera) {
     }
 }
 
+// Zoom by `factor` while keeping the canvas point currently under the screen
+// pixel (sx, sy) fixed there. Used for cursor-anchored pinch zoom.
+pub fn zoom_at(cam: &mut Camera, factor: f32, sx: f32, sy: f32, sw: f32, sh: f32) {
+    // Canvas point under (sx, sy) at the current zoom.
+    let px = cam.cx + (sx - sw * 0.5) / cam.zoom;
+    let py = cam.cy + (sy - sh * 0.5) / cam.zoom;
+    cam.zoom = (cam.zoom * factor).clamp(ZOOM_MIN, ZOOM_MAX);
+    // Re-center so that point stays under (sx, sy).
+    cam.cx = px - (sx - sw * 0.5) / cam.zoom;
+    cam.cy = py - (sy - sh * 0.5) / cam.zoom;
+}
+
 // Map a canvas point to a screen pixel position.
 pub fn canvas_to_screen(
     cam: &Camera,

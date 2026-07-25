@@ -13,7 +13,8 @@
 use std::ffi::{c_void, CString};
 use std::fs;
 
-use crate::camera::Camera;
+use crate::camera::{self, Camera};
+use crate::cursor::{self, Cursor};
 use crate::ray;
 
 //
@@ -36,20 +37,22 @@ const MAX_SLOTS: usize = 16;
 // canvas pixels panned per trackpad device unit at zoom 1.0. Divided by zoom so
 // panning feels the same at any scale.
 const PAN_SENS: f32 = 0.12;
-const ZOOM_MIN: f32 = 0.1;
-const ZOOM_MAX: f32 = 8.0;
-// Zoom only engages once the fingers have spread/closed by this much (device
-// units) from the gesture start, so incidental jitter while panning never zooms;
-// only a deliberate, sustained pinch does.
-const PINCH_ENGAGE_DIST: f32 = 40.0;
-// After engaging, ignore per-frame distance changes below this (device units) to
-// kill residual jitter. Soft: only movement beyond it zooms.
+// A two-finger gesture is pan OR zoom at any instant, never both. The active
+// mode is sticky and switches only when the other motion dominates by this
+// factor (hysteresis), so pan and zoom stay clean but interchange fluidly
+// without lifting.
+const MODE_BIAS: f32 = 1.6;
+// Minimum per-frame motion (device units) before a mode is chosen at all.
+const MODE_EPS: f32 = 1.5;
+// While zooming, ignore per-frame distance changes below this (device units).
 const PINCH_DEADZONE: f32 = 2.0;
 // Exponential smoothing of the tracked pan velocity (0..1, higher = snappier).
 const PAN_SMOOTH: f32 = 0.4;
 // Momentum: how fast the release glide decays (per second) and when to stop.
 const PAN_FRICTION: f32 = 3.0;
 const PAN_STOP_SPEED: f32 = 5.0;
+// One-finger pointer motion: screen pixels moved per trackpad device unit.
+const POINTER_SENS: f32 = 0.25;
 
 //
 // Types
@@ -62,21 +65,31 @@ struct Slot {
     y: i32,
 }
 
+// Which transform a two-finger gesture is currently applying.
+#[derive(Clone, Copy, PartialEq)]
+enum GestureMode {
+    None,
+    Pan,
+    Zoom,
+}
+
 pub struct Touchpad {
     fd: i32,
     slots: [Slot; MAX_SLOTS],
     cur: usize,
-    // Pan baseline for the current two-finger gesture; None when not exactly two
+    // Baselines for the current two-finger gesture; None when not exactly two
     // fingers are down, so a new gesture never jumps.
     prev_centroid: Option<(f32, f32)>,
-    // Zoom gate: finger distance at gesture start, whether zoom has engaged, and
-    // the running reference distance once engaged.
-    dist_start: f32,
-    zoom_engaged: bool,
-    zoom_ref: f32,
+    prev_dist: Option<f32>,
+    // Which of pan/zoom the gesture is currently applying.
+    mode: GestureMode,
     // Smoothed pan velocity (canvas units/sec) for release momentum.
     pan_vx: f32,
     pan_vy: f32,
+    // One-finger pointer tracking (previous finger pos + fractional remainder).
+    prev_single: Option<(f32, f32)>,
+    ptr_accum_x: f32,
+    ptr_accum_y: f32,
 }
 
 //
@@ -97,11 +110,13 @@ pub fn open() -> Option<Touchpad> {
         slots: [Slot { active: false, x: 0, y: 0 }; MAX_SLOTS],
         cur: 0,
         prev_centroid: None,
-        dist_start: 0.0,
-        zoom_engaged: false,
-        zoom_ref: 0.0,
+        prev_dist: None,
+        mode: GestureMode::None,
         pan_vx: 0.0,
         pan_vy: 0.0,
+        prev_single: None,
+        ptr_accum_x: 0.0,
+        ptr_accum_y: 0.0,
     })
 }
 
@@ -184,11 +199,16 @@ fn read_events(tp: &mut Touchpad) {
     }
 }
 
-// Drain trackpad events and apply two-finger pan + pinch zoom to the camera,
-// with a pinch deadzone and release momentum for panning.
-pub fn update(tp: &mut Touchpad, cam: &mut Camera) {
+// Drain trackpad events and apply gestures: one finger moves the pointer, two
+// fingers pan (with momentum) and pinch-zoom (with an engage gate).
+pub fn update(tp: &mut Touchpad, cam: &mut Camera, cursor: Option<&mut Cursor>) {
     read_events(tp);
     let dt = ray::frame_time().max(1e-4);
+
+    // Cursor position is the pinch-zoom origin (screen space).
+    let screen_w = ray::screen_width() as f32;
+    let screen_h = ray::screen_height() as f32;
+    let zoom_origin = cursor.as_deref().map(cursor::pos);
 
     let mut pts: [(f32, f32); 2] = [(0.0, 0.0); 2];
     let mut count = 0usize;
@@ -201,9 +221,29 @@ pub fn update(tp: &mut Touchpad, cam: &mut Camera) {
         }
     }
 
+    // One finger: move the pointer (fractional remainder kept for slow moves).
+    if count == 1 {
+        let (fx, fy) = pts[0];
+        if let (Some((px, py)), Some(cur)) = (tp.prev_single, cursor) {
+            tp.ptr_accum_x += (fx - px) * POINTER_SENS;
+            tp.ptr_accum_y += (fy - py) * POINTER_SENS;
+            let idx = tp.ptr_accum_x.trunc();
+            let idy = tp.ptr_accum_y.trunc();
+            tp.ptr_accum_x -= idx;
+            tp.ptr_accum_y -= idy;
+            cursor::move_by(cur, idx as i32, idy as i32);
+        }
+        tp.prev_single = Some((fx, fy));
+        tp.prev_centroid = None;
+        return;
+    }
+    tp.prev_single = None;
+
     // Not a two-finger gesture: coast any leftover pan momentum with friction.
     if count != 2 {
         tp.prev_centroid = None;
+        tp.prev_dist = None;
+        tp.mode = GestureMode::None;
         if tp.pan_vx != 0.0 || tp.pan_vy != 0.0 {
             cam.cx += tp.pan_vx * dt;
             cam.cy += tp.pan_vy * dt;
@@ -225,45 +265,72 @@ pub fn update(tp: &mut Touchpad, cam: &mut Camera) {
     let dy = pts[0].1 - pts[1].1;
     let dist = (dx * dx + dy * dy).sqrt();
 
-    match tp.prev_centroid {
-        Some(pc) => {
-            // Pan: content follows the fingers, so the view shifts opposite.
-            let move_x = -(centroid.0 - pc.0) * PAN_SENS / cam.zoom;
-            let move_y = -(centroid.1 - pc.1) * PAN_SENS / cam.zoom;
-            cam.cx += move_x;
-            cam.cy += move_y;
+    match (tp.prev_centroid, tp.prev_dist) {
+        (Some(pc), Some(pd)) => {
+            let pan_delta =
+                ((centroid.0 - pc.0).powi(2) + (centroid.1 - pc.1).powi(2)).sqrt();
+            let zoom_delta = (dist - pd).abs();
 
-            // Track a smoothed velocity for the release glide.
-            let alpha = PAN_SMOOTH;
-            tp.pan_vx = tp.pan_vx * (1.0 - alpha) + (move_x / dt) * alpha;
-            tp.pan_vy = tp.pan_vy * (1.0 - alpha) + (move_y / dt) * alpha;
+            // Pick the dominant intent, with hysteresis: only switch out of the
+            // current mode when the other motion clearly leads.
+            let want_zoom =
+                zoom_delta > MODE_EPS && zoom_delta > pan_delta * MODE_BIAS;
+            let want_pan =
+                pan_delta > MODE_EPS && pan_delta > zoom_delta * MODE_BIAS;
+            tp.mode = match tp.mode {
+                GestureMode::Pan => {
+                    if want_zoom { GestureMode::Zoom } else { GestureMode::Pan }
+                }
+                GestureMode::Zoom => {
+                    if want_pan { GestureMode::Pan } else { GestureMode::Zoom }
+                }
+                GestureMode::None => {
+                    if want_zoom {
+                        GestureMode::Zoom
+                    } else if want_pan {
+                        GestureMode::Pan
+                    } else {
+                        GestureMode::None
+                    }
+                }
+            };
 
-            // Zoom is gated: it stays off until the fingers have spread/closed by
-            // PINCH_ENGAGE_DIST from the gesture start (a deliberate pinch), then
-            // tracks the distance ratio with a small deadzone against jitter.
-            if !tp.zoom_engaged {
-                if (dist - tp.dist_start).abs() > PINCH_ENGAGE_DIST {
-                    tp.zoom_engaged = true;
-                    tp.zoom_ref = dist;
+            match tp.mode {
+                GestureMode::Pan => {
+                    // Content follows the fingers, so the view shifts opposite.
+                    let move_x = -(centroid.0 - pc.0) * PAN_SENS / cam.zoom;
+                    let move_y = -(centroid.1 - pc.1) * PAN_SENS / cam.zoom;
+                    cam.cx += move_x;
+                    cam.cy += move_y;
+                    let alpha = PAN_SMOOTH;
+                    tp.pan_vx = tp.pan_vx * (1.0 - alpha) + (move_x / dt) * alpha;
+                    tp.pan_vy = tp.pan_vy * (1.0 - alpha) + (move_y / dt) * alpha;
                 }
-            } else {
-                let ddist = dist - tp.zoom_ref;
-                if tp.zoom_ref > 1.0 && ddist.abs() > PINCH_DEADZONE {
-                    let beyond = ddist - ddist.signum() * PINCH_DEADZONE;
-                    let ratio = (tp.zoom_ref + beyond) / tp.zoom_ref;
-                    cam.zoom = (cam.zoom * ratio).clamp(ZOOM_MIN, ZOOM_MAX);
+                GestureMode::Zoom => {
+                    // No pan; drop momentum so lifting after a zoom does not glide.
+                    tp.pan_vx = 0.0;
+                    tp.pan_vy = 0.0;
+                    let ddist = dist - pd;
+                    if ddist.abs() > PINCH_DEADZONE {
+                        let beyond = ddist - ddist.signum() * PINCH_DEADZONE;
+                        let ratio = (pd + beyond) / pd;
+                        let (ox, oy) = zoom_origin
+                            .map(|(x, y)| (x as f32, y as f32))
+                            .unwrap_or((screen_w * 0.5, screen_h * 0.5));
+                        camera::zoom_at(cam, ratio, ox, oy, screen_w, screen_h);
+                    }
                 }
-                tp.zoom_ref = dist;
+                GestureMode::None => {}
             }
         }
-        None => {
-            // Gesture start: grabbing cancels momentum; arm the zoom gate.
+        _ => {
+            // Gesture start: grabbing cancels momentum.
             tp.pan_vx = 0.0;
             tp.pan_vy = 0.0;
-            tp.dist_start = dist;
-            tp.zoom_engaged = false;
+            tp.mode = GestureMode::None;
         }
     }
 
     tp.prev_centroid = Some(centroid);
+    tp.prev_dist = Some(dist);
 }

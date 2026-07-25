@@ -8,6 +8,7 @@
 //
 
 mod camera;
+mod cursor;
 mod egl;
 mod ray;
 mod render;
@@ -99,6 +100,7 @@ fn main() {
     let mut dmabuf_cache = render::dmabuf_cache_new();
     let mut cam = camera::camera_new();
     let mut touchpad = touch::open();
+    let mut cursor = cursor::init(ray::screen_width(), ray::screen_height());
 
     // Spawn a few test clients (shm terminals + dmabuf triangles) so the canvas
     // has several windows to pan and zoom around.
@@ -169,7 +171,7 @@ fn main() {
         wl::state::flush(&mut server);
 
         if let Some(tp) = touchpad.as_mut() {
-            touch::update(tp, &mut cam);
+            touch::update(tp, &mut cam, cursor.as_mut());
         }
         camera::camera_update(&mut cam);
 
@@ -196,6 +198,9 @@ fn main() {
     }
     render::destroy_owned(&mut windows);
     dmabuf_cache.destroy_all(&egl);
+    if let Some(c) = cursor.as_mut() {
+        cursor::destroy(c);
+    }
     ray::unload_shader(shader);
     ray::close_window();
 }
