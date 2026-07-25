@@ -201,6 +201,23 @@ pub fn set_window_pos(windows: &mut Windows, surface: &WlSurface, x: f32, y: f32
     }
 }
 
+// Dump every rect the hit test can pick, for when a click seems to land inside
+// something and does not.
+pub fn log_rects(windows: &Windows) {
+    for i in 0..windows.surface.len() {
+        println!(
+            "om_wm:   {} {}x{} at {:.0},{:.0} order={} z={:.0}",
+            if windows.popup[i] { "popup " } else { "window" },
+            windows.tex_w[i],
+            windows.tex_h[i],
+            windows.canvas_x[i],
+            windows.canvas_y[i],
+            windows.order[i],
+            windows.z[i]
+        );
+    }
+}
+
 // Where the next new window will be centred: the canvas point in the middle of
 // the view. Kept current by the main loop so a window always opens where you are
 // looking, however far the canvas has been panned.

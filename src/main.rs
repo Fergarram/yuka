@@ -106,6 +106,7 @@ fn route_input(
     focused: &mut Option<WlSurface>,
     hovered: &mut Option<WlSurface>,
     kb: Option<&input::Input>,
+    super_down: bool,
     pressed: bool,
     released: bool,
     moved: bool,
@@ -125,6 +126,20 @@ fn route_input(
     if super_escape && focused.is_some() {
         keyboard.set_focus(state, None, SERIAL_COUNTER.next_serial());
         *focused = None;
+    }
+
+    // Super claims the pointer for the canvas: no hover, no buttons, no scroll for
+    // clients while it is held, so zooming and dragging windows never make the app
+    // under the cursor react. Pointer focus is withdrawn on the way in, so nothing
+    // is left believing the cursor is still inside it.
+    if super_down {
+        if hovered.is_some() {
+            let serial = SERIAL_COUNTER.next_serial();
+            pointer.motion(state, None, &MotionEvent { location: loc, serial, time: time_ms });
+            pointer.frame(state);
+            *hovered = None;
+        }
+        return;
     }
 
     // Pointer input follows the pointer; keyboard input follows focus. That split
@@ -454,6 +469,7 @@ fn main() {
     let start = Instant::now();
     let clear = ray::Color { r: 24, g: 24, b: 32, a: 255 };
     let mut frame: u32 = 0;
+    let debug_input = std::env::var("OM_WM_DEBUG_INPUT").is_ok();
     let shot_env = std::env::var("OM_WM_SHOT");
     let screenshot = shot_env.is_ok();
     let shot_frame: u32 = shot_env
@@ -637,12 +653,13 @@ fn main() {
         // Libinput trackpad mode the scroll and pinch fields carry the trackpad
         // too; in Custom mode they stay zero because the device is muted there.
         let ptr = inp.as_ref().map(input::pointer).unwrap_or_default();
+        let pointer_on_client = !super_down && hovered.is_some();
         if let Some(cur) = cursor.as_mut() {
             cursor::move_by(cur, ptr.dx as i32, ptr.dy as i32);
         }
         // Wheel-click drag also pans; moving the cursor by the same delta keeps
         // the grabbed canvas point exactly under the cursor.
-        if ptr.middle && gestures_enabled {
+        if ptr.middle && !pointer_on_client {
             cam.cx -= ptr.dx / cam.zoom;
             cam.cy -= ptr.dy / cam.zoom;
         }
@@ -684,9 +701,12 @@ fn main() {
             camera::reset_zoom(&mut cam);
         }
 
-        // Wheel zoom belongs to the canvas only when the pointer is over nothing;
-        // over a window the client has already had it.
-        if gestures_enabled && hovered.is_none() {
+        // Wheel and middle-drag belong either to a client or to the canvas, never
+        // to both. Super forces the canvas. This reads the hover from the frame
+        // before on purpose: route_input updates it later in the frame, and using
+        // one value for both branches is what stops them both firing on the frame
+        // the pointer crosses a window edge.
+        if !pointer_on_client {
             let (cxp, cyp) = cursor.as_ref().map(cursor::pos).unwrap_or((0, 0));
             if ptr.wheel != 0.0 {
                 let wheel = if INVERT_SCROLL { -ptr.wheel } else { ptr.wheel };
@@ -802,11 +822,25 @@ fn main() {
 
         // A click that misses every popup closes the open menus. Proper menus take
         // a popup grab and get this from the grab; we do not hold one yet, so the
-        // dismissal is ours to do.
+        // dismissal is ours to do, which also means a wrong hit test here reads as
+        // a menu that vanishes the moment you click an item. OM_WM_DEBUG_INPUT=1
+        // prints the click, what it hit, and every rect it could have hit.
         if pressed && wl::state::any_popup(&state) {
-            let on_popup = render::window_at(&windows, cam3d, sxp, syp)
-                .map(|(surf, _, _)| wl::state::is_popup(&state, &surf))
+            let hit = render::window_at(&windows, cam3d, sxp, syp);
+            let on_popup = hit
+                .as_ref()
+                .map(|(surf, _, _)| wl::state::is_popup(&state, surf))
                 .unwrap_or(false);
+            if debug_input {
+                let (ccx, ccy) =
+                    camera::screen_to_plane(cam3d, sxp, syp, 0.0).unwrap_or((0.0, 0.0));
+                println!(
+                    "om_wm: click screen {sxp:.0},{syp:.0} canvas {ccx:.0},{ccy:.0} \
+                     on_popup={on_popup} dismiss={}",
+                    !on_popup
+                );
+                render::log_rects(&windows);
+            }
             if !on_popup {
                 wl::state::dismiss_popups(&state);
             }
@@ -822,6 +856,7 @@ fn main() {
             &mut focused,
             &mut hovered,
             inp.as_ref(),
+            super_down,
             pressed,
             released,
             moved,
@@ -829,7 +864,7 @@ fn main() {
         );
         let time_ms = start.elapsed().as_millis() as u32;
         forward_buttons(&mut state, &ptr, &hovered, time_ms);
-        if hovered.is_some() {
+        if pointer_on_client {
             forward_scroll(&mut state, &ptr, time_ms);
         }
         if let Some(i) = inp.as_ref() {
