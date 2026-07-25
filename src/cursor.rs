@@ -192,6 +192,29 @@ pub fn pos(c: &Cursor) -> (i32, i32) {
     (c.x, c.y)
 }
 
+// Re-arm the cursor plane. Dropping DRM master for a VT switch loses it: the
+// console modesets the CRTC without a cursor, so we have to hand the plane back
+// its buffer and position when we take the display again.
+pub fn rearm(c: &mut Cursor) {
+    let r = unsafe {
+        drmModeSetCursor2(
+            c.fd,
+            c.crtc,
+            c.handle,
+            CURSOR_SIZE,
+            CURSOR_SIZE,
+            CURSOR_HOT_X,
+            CURSOR_HOT_Y,
+        )
+    };
+    if r != 0 {
+        eprintln!("om_wm: cursor re-arm failed");
+        return;
+    }
+    let (x, y) = (c.x, c.y);
+    move_to(c, x, y);
+}
+
 pub fn destroy(c: &mut Cursor) {
     unsafe {
         drmModeSetCursor2(c.fd, c.crtc, 0, 0, 0, 0, 0);

@@ -14,6 +14,7 @@ mod kbd;
 mod mouse;
 mod ray;
 mod render;
+mod seat;
 mod touch;
 mod wl;
 
@@ -40,6 +41,8 @@ const SHOT_FRAME: u32 = 200;
 const BTN_LEFT: u32 = 0x110;
 // Invert mouse-wheel direction (Mac-natural). Config toggle for now.
 const INVERT_SCROLL: bool = true;
+// How long to sleep per iteration while another VT owns the display.
+const VT_IDLE_MS: u64 = 30;
 
 //
 // State
@@ -71,6 +74,46 @@ fn spawn_client(socket_name: &str, cmd: &str) -> Option<Child> {
             eprintln!("om_wm: failed to spawn '{cmd}': {e}");
             None
         }
+    }
+}
+
+//
+// Input grabs
+//
+// Only for the no-session fallback. With a session, logind puts our VT in K_OFF
+// and keystrokes reach nobody but us, so grabbing would only take the devices
+// away from whoever owns the display while we are switched away. Without one, an
+// exclusive grab is the only thing keeping what we type out of the console.
+
+fn grab_all_input(
+    kb: &mut Option<kbd::Keyboard>,
+    mouse: &mut Option<mouse::Mouse>,
+    touchpad: &mut Option<touch::Touchpad>,
+) {
+    if let Some(kb) = kb.as_mut() {
+        kbd::set_grab(kb, true);
+    }
+    if let Some(m) = mouse.as_mut() {
+        mouse::set_grab(m, true);
+    }
+    if let Some(tp) = touchpad.as_mut() {
+        touch::set_grab(tp, true);
+    }
+}
+
+fn reset_input(
+    kb: &mut Option<kbd::Keyboard>,
+    mouse: &mut Option<mouse::Mouse>,
+    touchpad: &mut Option<touch::Touchpad>,
+) {
+    if let Some(kb) = kb.as_mut() {
+        kbd::reset(kb);
+    }
+    if let Some(m) = mouse.as_mut() {
+        mouse::reset(m);
+    }
+    if let Some(tp) = touchpad.as_mut() {
+        touch::reset(tp);
     }
 }
 
@@ -163,6 +206,39 @@ fn route_input(
     }
 }
 
+// Tell the focused window that every key we think is held is up. Called before
+// handing the keyboard to another VT: the releases will land there instead of
+// here, and a client left believing ctrl or alt is down misreads everything the
+// user types next.
+fn release_held_keys(
+    state: &mut State,
+    kb: &kbd::Keyboard,
+    focused: &Option<WlSurface>,
+    time_ms: u32,
+) {
+    if focused.is_none() {
+        return;
+    }
+    let keyboard = state.keyboard.clone();
+    let held: Vec<u16> = kbd::keys(kb)
+        .iter()
+        .enumerate()
+        .filter(|(_, down)| **down)
+        .map(|(code, _)| code as u16)
+        .collect();
+    for code in held {
+        let serial = SERIAL_COUNTER.next_serial();
+        keyboard.input::<(), _>(
+            state,
+            Keycode::new(code as u32 + 8),
+            KeyState::Released,
+            serial,
+            time_ms,
+            |_, _, _| FilterResult::Forward,
+        );
+    }
+}
+
 // Forward keyboard press/release edges to the focused window. Super+Escape is a
 // compositor shortcut (unfocus, handled in route_input) so it is not forwarded.
 fn forward_keys(
@@ -248,6 +324,38 @@ fn main() {
     let mut mouse = mouse::open();
     let mut cursor = cursor::init(ray::screen_width(), ray::screen_height());
     let mut keyboard = kbd::open();
+    // Session control. With it, logind owns our VT (K_OFF, KD_GRAPHICS) so the
+    // switch chords are ours to implement and input needs no grab.
+    //
+    // Taking control makes us the only thing that can switch VTs, so we refuse it
+    // when we have no keyboard of our own to switch with: silencing the console
+    // then would leave the machine with no way off this VT at all. OM_WM_NO_SEAT
+    // opts out by hand, which is also what non-interactive runs want.
+    let no_seat = std::env::var("OM_WM_NO_SEAT").is_ok();
+    let mut seat = if keyboard.is_some() && !no_seat {
+        seat::init()
+    } else {
+        if keyboard.is_none() {
+            eprintln!(
+                "om_wm: no keyboard of our own, so not taking session control: the \
+                 console keeps its own ctrl+alt+Fn. Is this shell in the input \
+                 group? Relaunch with: sg input -c './target/debug/om_wm'"
+            );
+        }
+        None
+    };
+    if seat.is_none() {
+        // No session: an exclusive grab is the only thing keeping what we type out
+        // of the console, and it costs us VT switching. ctrl+alt+backspace is then
+        // the only way out, so say so.
+        grab_all_input(&mut keyboard, &mut mouse, &mut touchpad);
+        if keyboard.is_some() {
+            println!(
+                "om_wm: no session control: input grabbed, no vt switching, \
+                 ctrl+alt+backspace quits"
+            );
+        }
+    }
     // The window we are interacting with; while Some, pan/zoom is disabled.
     let mut focused: Option<WlSurface> = None;
     // Active Super+drag: (window, offset from cursor to the window's origin).
@@ -285,11 +393,49 @@ fn main() {
     let mut last = Instant::now();
     let mut max_dt_ms: f64 = 0.0;
     let mut slow_frames: u32 = 0;
+    // Last session state we acted on, to catch activation edges from libseat.
+    let mut session_active = true;
 
     while RUNNING.load(Ordering::Relaxed)
         && !ray::window_should_close()
         && frame < max_frames
     {
+        // Session state, straight from libseat's callbacks. While another VT owns
+        // the display we keep the protocol alive but stay off the GPU (we hold no
+        // DRM master) and out of input. Clients get no frame callbacks meanwhile,
+        // so they idle too.
+        if let Some(s) = seat.as_ref() {
+            seat::poll(s);
+            let now_active = seat::active(s);
+            if now_active != session_active {
+                session_active = now_active;
+                if now_active {
+                    // The console modeset the CRTC while we were away, which
+                    // leaves the cursor plane empty.
+                    if let Some(c) = cursor.as_mut() {
+                        cursor::rearm(c);
+                    }
+                    // Input that arrived while another VT had the display was not
+                    // meant for us.
+                    reset_input(&mut keyboard, &mut mouse, &mut touchpad);
+                    last = Instant::now();
+                    println!("om_wm: back on vt{}", seat::our_vt(s));
+                } else {
+                    if let Some(kb) = keyboard.as_ref() {
+                        let t = start.elapsed().as_millis() as u32;
+                        release_held_keys(&mut state, kb, &focused, t);
+                    }
+                    println!("om_wm: session inactive, display released");
+                }
+            }
+            if !now_active {
+                wl::state::accept_and_dispatch(&mut server, &mut state);
+                wl::state::flush(&mut server);
+                std::thread::sleep(std::time::Duration::from_millis(VT_IDLE_MS));
+                continue;
+            }
+        }
+
         let now = Instant::now();
         let dt_ms = now.duration_since(last).as_secs_f64() * 1000.0;
         last = now;
@@ -332,6 +478,35 @@ fn main() {
         if let Some(kb) = keyboard.as_mut() {
             kbd::poll(kb);
         }
+
+        // Quit chord (ctrl+alt+backspace, the traditional one). While we hold the
+        // keyboard grab, ctrl+c in the shell that launched us cannot reach it, so
+        // without this there is no way to stop om_wm from the keyboard at all.
+        if let Some(kb) = keyboard.as_ref() {
+            let quit = kbd::ctrl_down(kb)
+                && kbd::alt_down(kb)
+                && kbd::events(kb).iter().any(|&(c, p)| p && c == kbd::KEY_BACKSPACE);
+            if quit {
+                println!("om_wm: ctrl+alt+backspace, quitting");
+                RUNNING.store(false, Ordering::Relaxed);
+            }
+        }
+
+        // VT switch chord (ctrl+alt+Fn, alt+left/right). The deactivation itself
+        // comes back through libseat, which is where the display is released.
+        let vt_target = match (seat.as_ref(), keyboard.as_ref()) {
+            (Some(s), Some(kb)) => {
+                seat::chord(s, kbd::events(kb), kbd::ctrl_down(kb), kbd::alt_down(kb))
+            }
+            _ => None,
+        };
+        if let (Some(target), Some(s)) = (vt_target, seat.as_ref()) {
+            if seat::switch_to(s, target) {
+                println!("om_wm: switching to vt{target}");
+                continue;
+            }
+        }
+
         let super_down = keyboard.as_ref().map(kbd::super_down).unwrap_or(false);
         let gestures_enabled = focused.is_none();
         // Suppress trackpad gestures while Super is held (reserved for window
@@ -505,4 +680,9 @@ fn main() {
     }
     ray::unload_shader(shader);
     ray::close_window();
+    // Release the session last: logind restores our VT to a text console when the
+    // connection goes.
+    if let Some(s) = seat.as_mut() {
+        seat::shutdown(s);
+    }
 }

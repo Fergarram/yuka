@@ -11,6 +11,8 @@
 use std::ffi::{c_void, CString};
 use std::fs;
 
+use crate::kbd;
+
 //
 // Constants (evdev)
 //
@@ -30,8 +32,10 @@ const EVIOCGRAB: libc::c_ulong = 0x4004_4590;
 // Types
 //
 
+// Every relative pointing device, merged, for the same reason as the keyboard: a
+// dongle can present several interfaces and picking one by name gets it wrong.
 pub struct Mouse {
-    fd: i32,
+    fds: Vec<i32>,
     // Middle-button level, persisted across frames for drag-to-pan.
     middle: bool,
 }
@@ -52,36 +56,43 @@ pub struct Frame {
 //
 
 pub fn open() -> Option<Mouse> {
-    let path = find_mouse()?;
-    let c = CString::new(path.clone()).ok()?;
-    let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
-    if fd < 0 {
-        eprintln!("om_wm: mouse open failed: {path}");
+    let mut fds: Vec<i32> = Vec::new();
+    for (path, name) in find_mice() {
+        let Ok(c) = CString::new(path.clone()) else { continue };
+        let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
+        if fd < 0 {
+            eprintln!("om_wm: mouse open failed: {path}");
+            continue;
+        }
+        println!("om_wm: mouse {path} ({name})");
+        fds.push(fd);
+    }
+    if fds.is_empty() {
         return None;
     }
-    unsafe { libc::ioctl(fd, EVIOCGRAB, 1 as libc::c_int) };
-    println!("om_wm: mouse {path}");
-    Some(Mouse { fd, middle: false })
+    Some(Mouse { fds, middle: false })
 }
 
-// A device with non-zero relative axes (REL) that is not the trackpad.
-fn find_mouse() -> Option<String> {
-    let text = fs::read_to_string("/proc/bus/input/devices").ok()?;
+// Devices carrying both relative axes, which is what a pointer has, minus the
+// trackpad (touch.rs drives that one as absolute multitouch).
+fn find_mice() -> Vec<(String, String)> {
+    let mut found: Vec<(String, String)> = Vec::new();
+    let Ok(text) = fs::read_to_string("/proc/bus/input/devices") else { return found };
     for block in text.split("\n\n") {
-        let mut has_rel = false;
+        let mut name = String::new();
         let mut is_trackpad = false;
         let mut event: Option<String> = None;
+        let mut rel: Vec<u64> = Vec::new();
         for line in block.lines() {
-            if let Some(name) = line.strip_prefix("N: Name=") {
+            if let Some(n) = line.strip_prefix("N: Name=") {
+                name = n.trim_matches('"').to_string();
                 let low = name.to_lowercase();
                 is_trackpad = low.contains("bcm5974")
                     || low.contains("trackpad")
                     || low.contains("touchpad");
             }
-            if let Some(rel) = line.strip_prefix("B: REL=") {
-                has_rel = rel.split_whitespace().any(|h| {
-                    u64::from_str_radix(h, 16).map(|v| v != 0).unwrap_or(false)
-                });
+            if let Some(bits) = line.strip_prefix("B: REL=") {
+                rel = kbd::bitmap(bits);
             }
             if let Some(handlers) = line.strip_prefix("H: Handlers=") {
                 for tok in handlers.split_whitespace() {
@@ -91,13 +102,14 @@ fn find_mouse() -> Option<String> {
                 }
             }
         }
-        if has_rel && !is_trackpad {
+        let points = kbd::bit_set(&rel, REL_X) && kbd::bit_set(&rel, REL_Y);
+        if points && !is_trackpad {
             if let Some(n) = event {
-                return Some(format!("/dev/input/event{n}"));
+                found.push((format!("/dev/input/event{n}"), name));
             }
         }
     }
-    None
+    found
 }
 
 //
@@ -108,31 +120,50 @@ pub fn poll(m: &mut Mouse) -> Frame {
     let mut frame =
         Frame { dx: 0, dy: 0, wheel: 0, pressed: false, released: false, middle: false };
     let mut buf = [0u8; EVENT_SIZE];
-    loop {
-        let n = unsafe {
-            libc::read(m.fd, buf.as_mut_ptr() as *mut c_void, EVENT_SIZE)
-        };
-        if n != EVENT_SIZE as isize {
-            break;
-        }
-        let etype = u16::from_ne_bytes([buf[16], buf[17]]);
-        let code = u16::from_ne_bytes([buf[18], buf[19]]);
-        let value = i32::from_ne_bytes([buf[20], buf[21], buf[22], buf[23]]);
-        match (etype, code) {
-            (EV_REL, REL_X) => frame.dx += value,
-            (EV_REL, REL_Y) => frame.dy += value,
-            (EV_REL, REL_WHEEL) => frame.wheel += value,
-            (EV_KEY, BTN_LEFT) => {
-                if value == 1 {
-                    frame.pressed = true;
-                } else if value == 0 {
-                    frame.released = true;
-                }
+    for i in 0..m.fds.len() {
+        let fd = m.fds[i];
+        loop {
+            let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut c_void, EVENT_SIZE) };
+            if n != EVENT_SIZE as isize {
+                break;
             }
-            (EV_KEY, BTN_MIDDLE) => m.middle = value != 0,
-            _ => {}
+            let etype = u16::from_ne_bytes([buf[16], buf[17]]);
+            let code = u16::from_ne_bytes([buf[18], buf[19]]);
+            let value = i32::from_ne_bytes([buf[20], buf[21], buf[22], buf[23]]);
+            match (etype, code) {
+                (EV_REL, REL_X) => frame.dx += value,
+                (EV_REL, REL_Y) => frame.dy += value,
+                (EV_REL, REL_WHEEL) => frame.wheel += value,
+                (EV_KEY, BTN_LEFT) => {
+                    if value == 1 {
+                        frame.pressed = true;
+                    } else if value == 0 {
+                        frame.released = true;
+                    }
+                }
+                (EV_KEY, BTN_MIDDLE) => m.middle = value != 0,
+                _ => {}
+            }
         }
     }
     frame.middle = m.middle;
     frame
+}
+
+//
+// Grab
+//
+
+// Hold or release the exclusive grab (only the no-session fallback takes it).
+pub fn set_grab(m: &mut Mouse, on: bool) {
+    let arg: libc::c_int = if on { 1 } else { 0 };
+    for i in 0..m.fds.len() {
+        unsafe { libc::ioctl(m.fds[i], EVIOCGRAB, arg) };
+    }
+}
+
+// Drop queued events and button state after coming back from another VT.
+pub fn reset(m: &mut Mouse) {
+    let _ = poll(m);
+    m.middle = false;
 }

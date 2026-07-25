@@ -167,6 +167,36 @@ fn find_touchpad() -> Option<String> {
 }
 
 //
+// Grab
+//
+
+// Hold or release the exclusive grab (dropped while another VT owns the display).
+pub fn set_grab(tp: &mut Touchpad, on: bool) {
+    let arg: libc::c_int = if on { 1 } else { 0 };
+    unsafe { libc::ioctl(tp.fd, EVIOCGRAB, arg) };
+}
+
+// Drain queued events and forget all finger/gesture state, so returning from
+// another VT does not replay a stale gesture into the camera.
+pub fn reset(tp: &mut Touchpad) {
+    read_events(tp);
+    tp.slots = [Slot { active: false, x: 0, y: 0 }; MAX_SLOTS];
+    tp.cur = 0;
+    tp.prev_centroid = None;
+    tp.prev_dist = None;
+    tp.mode = GestureMode::None;
+    tp.pan_vx = 0.0;
+    tp.pan_vy = 0.0;
+    tp.primary_slot = None;
+    tp.prev_single = None;
+    tp.ptr_accum_x = 0.0;
+    tp.ptr_accum_y = 0.0;
+    tp.btn_left = false;
+    tp.click_pressed = false;
+    tp.click_released = false;
+}
+
+//
 // Update
 //
 
