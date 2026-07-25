@@ -43,6 +43,8 @@ const BTN_RIGHT: u32 = 0x111;
 const INVERT_SCROLL: bool = true;
 // Canvas pixels panned per horizontal wheel notch, at zoom 1.0.
 const HWHEEL_PAN: f32 = 60.0;
+// Gap within which a second middle click counts as a double click.
+const DOUBLE_CLICK_MS: u32 = 400;
 // How long to sleep per iteration while another VT owns the display.
 const VT_IDLE_MS: u64 = 30;
 
@@ -230,7 +232,9 @@ fn forward_keys(
     }
     let keyboard = state.keyboard.clone();
     for &(code, pressed) in input::events(kb) {
-        if code == input::KEY_ESC && input::super_down(kb) {
+        let chord = input::super_down(kb)
+            && (code == input::KEY_ESC || code == input::KEY_0);
+        if chord {
             continue;
         }
         let key_state = if pressed {
@@ -374,6 +378,8 @@ fn main() {
     let mut slow_frames: u32 = 0;
     // Last session state we acted on, to catch activation edges from libseat.
     let mut session_active = true;
+    // When the last middle button press landed, for the double click chord.
+    let mut last_middle_ms: u32 = 0;
 
     while RUNNING.load(Ordering::Relaxed)
         && !ray::window_should_close()
@@ -526,6 +532,42 @@ fn main() {
         }
         pressed |= ptr.left_pressed;
         released |= ptr.left_released;
+
+        // Zoom reset: Super+0 from the keyboard, Super + double middle click from
+        // the mouse. The trackpad's two-finger double tap lives in touch.rs.
+        let reset_key = inp
+            .as_ref()
+            .map(|i| {
+                input::super_down(i)
+                    && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_0)
+            })
+            .unwrap_or(false);
+        let mut reset_click = false;
+        if ptr.middle_pressed {
+            let now_ms = start.elapsed().as_millis() as u32;
+            if super_down && now_ms.saturating_sub(last_middle_ms) <= DOUBLE_CLICK_MS {
+                reset_click = true;
+                // Consumed, so a third click does not reset again.
+                last_middle_ms = 0;
+            } else {
+                last_middle_ms = now_ms;
+            }
+        }
+        // Super+0 scales around the screen center; the middle click has a cursor
+        // to anchor on, so it keeps the canvas under the pointer fixed.
+        if reset_click {
+            let (cxp, cyp) = cursor.as_ref().map(cursor::pos).unwrap_or((0, 0));
+            camera::reset_zoom_at(
+                &mut cam,
+                cxp as f32,
+                cyp as f32,
+                ray::screen_width() as f32,
+                ray::screen_height() as f32,
+            );
+        } else if reset_key {
+            camera::reset_zoom(&mut cam);
+        }
+
         if gestures_enabled {
             let (cxp, cyp) = cursor.as_ref().map(cursor::pos).unwrap_or((0, 0));
             if ptr.wheel != 0.0 {

@@ -59,6 +59,7 @@ const V120_PER_NOTCH: f32 = 120.0;
 
 // Linux evdev codes (input-event-codes.h) we care about.
 pub const KEY_ESC: u16 = 1;
+pub const KEY_0: u16 = 11;
 pub const KEY_MINUS: u16 = 12;
 pub const KEY_EQUAL: u16 = 13;
 pub const KEY_BACKSPACE: u16 = 14;
@@ -123,6 +124,8 @@ pub struct Pointer {
     pub left_released: bool,
     pub right_pressed: bool,
     pub right_released: bool,
+    // Middle is both: an edge for the double-click chord, a level for drag-to-pan.
+    pub middle_pressed: bool,
     pub middle: bool,
 }
 
@@ -348,7 +351,12 @@ fn pointer_event(inp: &mut Input, p: &mut Pointer, event: PointerEvent) {
                         p.right_released = true;
                     }
                 }
-                BTN_MIDDLE => inp.middle = down,
+                BTN_MIDDLE => {
+                    inp.middle = down;
+                    if down {
+                        p.middle_pressed = true;
+                    }
+                }
                 _ => {}
             }
         }

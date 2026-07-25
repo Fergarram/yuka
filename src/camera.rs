@@ -16,6 +16,7 @@ use crate::ray;
 
 const PAN_PX_PER_SEC: f32 = 900.0;
 const ZOOM_RATE_PER_SEC: f32 = 2.0;
+const ZOOM_DEFAULT: f32 = 1.0;
 const ZOOM_MIN: f32 = 0.1;
 const ZOOM_MAX: f32 = 8.0;
 // Perspective field of view (degrees). Larger = more depth/parallax on lift.
@@ -39,7 +40,18 @@ pub struct Camera {
 
 pub fn camera_new() -> Camera {
     // Start at native scale, framed on the first window's row.
-    Camera { cx: 400.0, cy: 220.0, zoom: 1.0 }
+    Camera { cx: 400.0, cy: 220.0, zoom: ZOOM_DEFAULT }
+}
+
+// Back to 1:1. The canvas point at the screen center stays put, so the view
+// scales around whatever you were looking at.
+pub fn reset_zoom(cam: &mut Camera) {
+    cam.zoom = ZOOM_DEFAULT;
+}
+
+// Back to 1:1 around a screen point, so the canvas under that point stays put.
+pub fn reset_zoom_at(cam: &mut Camera, sx: f32, sy: f32, sw: f32, sh: f32) {
+    zoom_at(cam, ZOOM_DEFAULT / cam.zoom, sx, sy, sw, sh);
 }
 
 // Advance the camera from held keys. Pan speed is constant in screen pixels, so
