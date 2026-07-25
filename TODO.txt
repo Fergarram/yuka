@@ -1,0 +1,8 @@
+TODO:
+
+[ ] Update raylib so we can hand an fd, basically it's currently too manual or some shit.
+
+EVENTUALLY:
+
+[ ] Have a window mode for quicker development (not all devs will start in tty)
+[ ] Have a way to run this as mac app, would basically abstract setup into a canvas engine.
