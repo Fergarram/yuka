@@ -104,6 +104,7 @@ fn route_input(
     cam3d: ray::Camera3D,
     cursor_pos: Option<(i32, i32)>,
     focused: &mut Option<WlSurface>,
+    hovered: &mut Option<WlSurface>,
     kb: Option<&input::Input>,
     pressed: bool,
     released: bool,
@@ -117,82 +118,83 @@ fn route_input(
     let pointer = state.pointer.clone();
     let keyboard = state.keyboard.clone();
 
-    let leave = |state: &mut State, focused: &mut Option<WlSurface>| {
-        let serial = SERIAL_COUNTER.next_serial();
-        pointer.motion(state, None, &MotionEvent { location: loc, serial, time: time_ms });
-        pointer.frame(state);
-        keyboard.set_focus(state, None, SERIAL_COUNTER.next_serial());
-        *focused = None;
-    };
-
-    // Super+Escape unfocuses.
+    // Super+Escape drops keyboard focus.
     let super_escape = kb
         .map(|kb| input::super_down(kb) && input::down(kb, input::KEY_ESC))
         .unwrap_or(false);
     if super_escape && focused.is_some() {
-        leave(state, focused);
+        keyboard.set_focus(state, None, SERIAL_COUNTER.next_serial());
+        *focused = None;
     }
 
-    // Click: focus the window under the cursor (and forward the press), or
-    // unfocus when clicking empty canvas.
+    // Pointer input follows the pointer; keyboard input follows focus. That split
+    // is what Wayland clients are built for, and menus depend on it: a popup has
+    // to receive enter and motion to know which item is under the cursor, and it
+    // never has keyboard focus while you are reaching for an item. Routing motion
+    // to the focused window instead left menus unable to see the pointer at all,
+    // so clicking an item did nothing.
+    let under = render::window_at(windows, cam3d, cxp as f32, cyp as f32);
+    let target = under.as_ref().map(|(surf, _, _)| surf.clone());
+    let entered = target != *hovered;
+    *hovered = target.clone();
+
+    // Motion on a move or on crossing into another surface, which is what makes
+    // Smithay emit leave and enter. Not every frame: a still pointer that keeps
+    // sending motion reads as continuous movement to clients (weston-smoke never
+    // stops smoking).
+    if moved || entered {
+        let focus = under
+            .as_ref()
+            .map(|(surf, ox, oy)| (surf.clone(), Point::<f64, Logical>::from((*ox as f64, *oy as f64))));
+        let serial = SERIAL_COUNTER.next_serial();
+        pointer.motion(state, focus, &MotionEvent { location: loc, serial, time: time_ms });
+        pointer.frame(state);
+    }
+
+    // Left button. It goes wherever the pointer is, and it is also what moves
+    // keyboard focus and raises a window; clicking empty canvas drops focus.
     if pressed {
-        match render::window_at(windows, cam3d, cxp as f32, cyp as f32) {
-            Some((surf, ox, oy)) => {
-                render::front(windows, &surf);
+        match under.as_ref() {
+            Some((surf, _, _)) => {
+                render::front(windows, surf);
                 *focused = Some(surf.clone());
                 keyboard.set_focus(state, Some(surf.clone()), SERIAL_COUNTER.next_serial());
-                let origin = Point::<f64, Logical>::from((ox as f64, oy as f64));
-                let serial = SERIAL_COUNTER.next_serial();
-                pointer.motion(state, Some((surf.clone(), origin)), &MotionEvent { location: loc, serial, time: time_ms });
                 let serial = SERIAL_COUNTER.next_serial();
                 pointer.button(state, &ButtonEvent { serial, time: time_ms, button: BTN_LEFT, state: ButtonState::Pressed });
                 pointer.frame(state);
             }
             None => {
                 if focused.is_some() {
-                    leave(state, focused);
+                    keyboard.set_focus(state, None, SERIAL_COUNTER.next_serial());
+                    *focused = None;
                 }
             }
         }
     }
 
-    // While focused, forward pointer motion (hover/drag) into that window, but
-    // only when the cursor actually moved. Forwarding every frame makes clients
-    // treat a still pointer as continuous motion (e.g. weston-smoke never stops
-    // emitting).
-    if let Some(surf) = focused.clone() {
-        match render::window_origin(windows, &surf) {
-            Some((ox, oy)) if moved => {
-                let origin = Point::<f64, Logical>::from((ox as f64, oy as f64));
-                let serial = SERIAL_COUNTER.next_serial();
-                pointer.motion(state, Some((surf.clone(), origin)), &MotionEvent { location: loc, serial, time: time_ms });
-                pointer.frame(state);
-            }
-            Some(_) => {} // focused, cursor still: nothing to forward
-            None => leave(state, focused), // focused window went away
-        }
-    }
-
-    if released && focused.is_some() {
+    // Release goes to whatever the pointer is over, which is also where the press
+    // went unless the pointer left mid-click. Menu items activate on release, so
+    // this one matters.
+    if released && hovered.is_some() {
         let serial = SERIAL_COUNTER.next_serial();
         pointer.button(state, &ButtonEvent { serial, time: time_ms, button: BTN_LEFT, state: ButtonState::Released });
         pointer.frame(state);
     }
 }
 
-// Right and middle buttons for the focused window. Neither changes focus: right
-// opens context menus where you already are, and middle is paste or open-in-tab
+// Right and middle buttons for whatever the pointer is over. Neither changes
+// focus: right opens a context menu where you already are, middle is open-in-tab
 // to a client. Left is route_input's business, since it is what focuses.
 //
-// Middle only reaches a client while one is focused; over empty canvas it stays
-// ours for drag-to-pan, and Super+double-middle stays the zoom reset.
+// Over empty canvas middle stays ours for drag-to-pan, and Super+double-middle
+// stays the zoom reset.
 fn forward_buttons(
     state: &mut State,
     ptr: &input::Pointer,
-    focused: &Option<WlSurface>,
+    hovered: &Option<WlSurface>,
     time_ms: u32,
 ) {
-    if focused.is_none() {
+    if hovered.is_none() {
         return;
     }
     let pointer = state.pointer.clone();
@@ -251,8 +253,8 @@ fn release_held_keys(
     }
 }
 
-// Forward scrolling to the focused window: inside a window the wheel belongs to
-// the client, not to the canvas zoom. Wheels send discrete v120 steps plus the
+// Forward scrolling to whatever the pointer is over: over a window the wheel
+// belongs to the client, over empty canvas it zooms the canvas. Wheels send discrete v120 steps plus the
 // pixel value clients expect, finger scroll sends pixels. Our sign convention is
 // positive up and right, Wayland's is positive down and right, so the vertical
 // axes flip back here.
@@ -469,6 +471,9 @@ fn main() {
     let mut session_active = true;
     // When the last middle button press landed, for the double click chord.
     let mut last_middle_ms: u32 = 0;
+    // Surface the pointer is currently over, so crossing into another one can
+    // emit leave and enter.
+    let mut hovered: Option<WlSurface> = None;
 
     while RUNNING.load(Ordering::Relaxed)
         && !ray::window_should_close()
@@ -679,7 +684,9 @@ fn main() {
             camera::reset_zoom(&mut cam);
         }
 
-        if gestures_enabled {
+        // Wheel zoom belongs to the canvas only when the pointer is over nothing;
+        // over a window the client has already had it.
+        if gestures_enabled && hovered.is_none() {
             let (cxp, cyp) = cursor.as_ref().map(cursor::pos).unwrap_or((0, 0));
             if ptr.wheel != 0.0 {
                 let wheel = if INVERT_SCROLL { -ptr.wheel } else { ptr.wheel };
@@ -813,6 +820,7 @@ fn main() {
             cam3d,
             cursor_pos,
             &mut focused,
+            &mut hovered,
             inp.as_ref(),
             pressed,
             released,
@@ -820,8 +828,8 @@ fn main() {
             start.elapsed().as_millis() as u32,
         );
         let time_ms = start.elapsed().as_millis() as u32;
-        forward_buttons(&mut state, &ptr, &focused, time_ms);
-        if focused.is_some() {
+        forward_buttons(&mut state, &ptr, &hovered, time_ms);
+        if hovered.is_some() {
             forward_scroll(&mut state, &ptr, time_ms);
         }
         if let Some(i) = inp.as_ref() {

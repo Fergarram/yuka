@@ -170,11 +170,6 @@ pub fn window_at(
     best.map(|i| (windows.surface[i].clone(), windows.canvas_x[i], windows.canvas_y[i]))
 }
 
-// Canvas origin of a specific surface, if present.
-pub fn window_origin(windows: &Windows, surface: &WlSurface) -> Option<(f32, f32)> {
-    index_of(windows, surface).map(|i| (windows.canvas_x[i], windows.canvas_y[i]))
-}
-
 // Current lifted z of a specific surface, if present.
 pub fn window_z(windows: &Windows, surface: &WlSurface) -> Option<f32> {
     index_of(windows, surface).map(|i| windows.z[i])
