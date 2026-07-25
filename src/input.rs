@@ -124,8 +124,10 @@ pub struct Pointer {
     pub left_released: bool,
     pub right_pressed: bool,
     pub right_released: bool,
-    // Middle is both: an edge for the double-click chord, a level for drag-to-pan.
+    // Middle is both: edges to forward and for the double-click chord, a level for
+    // drag-to-pan.
     pub middle_pressed: bool,
+    pub middle_released: bool,
     pub middle: bool,
 }
 
@@ -364,6 +366,8 @@ fn pointer_event(inp: &mut Input, p: &mut Pointer, event: PointerEvent) {
                     inp.middle = down;
                     if down {
                         p.middle_pressed = true;
+                    } else {
+                        p.middle_released = true;
                     }
                 }
                 _ => {}

@@ -30,6 +30,13 @@ use smithay::wayland::compositor::{
     with_states, BufferAssignment, CompositorClientState, CompositorHandler,
     CompositorState, SurfaceAttributes,
 };
+use smithay::wayland::selection::data_device::{
+    ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+};
+use smithay::wayland::selection::primary_selection::{
+    PrimarySelectionHandler, PrimarySelectionState,
+};
+use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::shm::with_buffer_contents;
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface,
@@ -42,8 +49,9 @@ use smithay::wayland::dmabuf::{
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::{
-    delegate_compositor, delegate_dmabuf, delegate_output, delegate_seat,
-    delegate_shm, delegate_viewporter, delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_output,
+    delegate_primary_selection, delegate_seat, delegate_shm, delegate_viewporter,
+    delegate_xdg_shell,
 };
 
 use smithay::backend::allocator::dmabuf::Dmabuf;
@@ -78,6 +86,12 @@ pub struct State {
     pub dmabuf_state: DmabufState,
     #[allow(dead_code)]
     pub dmabuf_global: DmabufGlobal,
+    // Clipboard, drag and drop, and the middle-click (primary) selection. Real
+    // toolkits expect these to exist: GTK builds an incomplete GdkSeat without a
+    // data device, which is what Chromium's "gdk_seat_get_keyboard" assertion is,
+    // and no client can copy or paste without it.
+    pub data_device_state: DataDeviceState,
+    pub primary_selection_state: PrimarySelectionState,
     // Popup tracking (menus). Smithay owns the tree, the positioner maths and
     // the parent relationships; we only ask it where they go.
     pub popups: PopupManager,
@@ -133,6 +147,8 @@ pub fn init(
     let shm_state = ShmState::new::<State>(&dh, vec![]);
     let xdg_state = XdgShellState::new::<State>(&dh);
     let viewporter_state = ViewporterState::new::<State>(&dh);
+    let data_device_state = DataDeviceState::new::<State>(&dh);
+    let primary_selection_state = PrimarySelectionState::new::<State>(&dh);
 
     // A wl_output, and xdg_output alongside it. Toolkits that derive their scale
     // and window sizing from an output (GTK, Chromium) never map a window without
@@ -208,6 +224,8 @@ pub fn init(
         keyboard,
         dmabuf_state,
         dmabuf_global,
+        data_device_state,
+        primary_selection_state,
         popups: PopupManager::default(),
         committed: Vec::new(),
         dead_dmabufs: Vec::new(),
@@ -509,6 +527,28 @@ impl CompositorHandler for State {
 // Nothing to do on bind: one static output, no per-client state.
 impl OutputHandler for State {}
 
+// Selections are handled entirely by Smithay: it keeps the current source per
+// seat and hands offers to clients. We attach no data of our own and take the
+// default drag-and-drop action negotiation.
+impl SelectionHandler for State {
+    type SelectionUserData = ();
+}
+
+impl ClientDndGrabHandler for State {}
+impl ServerDndGrabHandler for State {}
+
+impl DataDeviceHandler for State {
+    fn data_device_state(&self) -> &DataDeviceState {
+        &self.data_device_state
+    }
+}
+
+impl PrimarySelectionHandler for State {
+    fn primary_selection_state(&self) -> &PrimarySelectionState {
+        &self.primary_selection_state
+    }
+}
+
 impl BufferHandler for State {
     fn buffer_destroyed(&mut self, buffer: &WlBuffer) {
         self.dead_dmabufs.push(buffer.id());
@@ -592,3 +632,5 @@ delegate_viewporter!(State);
 delegate_dmabuf!(State);
 delegate_seat!(State);
 delegate_output!(State);
+delegate_data_device!(State);
+delegate_primary_selection!(State);

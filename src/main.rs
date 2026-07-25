@@ -41,6 +41,7 @@ use wl::state::State;
 const SHOT_FRAME: u32 = 200;
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
+const BTN_MIDDLE: u32 = 0x112;
 // Invert mouse-wheel direction (Mac-natural). Config toggle for now.
 const INVERT_SCROLL: bool = true;
 // Canvas pixels panned per horizontal wheel notch, at zoom 1.0.
@@ -49,6 +50,11 @@ const HWHEEL_PAN: f32 = 60.0;
 const DOUBLE_CLICK_MS: u32 = 400;
 // Pixels a client should scroll per wheel notch, alongside the discrete step.
 const WHEEL_STEP_PX: f32 = 15.0;
+// Sign that turns our positive-up, positive-right scroll into what a client
+// expects on the wire. Wayland counts positive as down and right, which is
+// classic scrolling; INVERT_SCROLL means Mac-natural, so it flips, and clients
+// then agree with the canvas zoom and the trackpad instead of fighting them.
+const CLIENT_SCROLL_SIGN: f32 = if INVERT_SCROLL { 1.0 } else { -1.0 };
 // How long to sleep per iteration while another VT owns the display.
 const VT_IDLE_MS: u64 = 30;
 
@@ -101,8 +107,6 @@ fn route_input(
     kb: Option<&input::Input>,
     pressed: bool,
     released: bool,
-    right_pressed: bool,
-    right_released: bool,
     moved: bool,
     time_ms: u32,
 ) {
@@ -174,18 +178,42 @@ fn route_input(
         pointer.button(state, &ButtonEvent { serial, time: time_ms, button: BTN_LEFT, state: ButtonState::Released });
         pointer.frame(state);
     }
+}
 
-    // Right button goes to whatever is already focused (context menus), it never
-    // changes focus itself.
-    if focused.is_some() && (right_pressed || right_released) {
-        if right_pressed {
+// Right and middle buttons for the focused window. Neither changes focus: right
+// opens context menus where you already are, and middle is paste or open-in-tab
+// to a client. Left is route_input's business, since it is what focuses.
+//
+// Middle only reaches a client while one is focused; over empty canvas it stays
+// ours for drag-to-pan, and Super+double-middle stays the zoom reset.
+fn forward_buttons(
+    state: &mut State,
+    ptr: &input::Pointer,
+    focused: &Option<WlSurface>,
+    time_ms: u32,
+) {
+    if focused.is_none() {
+        return;
+    }
+    let pointer = state.pointer.clone();
+    let edges = [
+        (BTN_RIGHT, ptr.right_pressed, ptr.right_released),
+        (BTN_MIDDLE, ptr.middle_pressed, ptr.middle_released),
+    ];
+    let mut sent = false;
+    for (button, down, up) in edges {
+        if down {
             let serial = SERIAL_COUNTER.next_serial();
-            pointer.button(state, &ButtonEvent { serial, time: time_ms, button: BTN_RIGHT, state: ButtonState::Pressed });
+            pointer.button(state, &ButtonEvent { serial, time: time_ms, button, state: ButtonState::Pressed });
+            sent = true;
         }
-        if right_released {
+        if up {
             let serial = SERIAL_COUNTER.next_serial();
-            pointer.button(state, &ButtonEvent { serial, time: time_ms, button: BTN_RIGHT, state: ButtonState::Released });
+            pointer.button(state, &ButtonEvent { serial, time: time_ms, button, state: ButtonState::Released });
+            sent = true;
         }
+    }
+    if sent {
         pointer.frame(state);
     }
 }
@@ -233,15 +261,16 @@ fn forward_scroll(state: &mut State, ptr: &input::Pointer, time_ms: u32) {
     if ptr.wheel != 0.0 || ptr.hwheel != 0.0 {
         let mut frame = AxisFrame::new(time_ms).source(AxisSource::Wheel);
         if ptr.wheel != 0.0 {
-            let v = -ptr.wheel;
+            let v = ptr.wheel * CLIENT_SCROLL_SIGN;
             frame = frame
                 .v120(Axis::Vertical, (v * 120.0) as i32)
                 .value(Axis::Vertical, (v * WHEEL_STEP_PX) as f64);
         }
         if ptr.hwheel != 0.0 {
+            let h = ptr.hwheel * CLIENT_SCROLL_SIGN;
             frame = frame
-                .v120(Axis::Horizontal, (ptr.hwheel * 120.0) as i32)
-                .value(Axis::Horizontal, (ptr.hwheel * WHEEL_STEP_PX) as f64);
+                .v120(Axis::Horizontal, (h * 120.0) as i32)
+                .value(Axis::Horizontal, (h * WHEEL_STEP_PX) as f64);
         }
         pointer.axis(state, frame);
         pointer.frame(state);
@@ -249,10 +278,10 @@ fn forward_scroll(state: &mut State, ptr: &input::Pointer, time_ms: u32) {
     if ptr.scroll_x != 0.0 || ptr.scroll_y != 0.0 {
         let mut frame = AxisFrame::new(time_ms).source(AxisSource::Finger);
         if ptr.scroll_y != 0.0 {
-            frame = frame.value(Axis::Vertical, -ptr.scroll_y as f64);
+            frame = frame.value(Axis::Vertical, (ptr.scroll_y * CLIENT_SCROLL_SIGN) as f64);
         }
         if ptr.scroll_x != 0.0 {
-            frame = frame.value(Axis::Horizontal, ptr.scroll_x as f64);
+            frame = frame.value(Axis::Horizontal, (ptr.scroll_x * CLIENT_SCROLL_SIGN) as f64);
         }
         pointer.axis(state, frame);
         pointer.frame(state);
@@ -521,7 +550,9 @@ fn main() {
             );
         }
 
-        // Menus follow the window they belong to, every frame.
+        // New windows open where the view is, and menus follow the window they
+        // belong to. Both have to be current before anything is drawn.
+        render::set_place_origin(&mut windows, cam.cx, cam.cy);
         render::sync_popups(&mut windows);
 
         // Send frame callbacks and flush BEFORE the vsync-blocking draw, so the
@@ -785,13 +816,13 @@ fn main() {
             inp.as_ref(),
             pressed,
             released,
-            ptr.right_pressed,
-            ptr.right_released,
             moved,
             start.elapsed().as_millis() as u32,
         );
+        let time_ms = start.elapsed().as_millis() as u32;
+        forward_buttons(&mut state, &ptr, &focused, time_ms);
         if focused.is_some() {
-            forward_scroll(&mut state, &ptr, start.elapsed().as_millis() as u32);
+            forward_scroll(&mut state, &ptr, time_ms);
         }
         if let Some(i) = inp.as_ref() {
             forward_keys(

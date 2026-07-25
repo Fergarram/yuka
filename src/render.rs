@@ -54,8 +54,13 @@ pub struct Windows {
     // path and hit testing, but they are positioned from their parent every frame
     // instead of being placed on the canvas, and they never get dragged.
     pub popup: Vec<bool>,
-    // Running x cursor for laying new windows out in a row without overlap.
-    place_x: f32,
+    // Where new windows go: the canvas point at the middle of the view, which the
+    // main loop keeps current, plus a cascade step so a second window does not
+    // land exactly on the first. A row from the origin was fine for a fixed test
+    // set and wrong for real apps: anything that opened later, including a
+    // browser's own dialogs, landed off screen and looked like it never appeared.
+    place_at: (f32, f32),
+    cascade: u32,
     // Next stack order to assign (monotonic; higher = more recently raised).
     next_order: u32,
     // Reused scratch for repacking shm rows when stride != width*4.
@@ -90,7 +95,8 @@ pub fn windows_new() -> Windows {
         swizzle: Vec::new(),
         owns: Vec::new(),
         popup: Vec::new(),
-        place_x: 0.0,
+        place_at: (0.0, 0.0),
+        cascade: 0,
         next_order: 0,
         scratch: Vec::new(),
     }
@@ -200,6 +206,13 @@ pub fn set_window_pos(windows: &mut Windows, surface: &WlSurface, x: f32, y: f32
     }
 }
 
+// Where the next new window will be centred: the canvas point in the middle of
+// the view. Kept current by the main loop so a window always opens where you are
+// looking, however far the canvas has been panned.
+pub fn set_place_origin(windows: &mut Windows, cx: f32, cy: f32) {
+    windows.place_at = (cx, cy);
+}
+
 // Put every popup under its parent: position from the parent's origin plus the
 // offset Smithay resolved from the positioner, same lift, and one step higher in
 // stack order so a menu draws and hit-tests above the window it belongs to.
@@ -287,14 +300,21 @@ fn store_entry(
             windows.owns[i] = owns;
         }
         None => {
-            // Lay windows out left to right, no overlap, sized to each window.
-            // Popups are not placed: sync_popups puts them under their parent
-            // before the first draw.
-            const GAP: f32 = 80.0;
-            let (cx, cy) = if popup { (0.0, 0.0) } else { (windows.place_x, 0.0) };
-            if !popup {
-                windows.place_x += w as f32 + GAP;
-            }
+            // Centre new windows on the view, stepped so successive ones do not
+            // hide each other. Popups are not placed at all: sync_popups puts them
+            // under their parent before the first draw.
+            const CASCADE_STEP: f32 = 48.0;
+            const CASCADE_WRAP: u32 = 6;
+            let (cx, cy) = if popup {
+                (0.0, 0.0)
+            } else {
+                let step = (windows.cascade % CASCADE_WRAP) as f32 * CASCADE_STEP;
+                windows.cascade += 1;
+                (
+                    windows.place_at.0 - w as f32 * 0.5 + step,
+                    windows.place_at.1 - h as f32 * 0.5 + step,
+                )
+            };
             let order = windows.next_order;
             windows.next_order += 1;
             windows.surface.push(surface.clone());
@@ -480,7 +500,8 @@ pub fn destroy_owned(windows: &mut Windows) {
     windows.order.clear();
     windows.swizzle.clear();
     windows.owns.clear();
-    windows.place_x = 0.0;
+    windows.popup.clear();
+    windows.cascade = 0;
 }
 
 //
