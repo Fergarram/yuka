@@ -15,6 +15,10 @@ use std::ffi::{c_char, c_int, c_void, CString};
 pub const PIXELFORMAT_R8G8B8A8: i32 = 7;
 // SetShaderValue uniform type for a single float.
 pub const SHADER_UNIFORM_FLOAT: i32 = 0;
+// rlgl primitive mode for quads.
+pub const RL_QUADS: i32 = 0x0007;
+// Camera projection: perspective.
+pub const CAMERA_PERSPECTIVE: i32 = 0;
 
 
 //
@@ -32,15 +36,6 @@ pub struct Color {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct Rectangle {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
 pub struct Vector2 {
     pub x: f32,
     pub y: f32,
@@ -48,12 +43,27 @@ pub struct Vector2 {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct Texture2D {
-    pub id: u32,
-    pub width: c_int,
-    pub height: c_int,
-    pub mipmaps: c_int,
-    pub format: c_int,
+pub struct Vector3 {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Camera3D {
+    pub position: Vector3,
+    pub target: Vector3,
+    pub up: Vector3,
+    pub fovy: f32,
+    pub projection: c_int,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Ray {
+    pub position: Vector3,
+    pub direction: Vector3,
 }
 
 #[repr(C)]
@@ -62,8 +72,6 @@ pub struct Shader {
     pub id: u32,
     pub locs: *mut c_int,
 }
-
-pub const WHITE: Color = Color { r: 255, g: 255, b: 255, a: 255 };
 
 //
 // Extern
@@ -81,15 +89,6 @@ extern "C" {
     fn GetFrameTime() -> f32;
     fn SetExitKey(key: c_int);
     fn TakeScreenshot(file_name: *const c_char);
-
-    fn DrawTexturePro(
-        texture: Texture2D,
-        source: Rectangle,
-        dest: Rectangle,
-        origin: Vector2,
-        rotation: f32,
-        tint: Color,
-    );
 
     fn LoadShader(vs: *const c_char, fs: *const c_char) -> Shader;
     fn UnloadShader(shader: Shader);
@@ -121,6 +120,22 @@ extern "C" {
         data: *const c_void,
     );
     fn rlUnloadTexture(id: u32);
+
+    // 3D mode + rlgl immediate-mode quad drawing.
+    fn rlSetClipPlanes(near_plane: f64, far_plane: f64);
+    fn BeginMode3D(camera: Camera3D);
+    fn EndMode3D();
+    fn GetScreenToWorldRay(position: Vector2, camera: Camera3D) -> Ray;
+    fn rlSetTexture(id: u32);
+    fn rlBegin(mode: c_int);
+    fn rlEnd();
+    fn rlColor4ub(r: u8, g: u8, b: u8, a: u8);
+    fn rlTexCoord2f(x: f32, y: f32);
+    fn rlVertex3f(x: f32, y: f32, z: f32);
+    fn rlDisableBackfaceCulling();
+    fn rlEnableBackfaceCulling();
+    fn rlDisableDepthTest();
+    fn rlEnableDepthTest();
 
     // EGL, linked via -lEGL. The context is created by raylib's DRM platform.
     fn eglGetProcAddress(proc_name: *const c_char) -> *mut c_void;
@@ -212,14 +227,63 @@ pub fn unload_texture(id: u32) {
     unsafe { rlUnloadTexture(id) };
 }
 
-pub fn draw_texture_pro(
-    texture: Texture2D,
-    source: Rectangle,
-    dest: Rectangle,
-    tint: Color,
+//
+// 3D
+//
+
+// Override raylib's default 3D clip planes (0.01 .. 1000). Our perspective
+// camera floats far above the canvas (height grows as we zoom out), so the
+// default far plane clips every window. Depth test is off (painter's order), so
+// the huge near/far range costs us no precision. Persists across BeginMode3D and
+// GetScreenToWorldRay, so set it once at startup.
+pub fn set_clip_planes(near_plane: f64, far_plane: f64) {
+    unsafe { rlSetClipPlanes(near_plane, far_plane) };
+}
+
+pub fn begin_mode_3d(camera: Camera3D) {
+    unsafe { BeginMode3D(camera) };
+}
+
+pub fn end_mode_3d() {
+    unsafe { EndMode3D() };
+}
+
+pub fn screen_to_world_ray(x: f32, y: f32, camera: Camera3D) -> Ray {
+    unsafe { GetScreenToWorldRay(Vector2 { x, y }, camera) }
+}
+
+pub fn disable_backface_culling() {
+    unsafe { rlDisableBackfaceCulling() };
+}
+
+pub fn enable_backface_culling() {
+    unsafe { rlEnableBackfaceCulling() };
+}
+
+pub fn disable_depth_test() {
+    unsafe { rlDisableDepthTest() };
+}
+
+pub fn enable_depth_test() {
+    unsafe { rlEnableDepthTest() };
+}
+
+// Draw a textured quad in 3D from four (position, uv) corners, in order.
+pub fn draw_textured_quad(
+    tex_id: u32,
+    corners: [(Vector3, f32, f32); 4],
 ) {
-    let origin = Vector2 { x: 0.0, y: 0.0 };
-    unsafe { DrawTexturePro(texture, source, dest, origin, 0.0, tint) };
+    unsafe {
+        rlSetTexture(tex_id);
+        rlBegin(RL_QUADS);
+        rlColor4ub(255, 255, 255, 255);
+        for (v, u, w) in corners {
+            rlTexCoord2f(u, w);
+            rlVertex3f(v.x, v.y, v.z);
+        }
+        rlEnd();
+        rlSetTexture(0);
+    }
 }
 
 //

@@ -10,19 +10,28 @@
 // is drawn as a shader-processed quad, centered at native size.
 //
 
-use crate::camera::{self, Camera};
+use crate::camera;
 use crate::egl::{Egl, EglImage};
-use crate::ray::{self, Rectangle, Shader, Texture2D};
+use crate::ray::{self, Shader, Vector3};
 use crate::wl::state::{self, State};
 use smithay::reexports::wayland_server::backend::ObjectId;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
 
 //
+// Constants
+//
+
+// How high (canvas units) a window rises while lifted, and how fast z animates.
+const LIFT_HEIGHT: f32 = 250.0;
+const LIFT_RATE: f32 = 14.0;
+
+//
 // Types
 //
 
-// One logical window per index.
+// One logical window per index. Position is always on the z=0 plane
+// (canvas_x/y); `z` is a purely visual lift toward the camera.
 pub struct Windows {
     pub surface: Vec<WlSurface>,
     pub tex_id: Vec<u32>,
@@ -31,6 +40,11 @@ pub struct Windows {
     // Top-left position on the infinite canvas, assigned on first appearance.
     pub canvas_x: Vec<f32>,
     pub canvas_y: Vec<f32>,
+    // Visual lift height (current + target, animated) and stack order for
+    // draw-order ties among windows at the same z.
+    pub z: Vec<f32>,
+    pub target_z: Vec<f32>,
+    pub order: Vec<u32>,
     // 1.0 for shm (BGRA in memory), 0.0 for dmabuf (correct RGBA via EGL).
     pub swizzle: Vec<f32>,
     // true when we own tex_id (shm, freed via unload). false for dmabuf
@@ -38,6 +52,8 @@ pub struct Windows {
     pub owns: Vec<bool>,
     // Running x cursor for laying new windows out in a row without overlap.
     place_x: f32,
+    // Next stack order to assign (monotonic; higher = more recently raised).
+    next_order: u32,
     // Reused scratch for repacking shm rows when stride != width*4.
     scratch: Vec<u8>,
 }
@@ -64,9 +80,13 @@ pub fn windows_new() -> Windows {
         tex_h: Vec::new(),
         canvas_x: Vec::new(),
         canvas_y: Vec::new(),
+        z: Vec::new(),
+        target_z: Vec::new(),
+        order: Vec::new(),
         swizzle: Vec::new(),
         owns: Vec::new(),
         place_x: 0.0,
+        next_order: 0,
         scratch: Vec::new(),
     }
 }
@@ -105,33 +125,82 @@ pub fn prune_dead(windows: &mut Windows) {
         windows.tex_h.remove(i);
         windows.canvas_x.remove(i);
         windows.canvas_y.remove(i);
+        windows.z.remove(i);
+        windows.target_z.remove(i);
+        windows.order.remove(i);
         windows.swizzle.remove(i);
         windows.owns.remove(i);
     }
 }
 
-// Topmost window whose canvas rect contains the point; returns the surface and
-// its canvas origin. Later entries are considered on top.
+// Topmost window under the cursor: cast the cursor ray to the z=0 plane and pick
+// the highest-order window whose rect contains the hit. Returns the surface and
+// its canvas origin.
 pub fn window_at(
     windows: &Windows,
-    cx: f32,
-    cy: f32,
+    cam3d: ray::Camera3D,
+    sx: f32,
+    sy: f32,
 ) -> Option<(WlSurface, f32, f32)> {
-    for i in (0..windows.surface.len()).rev() {
+    let (cx, cy) = camera::screen_to_plane(cam3d, sx, sy, 0.0)?;
+    let mut best: Option<usize> = None;
+    for i in 0..windows.surface.len() {
         let x = windows.canvas_x[i];
         let y = windows.canvas_y[i];
         let w = windows.tex_w[i] as f32;
         let h = windows.tex_h[i] as f32;
         if cx >= x && cx < x + w && cy >= y && cy < y + h {
-            return Some((windows.surface[i].clone(), x, y));
+            if best.map_or(true, |b| windows.order[i] > windows.order[b]) {
+                best = Some(i);
+            }
         }
     }
-    None
+    best.map(|i| (windows.surface[i].clone(), windows.canvas_x[i], windows.canvas_y[i]))
 }
 
 // Canvas origin of a specific surface, if present.
 pub fn window_origin(windows: &Windows, surface: &WlSurface) -> Option<(f32, f32)> {
     index_of(windows, surface).map(|i| (windows.canvas_x[i], windows.canvas_y[i]))
+}
+
+// Move a window to a canvas position.
+pub fn set_window_pos(windows: &mut Windows, surface: &WlSurface, x: f32, y: f32) {
+    if let Some(i) = index_of(windows, surface) {
+        windows.canvas_x[i] = x;
+        windows.canvas_y[i] = y;
+    }
+}
+
+// Bring a window to the front of the stack (higher order draws on top).
+pub fn front(windows: &mut Windows, surface: &WlSurface) {
+    if let Some(i) = index_of(windows, surface) {
+        windows.order[i] = windows.next_order;
+        windows.next_order += 1;
+    }
+}
+
+// Front + lift toward the camera (grab). The camera views from -z, so lifting
+// toward the viewer means moving to negative z.
+pub fn raise(windows: &mut Windows, surface: &WlSurface) {
+    front(windows, surface);
+    if let Some(i) = index_of(windows, surface) {
+        windows.target_z[i] = -LIFT_HEIGHT;
+    }
+}
+
+// Settle a window back onto the plane, keeping its stack order (drop).
+pub fn settle(windows: &mut Windows, surface: &WlSurface) {
+    if let Some(i) = index_of(windows, surface) {
+        windows.target_z[i] = 0.0;
+    }
+}
+
+// Animate every window's lift toward its target.
+pub fn animate(windows: &mut Windows, dt: f32) {
+    let t = (LIFT_RATE * dt).min(1.0);
+    for i in 0..windows.z.len() {
+        windows.z[i] += (windows.target_z[i] - windows.z[i]) * t;
+    }
 }
 
 fn store_entry(
@@ -162,12 +231,17 @@ fn store_entry(
             let cx = windows.place_x;
             let cy = 0.0;
             windows.place_x += w as f32 + GAP;
+            let order = windows.next_order;
+            windows.next_order += 1;
             windows.surface.push(surface.clone());
             windows.tex_id.push(tex_id);
             windows.tex_w.push(w);
             windows.tex_h.push(h);
             windows.canvas_x.push(cx);
             windows.canvas_y.push(cy);
+            windows.z.push(0.0);
+            windows.target_z.push(0.0);
+            windows.order.push(order);
             windows.swizzle.push(swizzle);
             windows.owns.push(owns);
         }
@@ -319,6 +393,9 @@ pub fn destroy_owned(windows: &mut Windows) {
     windows.tex_h.clear();
     windows.canvas_x.clear();
     windows.canvas_y.clear();
+    windows.z.clear();
+    windows.target_z.clear();
+    windows.order.clear();
     windows.swizzle.clear();
     windows.owns.clear();
     windows.place_x = 0.0;
@@ -330,53 +407,47 @@ pub fn destroy_owned(windows: &mut Windows) {
 
 pub fn draw_toplevels(
     windows: &Windows,
-    state: &State,
-    cam: &Camera,
+    cam3d: ray::Camera3D,
     shader: Shader,
     alpha_loc: i32,
     swizzle_loc: i32,
 ) {
-    let screen_w = ray::screen_width();
-    let screen_h = ray::screen_height();
+    // Painter's order: the camera is on the -z side, so draw far (high z) first,
+    // near (low z) last; ties broken by stack order. Depth test is off so later
+    // draws win among equal z.
+    let mut idx: Vec<usize> = (0..windows.surface.len())
+        .filter(|&i| windows.tex_w[i] > 0 && windows.tex_h[i] > 0)
+        .collect();
+    idx.sort_by(|&a, &b| {
+        windows.z[b]
+            .partial_cmp(&windows.z[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(windows.order[a].cmp(&windows.order[b]))
+    });
 
-    for surface in state::toplevel_surfaces(state) {
-        let Some(i) = index_of(windows, &surface) else {
-            continue;
-        };
-        let tw = windows.tex_w[i];
-        let th = windows.tex_h[i];
-        if tw <= 0 || th <= 0 {
-            continue;
-        }
-
-        let texture = Texture2D {
-            id: windows.tex_id[i],
-            width: tw,
-            height: th,
-            mipmaps: 1,
-            format: ray::PIXELFORMAT_R8G8B8A8,
-        };
-        // Both shm uploads and dmabuf EGLImages keep the buffer's top-left
-        // origin, so no vertical flip is needed.
-        let source = Rectangle { x: 0.0, y: 0.0, width: tw as f32, height: th as f32 };
-
-        // Place the window on the canvas, mapped through the camera. The buffer
-        // is (tw, th) canvas units; zoom scales it to screen pixels.
-        let (sx, sy) = camera::canvas_to_screen(
-            cam, screen_w, screen_h, windows.canvas_x[i], windows.canvas_y[i],
-        );
-        // Snap to integer pixels so windows stay crisp at fractional zoom.
-        let dest = Rectangle {
-            x: sx.round(),
-            y: sy.round(),
-            width: (tw as f32 * cam.zoom).round(),
-            height: (th as f32 * cam.zoom).round(),
-        };
-
+    ray::begin_mode_3d(cam3d);
+    ray::disable_backface_culling();
+    ray::disable_depth_test();
+    for i in idx {
+        let x = windows.canvas_x[i];
+        let y = windows.canvas_y[i];
+        let w = windows.tex_w[i] as f32;
+        let h = windows.tex_h[i] as f32;
+        let z = windows.z[i];
+        // Quad on a plane parallel to the canvas, raised by z. Top-left origin.
+        let corners = [
+            (Vector3 { x, y, z }, 0.0, 0.0),
+            (Vector3 { x: x + w, y, z }, 1.0, 0.0),
+            (Vector3 { x: x + w, y: y + h, z }, 1.0, 1.0),
+            (Vector3 { x, y: y + h, z }, 0.0, 1.0),
+        ];
         ray::begin_shader_mode(shader);
         ray::set_shader_float(shader, alpha_loc, 0.0);
         ray::set_shader_float(shader, swizzle_loc, windows.swizzle[i]);
-        ray::draw_texture_pro(texture, source, dest, ray::WHITE);
+        ray::draw_textured_quad(windows.tex_id[i], corners);
         ray::end_shader_mode();
     }
+    ray::enable_depth_test();
+    ray::enable_backface_culling();
+    ray::end_mode_3d();
 }

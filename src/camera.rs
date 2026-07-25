@@ -18,6 +18,8 @@ const PAN_PX_PER_SEC: f32 = 900.0;
 const ZOOM_RATE_PER_SEC: f32 = 2.0;
 const ZOOM_MIN: f32 = 0.1;
 const ZOOM_MAX: f32 = 8.0;
+// Perspective field of view (degrees). Larger = more depth/parallax on lift.
+const FOV_DEG: f32 = 40.0;
 
 //
 // Types
@@ -91,28 +93,40 @@ pub fn zoom_at(cam: &mut Camera, factor: f32, sx: f32, sy: f32, sw: f32, sh: f32
     cam.cy = py - (sy - sh * 0.5) / cam.zoom;
 }
 
-// Map a screen pixel position back to a canvas point (inverse of the camera).
-pub fn screen_to_canvas(
-    cam: &Camera,
-    sx: f32,
-    sy: f32,
-    screen_w: i32,
-    screen_h: i32,
-) -> (f32, f32) {
-    let cx = cam.cx + (sx - screen_w as f32 * 0.5) / cam.zoom;
-    let cy = cam.cy + (sy - screen_h as f32 * 0.5) / cam.zoom;
-    (cx, cy)
+// Build the perspective 3D camera. It floats on the -z side of the canvas,
+// looking toward +z, at a distance chosen so that at the z=0 plane `zoom` screen
+// pixels map to one canvas unit (keeping the 2D zoom controls meaningful).
+// Viewing from -z with up = -y makes world x run rightward and y downward on
+// screen, matching canvas coordinates directly (no mirror). Windows lift toward
+// the viewer along -z.
+pub fn camera_3d(cam: &Camera, screen_h: i32) -> ray::Camera3D {
+    let half = (FOV_DEG * 0.5).to_radians();
+    let dist = screen_h as f32 / (2.0 * cam.zoom * half.tan());
+    ray::Camera3D {
+        position: ray::Vector3 { x: cam.cx, y: cam.cy, z: -dist },
+        target: ray::Vector3 { x: cam.cx, y: cam.cy, z: 0.0 },
+        up: ray::Vector3 { x: 0.0, y: -1.0, z: 0.0 },
+        fovy: FOV_DEG,
+        projection: ray::CAMERA_PERSPECTIVE,
+    }
 }
 
-// Map a canvas point to a screen pixel position.
-pub fn canvas_to_screen(
-    cam: &Camera,
-    screen_w: i32,
-    screen_h: i32,
-    x: f32,
-    y: f32,
-) -> (f32, f32) {
-    let sx = (x - cam.cx) * cam.zoom + screen_w as f32 * 0.5;
-    let sy = (y - cam.cy) * cam.zoom + screen_h as f32 * 0.5;
-    (sx, sy)
+// Cast the cursor ray through the perspective camera and intersect a horizontal
+// plane at z = plane_z. Returns the canvas (x, y) hit, if any.
+pub fn screen_to_plane(
+    cam3d: ray::Camera3D,
+    sx: f32,
+    sy: f32,
+    plane_z: f32,
+) -> Option<(f32, f32)> {
+    let r = ray::screen_to_world_ray(sx, sy, cam3d);
+    if r.direction.z.abs() < 1e-6 {
+        return None;
+    }
+    let t = (plane_z - r.position.z) / r.direction.z;
+    if t < 0.0 {
+        return None;
+    }
+    Some((r.position.x + t * r.direction.x, r.position.y + t * r.direction.y))
 }
+

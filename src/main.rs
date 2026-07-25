@@ -26,9 +26,9 @@ use smithay::backend::input::{ButtonState, KeyState};
 use smithay::input::keyboard::{FilterResult, Keycode};
 use smithay::input::pointer::{ButtonEvent, MotionEvent};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 
-use camera::Camera;
 use render::Windows;
 use wl::state::State;
 
@@ -83,8 +83,8 @@ fn spawn_client(socket_name: &str, cmd: &str) -> Option<Child> {
 // the cursor's canvas position; Smithay derives surface-local coords + focus.
 fn route_input(
     state: &mut State,
-    windows: &Windows,
-    cam: &Camera,
+    windows: &mut Windows,
+    cam3d: ray::Camera3D,
     cursor_pos: Option<(i32, i32)>,
     focused: &mut Option<WlSurface>,
     kb: Option<&kbd::Keyboard>,
@@ -93,9 +93,8 @@ fn route_input(
     time_ms: u32,
 ) {
     let Some((cxp, cyp)) = cursor_pos else { return };
-    let sw = ray::screen_width();
-    let sh = ray::screen_height();
-    let (ccx, ccy) = camera::screen_to_canvas(cam, cxp as f32, cyp as f32, sw, sh);
+    let (ccx, ccy) = camera::screen_to_plane(cam3d, cxp as f32, cyp as f32, 0.0)
+        .unwrap_or((0.0, 0.0));
     let loc = Point::<f64, Logical>::from((ccx as f64, ccy as f64));
     let pointer = state.pointer.clone();
     let keyboard = state.keyboard.clone();
@@ -119,8 +118,9 @@ fn route_input(
     // Click: focus the window under the cursor (and forward the press), or
     // unfocus when clicking empty canvas.
     if pressed {
-        match render::window_at(windows, ccx, ccy) {
+        match render::window_at(windows, cam3d, cxp as f32, cyp as f32) {
             Some((surf, ox, oy)) => {
+                render::front(windows, &surf);
                 *focused = Some(surf.clone());
                 keyboard.set_focus(state, Some(surf.clone()), SERIAL_COUNTER.next_serial());
                 let origin = Point::<f64, Logical>::from((ox as f64, oy as f64));
@@ -211,6 +211,10 @@ fn main() {
     // Escape must reach clients, not quit us; unfocus is Super+Escape.
     ray::set_exit_key(0);
 
+    // Push the 3D far plane out past the camera's zoomed-out height so windows
+    // on the z=0 plane are never clipped (raylib defaults to 0.01 .. 1000).
+    ray::set_clip_planes(1.0, 200_000.0);
+
     println!(
         "om_wm: screen {}x{}  egl_display={:p}  egl_context={:p}",
         ray::screen_width(),
@@ -241,6 +245,8 @@ fn main() {
     let mut keyboard = kbd::open();
     // The window we are interacting with; while Some, pan/zoom is disabled.
     let mut focused: Option<WlSurface> = None;
+    // Active Super+drag: (window, offset from cursor to the window's origin).
+    let mut drag: Option<(WlSurface, f32, f32)> = None;
 
     // Spawn a few test clients (shm terminals + dmabuf triangles) so the canvas
     // has several windows to pan and zoom around.
@@ -313,11 +319,17 @@ fn main() {
         if let Some(kb) = keyboard.as_mut() {
             kbd::poll(kb);
         }
+        let super_down = keyboard.as_ref().map(kbd::super_down).unwrap_or(false);
         let gestures_enabled = focused.is_none();
+        // Suppress trackpad gestures while Super is held (reserved for window
+        // manipulation) so a pinch does not zoom the canvas.
         let (mut pressed, mut released) = match touchpad.as_mut() {
-            Some(tp) => {
-                touch::update(tp, &mut cam, cursor.as_mut(), gestures_enabled)
-            }
+            Some(tp) => touch::update(
+                tp,
+                &mut cam,
+                cursor.as_mut(),
+                gestures_enabled && !super_down,
+            ),
             None => (false, false),
         };
 
@@ -355,11 +367,40 @@ fn main() {
             camera::camera_update(&mut cam, keyboard.as_ref());
         }
         render::prune_dead(&mut windows);
+        render::animate(&mut windows, ray::frame_time());
+        let cam3d = camera::camera_3d(&cam, ray::screen_height());
         let cursor_pos = cursor.as_ref().map(cursor::pos);
+
+        // Super+drag: grab the window under the cursor, lift it toward the
+        // camera, and move it on the z=0 plane. Consumes the click so it is not
+        // also focused/forwarded.
+        let (sxp, syp) = cursor_pos
+            .map(|(x, y)| (x as f32, y as f32))
+            .unwrap_or((0.0, 0.0));
+        let (ccx, ccy) =
+            camera::screen_to_plane(cam3d, sxp, syp, 0.0).unwrap_or((0.0, 0.0));
+        if pressed && super_down && drag.is_none() {
+            if let Some((surf, ox, oy)) =
+                render::window_at(&windows, cam3d, sxp, syp)
+            {
+                render::raise(&mut windows, &surf);
+                drag = Some((surf, ox - ccx, oy - ccy));
+                pressed = false;
+            }
+        }
+        if let Some((surf, offx, offy)) = drag.clone() {
+            render::set_window_pos(&mut windows, &surf, ccx + offx, ccy + offy);
+            if released || !surf.is_alive() {
+                render::settle(&mut windows, &surf);
+                drag = None;
+                released = false;
+            }
+        }
+
         route_input(
             &mut state,
-            &windows,
-            &cam,
+            &mut windows,
+            cam3d,
             cursor_pos,
             &mut focused,
             keyboard.as_ref(),
@@ -378,7 +419,7 @@ fn main() {
 
         ray::begin_drawing();
         ray::clear_background(clear);
-        render::draw_toplevels(&windows, &state, &cam, shader, alpha_loc, swizzle_loc);
+        render::draw_toplevels(&windows, cam3d, shader, alpha_loc, swizzle_loc);
         if screenshot && frame == SHOT_FRAME {
             ray::take_screenshot("shot.png");
         }
