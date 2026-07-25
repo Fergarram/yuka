@@ -17,6 +17,7 @@ use smithay::reexports::wayland_server::{
     protocol::{wl_buffer::WlBuffer, wl_seat::WlSeat, wl_surface::WlSurface},
     Client, Display, ListeningSocket, Resource,
 };
+use smithay::desktop::{PopupKind, PopupManager};
 use smithay::input::keyboard::{KeyboardHandle, XkbConfig};
 use smithay::input::pointer::{CursorImageStatus, PointerHandle};
 use smithay::input::{Seat, SeatHandler, SeatState};
@@ -66,6 +67,9 @@ pub struct State {
     pub dmabuf_state: DmabufState,
     #[allow(dead_code)]
     pub dmabuf_global: DmabufGlobal,
+    // Popup tracking (menus). Smithay owns the tree, the positioner maths and
+    // the parent relationships; we only ask it where they go.
+    pub popups: PopupManager,
 
     // Surfaces that committed since the last drain. The render side reads and
     // clears this each frame. Plain surface handles, no rendering state here.
@@ -168,6 +172,7 @@ pub fn init(
         keyboard,
         dmabuf_state,
         dmabuf_global,
+        popups: PopupManager::default(),
         committed: Vec::new(),
         dead_dmabufs: Vec::new(),
         held_dmabufs: Vec::new(),
@@ -231,6 +236,42 @@ pub fn is_toplevel(state: &State, surface: &WlSurface) -> bool {
         .toplevel_surfaces()
         .iter()
         .any(|t| t.wl_surface() == surface)
+}
+
+// True if the surface is a mapped xdg popup (a menu), which we do composite, but
+// positioned by its parent rather than placed on the canvas.
+pub fn is_popup(state: &State, surface: &WlSurface) -> bool {
+    state.popups.find_popup(surface).is_some()
+}
+
+// The popups of a toplevel, each with its offset from that toplevel's origin.
+// Smithay resolves the positioner and the nesting; this is just the read.
+pub fn popups_of(root: &WlSurface) -> Vec<(WlSurface, f32, f32)> {
+    PopupManager::popups_for_surface(root)
+        .map(|(popup, offset)| {
+            (popup.wl_surface().clone(), offset.x as f32, offset.y as f32)
+        })
+        .collect()
+}
+
+// Tell every open popup it is done, which is how a menu closes when the click
+// lands somewhere else. Clients destroy the surface in response.
+pub fn dismiss_popups(state: &State) {
+    for root in toplevel_surfaces(state) {
+        for (popup, _) in PopupManager::popups_for_surface(&root) {
+            match popup {
+                PopupKind::Xdg(p) => p.send_popup_done(),
+                _ => {}
+            }
+        }
+    }
+}
+
+// Whether any popup is open at all.
+pub fn any_popup(state: &State) -> bool {
+    toplevel_surfaces(state)
+        .iter()
+        .any(|root| PopupManager::popups_for_surface(root).next().is_some())
 }
 
 // If the surface has a newly committed shm buffer, invoke f with its
@@ -393,6 +434,9 @@ impl CompositorHandler for State {
     }
 
     fn commit(&mut self, surface: &WlSurface) {
+        // A popup counts as mapped from its first commit, which is what moves it
+        // out of Smithay's unmapped list and into its parent's tree.
+        self.popups.commit(surface);
         if !self.committed.iter().any(|s| s == surface) {
             self.committed.push(surface.clone());
         }
@@ -450,7 +494,13 @@ impl XdgShellHandler for State {
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
+        // The positioner already carries where the client wants this, relative to
+        // the parent's geometry, and we do not constrain it to an output: the
+        // canvas has no edges to be pushed away from.
         let _ = surface.send_configure();
+        if let Err(e) = self.popups.track_popup(PopupKind::Xdg(surface)) {
+            eprintln!("om_wm: popup track failed: {e}");
+        }
     }
 
     fn grab(&mut self, _surface: PopupSurface, _seat: WlSeat, _serial: Serial) {}

@@ -8,7 +8,7 @@ name = "om_wm"
 path = "src/main.rs"
 
 [dependencies]
-smithay = { version = "0.7", default-features = false, features = ["wayland_frontend", "backend_drm"] }
+smithay = { version = "0.7", default-features = false, features = ["wayland_frontend", "backend_drm", "desktop"] }
 libc = "0.2"
 input = "0.10.0"
 

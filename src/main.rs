@@ -460,6 +460,9 @@ fn main() {
             );
         }
 
+        // Menus follow the window they belong to, every frame.
+        render::sync_popups(&mut windows);
+
         // Send frame callbacks and flush BEFORE the vsync-blocking draw, so the
         // client renders its next frame concurrently with our page flip instead
         // of waiting a full refresh (which would halve its frame rate).
@@ -691,6 +694,18 @@ fn main() {
             });
         }
 
+        // A click that misses every popup closes the open menus. Proper menus take
+        // a popup grab and get this from the grab; we do not hold one yet, so the
+        // dismissal is ours to do.
+        if pressed && wl::state::any_popup(&state) {
+            let on_popup = render::window_at(&windows, cam3d, sxp, syp)
+                .map(|(surf, _, _)| wl::state::is_popup(&state, &surf))
+                .unwrap_or(false);
+            if !on_popup {
+                wl::state::dismiss_popups(&state);
+            }
+        }
+
         let moved = cursor_pos != last_cursor;
         last_cursor = cursor_pos;
         route_input(
@@ -718,7 +733,7 @@ fn main() {
 
         ray::begin_drawing();
         ray::clear_background(clear);
-        render::draw_toplevels(&windows, cam3d, shader, alpha_loc, swizzle_loc);
+        render::draw_windows(&windows, cam3d, shader, alpha_loc, swizzle_loc);
         if screenshot && frame == SHOT_FRAME {
             ray::take_screenshot("shot.png");
         }

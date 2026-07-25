@@ -1,7 +1,7 @@
 <project-context>
 	om_wm is a Wayland compositor and window manager: an infinite canvas where
-	windows are quads we can smoothly zoom, pan, and move, with per window
-	shader effects.
+	windows are quads we can smoothly zoom, pan, and move, drawn through a
+	shader pass that applies to all windows.
 
 	Language: Rust. Renderer: raylib (via FFI / raylib-rs). Wayland protocol
 	frontend: Smithay.

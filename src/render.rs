@@ -50,6 +50,10 @@ pub struct Windows {
     // true when we own tex_id (shm, freed via unload). false for dmabuf
     // textures, which the cache owns.
     pub owns: Vec<bool>,
+    // true for popups (menus). They share this store so they share the texture
+    // path and hit testing, but they are positioned from their parent every frame
+    // instead of being placed on the canvas, and they never get dragged.
+    pub popup: Vec<bool>,
     // Running x cursor for laying new windows out in a row without overlap.
     place_x: f32,
     // Next stack order to assign (monotonic; higher = more recently raised).
@@ -85,6 +89,7 @@ pub fn windows_new() -> Windows {
         order: Vec::new(),
         swizzle: Vec::new(),
         owns: Vec::new(),
+        popup: Vec::new(),
         place_x: 0.0,
         next_order: 0,
         scratch: Vec::new(),
@@ -130,6 +135,7 @@ pub fn prune_dead(windows: &mut Windows) {
         windows.order.remove(i);
         windows.swizzle.remove(i);
         windows.owns.remove(i);
+        windows.popup.remove(i);
     }
 }
 
@@ -194,6 +200,37 @@ pub fn set_window_pos(windows: &mut Windows, surface: &WlSurface, x: f32, y: f32
     }
 }
 
+// Put every popup under its parent: position from the parent's origin plus the
+// offset Smithay resolved from the positioner, same lift, and one step higher in
+// stack order so a menu draws and hit-tests above the window it belongs to.
+// Called once a frame, so dragging or lifting a window carries its menus along.
+pub fn sync_popups(windows: &mut Windows) {
+    let mut moves: Vec<(usize, f32, f32, f32, u32)> = Vec::new();
+    for i in 0..windows.surface.len() {
+        if windows.popup[i] {
+            continue;
+        }
+        for (popup, ox, oy) in state::popups_of(&windows.surface[i]) {
+            if let Some(j) = index_of(windows, &popup) {
+                moves.push((
+                    j,
+                    windows.canvas_x[i] + ox,
+                    windows.canvas_y[i] + oy,
+                    windows.z[i],
+                    windows.order[i] + 1,
+                ));
+            }
+        }
+    }
+    for (j, x, y, z, order) in moves {
+        windows.canvas_x[j] = x;
+        windows.canvas_y[j] = y;
+        windows.z[j] = z;
+        windows.target_z[j] = z;
+        windows.order[j] = order;
+    }
+}
+
 // Bring a window to the front of the stack (higher order draws on top).
 pub fn front(windows: &mut Windows, surface: &WlSurface) {
     if let Some(i) = index_of(windows, surface) {
@@ -234,6 +271,7 @@ fn store_entry(
     h: i32,
     swizzle: f32,
     owns: bool,
+    popup: bool,
 ) {
     match index_of(windows, surface) {
         Some(i) => {
@@ -250,10 +288,13 @@ fn store_entry(
         }
         None => {
             // Lay windows out left to right, no overlap, sized to each window.
+            // Popups are not placed: sync_popups puts them under their parent
+            // before the first draw.
             const GAP: f32 = 80.0;
-            let cx = windows.place_x;
-            let cy = 0.0;
-            windows.place_x += w as f32 + GAP;
+            let (cx, cy) = if popup { (0.0, 0.0) } else { (windows.place_x, 0.0) };
+            if !popup {
+                windows.place_x += w as f32 + GAP;
+            }
             let order = windows.next_order;
             windows.next_order += 1;
             windows.surface.push(surface.clone());
@@ -267,6 +308,7 @@ fn store_entry(
             windows.order.push(order);
             windows.swizzle.push(swizzle);
             windows.owns.push(owns);
+            windows.popup.push(popup);
         }
     }
 }
@@ -341,15 +383,20 @@ pub fn upload_committed(
     state: &mut State,
     surface: &WlSurface,
 ) {
-    // Only real windows become quads. Cursor and subsurface commits still carry
-    // buffers; drop them (releasing shm so the client is not stalled) and skip.
-    if !state::is_toplevel(state, surface) {
+    // Windows and their popups become quads. Cursor and subsurface commits still
+    // carry buffers; drop them (releasing shm so the client is not stalled) and
+    // skip.
+    let popup = if state::is_toplevel(state, surface) {
+        false
+    } else if state::is_popup(state, surface) {
+        true
+    } else {
         state::take_shm_buffer(surface, |_, _, _, _| {});
         return;
-    }
+    };
 
     let handled_shm = state::take_shm_buffer(surface, |w, h, stride, ptr| {
-        upload_shm(windows, surface, w, h, stride, ptr);
+        upload_shm(windows, surface, w, h, stride, ptr, popup);
     });
     if handled_shm {
         // Surface is on an shm buffer now; drop any dmabuf we were holding.
@@ -360,7 +407,7 @@ pub fn upload_committed(
     state::take_dmabuf_and_retain(state, surface, |key, info| {
         match cache.get_or_import(egl, key, info) {
             Some((tex, w, h)) => {
-                store_entry(windows, surface, tex, w, h, 0.0, false);
+                store_entry(windows, surface, tex, w, h, 0.0, false, popup);
             }
             None => eprintln!(
                 "om_wm: dmabuf import failed {}x{} fourcc={:#x} mod={:#x}",
@@ -377,6 +424,7 @@ fn upload_shm(
     h: i32,
     stride: i32,
     ptr: *const u8,
+    popup: bool,
 ) {
     if w <= 0 || h <= 0 {
         return;
@@ -407,7 +455,7 @@ fn upload_shm(
     }
 
     let id = ray::load_texture_rgba(data, w, h);
-    store_entry(windows, surface, id, w, h, 1.0, true);
+    store_entry(windows, surface, id, w, h, 1.0, true, popup);
 }
 
 // Release the shm textures we own. dmabuf textures live in the cache.
@@ -435,7 +483,7 @@ pub fn destroy_owned(windows: &mut Windows) {
 // Draw
 //
 
-pub fn draw_toplevels(
+pub fn draw_windows(
     windows: &Windows,
     cam3d: ray::Camera3D,
     shader: Shader,
