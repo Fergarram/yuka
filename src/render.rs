@@ -16,6 +16,7 @@ use crate::ray::{self, Rectangle, Shader, Texture2D};
 use crate::wl::state::{self, State};
 use smithay::reexports::wayland_server::backend::ObjectId;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::reexports::wayland_server::Resource;
 
 //
 // Types
@@ -83,6 +84,54 @@ pub fn dmabuf_cache_new() -> DmabufCache {
 
 fn index_of(windows: &Windows, surface: &WlSurface) -> Option<usize> {
     windows.surface.iter().position(|s| s == surface)
+}
+
+// Remove windows whose surface has died (client closed), freeing any shm
+// texture we own. dmabuf textures belong to the cache and its buffer_destroyed
+// path, so we do not touch them here.
+pub fn prune_dead(windows: &mut Windows) {
+    let mut i = 0;
+    while i < windows.surface.len() {
+        if windows.surface[i].is_alive() {
+            i += 1;
+            continue;
+        }
+        if windows.owns[i] && windows.tex_id[i] != 0 {
+            ray::unload_texture(windows.tex_id[i]);
+        }
+        windows.surface.remove(i);
+        windows.tex_id.remove(i);
+        windows.tex_w.remove(i);
+        windows.tex_h.remove(i);
+        windows.canvas_x.remove(i);
+        windows.canvas_y.remove(i);
+        windows.swizzle.remove(i);
+        windows.owns.remove(i);
+    }
+}
+
+// Topmost window whose canvas rect contains the point; returns the surface and
+// its canvas origin. Later entries are considered on top.
+pub fn window_at(
+    windows: &Windows,
+    cx: f32,
+    cy: f32,
+) -> Option<(WlSurface, f32, f32)> {
+    for i in (0..windows.surface.len()).rev() {
+        let x = windows.canvas_x[i];
+        let y = windows.canvas_y[i];
+        let w = windows.tex_w[i] as f32;
+        let h = windows.tex_h[i] as f32;
+        if cx >= x && cx < x + w && cy >= y && cy < y + h {
+            return Some((windows.surface[i].clone(), x, y));
+        }
+    }
+    None
+}
+
+// Canvas origin of a specific surface, if present.
+pub fn window_origin(windows: &Windows, surface: &WlSurface) -> Option<(f32, f32)> {
+    index_of(windows, surface).map(|i| (windows.canvas_x[i], windows.canvas_y[i]))
 }
 
 fn store_entry(

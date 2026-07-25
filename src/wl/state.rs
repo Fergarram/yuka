@@ -17,7 +17,7 @@ use smithay::reexports::wayland_server::{
     protocol::{wl_buffer::WlBuffer, wl_seat::WlSeat, wl_surface::WlSurface},
     Client, Display, ListeningSocket, Resource,
 };
-use smithay::input::pointer::CursorImageStatus;
+use smithay::input::pointer::{CursorImageStatus, PointerHandle};
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::utils::Serial;
 use smithay::wayland::buffer::BufferHandler;
@@ -37,8 +37,8 @@ use smithay::wayland::dmabuf::{
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::{
-    delegate_compositor, delegate_dmabuf, delegate_shm, delegate_viewporter,
-    delegate_xdg_shell,
+    delegate_compositor, delegate_dmabuf, delegate_seat, delegate_shm,
+    delegate_viewporter, delegate_xdg_shell,
 };
 
 use smithay::backend::allocator::dmabuf::Dmabuf;
@@ -57,6 +57,10 @@ pub struct State {
     #[allow(dead_code)]
     pub viewporter_state: ViewporterState,
     pub seat_state: SeatState<State>,
+    // Held to keep the wl_seat global alive; used for the keyboard next.
+    #[allow(dead_code)]
+    pub seat: Seat<State>,
+    pub pointer: PointerHandle<State>,
     pub dmabuf_state: DmabufState,
     #[allow(dead_code)]
     pub dmabuf_global: DmabufGlobal,
@@ -110,7 +114,10 @@ pub fn init(
     let shm_state = ShmState::new::<State>(&dh, vec![]);
     let xdg_state = XdgShellState::new::<State>(&dh);
     let viewporter_state = ViewporterState::new::<State>(&dh);
-    let seat_state = SeatState::new();
+    let mut seat_state = SeatState::new();
+    // wl_seat with a pointer so clients can receive pointer events.
+    let mut seat = seat_state.new_wl_seat(&dh, "seat0");
+    let pointer = seat.add_pointer();
 
     // Advertise the dmabuf formats EGL reported as importable.
     let formats: Vec<Format> = dmabuf_formats
@@ -151,6 +158,8 @@ pub fn init(
         xdg_state,
         viewporter_state,
         seat_state,
+        seat,
+        pointer,
         dmabuf_state,
         dmabuf_global,
         committed: Vec::new(),
@@ -449,3 +458,4 @@ delegate_shm!(State);
 delegate_xdg_shell!(State);
 delegate_viewporter!(State);
 delegate_dmabuf!(State);
+delegate_seat!(State);

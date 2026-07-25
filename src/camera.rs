@@ -3,10 +3,11 @@
 //
 // The infinite canvas view. Windows live in canvas coordinates; the camera maps
 // canvas -> screen with a pan (canvas point shown at screen center) and a zoom
-// (screen pixels per canvas unit). Driven by keyboard for now (WASD pan, Ctrl +
-// / Ctrl - zoom); trackpad/mouse gestures come later.
+// (screen pixels per canvas unit). Keyboard: WASD pan, Super +/- zoom. Trackpad
+// gestures live in the touch module.
 //
 
+use crate::kbd::{self, Keyboard};
 use crate::ray;
 
 //
@@ -42,33 +43,31 @@ pub fn camera_new() -> Camera {
 // Advance the camera from held keys. Pan speed is constant in screen pixels, so
 // it feels the same at any zoom; zoom is exponential and keeps the screen center
 // fixed.
-pub fn camera_update(cam: &mut Camera) {
-    let dt = ray::frame_time();
-    if dt <= 0.0 {
+pub fn camera_update(cam: &mut Camera, kb: Option<&Keyboard>) {
+    let Some(kb) = kb else {
         return;
-    }
+    };
+    let dt = ray::frame_time();
 
     let pan = PAN_PX_PER_SEC * dt / cam.zoom;
-    if ray::is_key_down(ray::KEY_W) {
+    if kbd::down(kb, kbd::KEY_W) {
         cam.cy -= pan;
     }
-    if ray::is_key_down(ray::KEY_S) {
+    if kbd::down(kb, kbd::KEY_S) {
         cam.cy += pan;
     }
-    if ray::is_key_down(ray::KEY_A) {
+    if kbd::down(kb, kbd::KEY_A) {
         cam.cx -= pan;
     }
-    if ray::is_key_down(ray::KEY_D) {
+    if kbd::down(kb, kbd::KEY_D) {
         cam.cx += pan;
     }
 
-    let ctrl = ray::is_key_down(ray::KEY_LEFT_CONTROL)
-        || ray::is_key_down(ray::KEY_RIGHT_CONTROL);
-    if ctrl {
-        let zoom_in = ray::is_key_down(ray::KEY_EQUAL)
-            || ray::is_key_down(ray::KEY_KP_ADD);
-        let zoom_out = ray::is_key_down(ray::KEY_MINUS)
-            || ray::is_key_down(ray::KEY_KP_SUBTRACT);
+    if kbd::super_down(kb) {
+        let zoom_in =
+            kbd::down(kb, kbd::KEY_EQUAL) || kbd::down(kb, kbd::KEY_KPPLUS);
+        let zoom_out =
+            kbd::down(kb, kbd::KEY_MINUS) || kbd::down(kb, kbd::KEY_KPMINUS);
         let step = 1.0 + ZOOM_RATE_PER_SEC * dt;
         if zoom_in {
             cam.zoom *= step;
@@ -90,6 +89,19 @@ pub fn zoom_at(cam: &mut Camera, factor: f32, sx: f32, sy: f32, sw: f32, sh: f32
     // Re-center so that point stays under (sx, sy).
     cam.cx = px - (sx - sw * 0.5) / cam.zoom;
     cam.cy = py - (sy - sh * 0.5) / cam.zoom;
+}
+
+// Map a screen pixel position back to a canvas point (inverse of the camera).
+pub fn screen_to_canvas(
+    cam: &Camera,
+    sx: f32,
+    sy: f32,
+    screen_w: i32,
+    screen_h: i32,
+) -> (f32, f32) {
+    let cx = cam.cx + (sx - screen_w as f32 * 0.5) / cam.zoom;
+    let cy = cam.cy + (sy - screen_h as f32 * 0.5) / cam.zoom;
+    (cx, cy)
 }
 
 // Map a canvas point to a screen pixel position.

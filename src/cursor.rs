@@ -18,9 +18,9 @@ use std::path::Path;
 //
 
 const CURSOR_SIZE: u32 = 64;
-// Default cursor: a 16px white dot; hotspot at its center.
-const CURSOR_HOT_X: i32 = 8;
-const CURSOR_HOT_Y: i32 = 8;
+// Default cursor: a crosshair centered at (10, 10); hotspot at its center.
+const CURSOR_HOT_X: i32 = 10;
+const CURSOR_HOT_Y: i32 = 10;
 
 //
 // libdrm FFI
@@ -138,7 +138,7 @@ pub fn init(screen_w: i32, screen_h: i32) -> Option<Cursor> {
         return None;
     }
 
-    draw_circle(map as *mut u8, pitch);
+    draw_crosshair(map as *mut u8, pitch);
     unsafe { libc::munmap(map, size as usize) };
 
     if unsafe {
@@ -178,10 +178,14 @@ pub fn move_by(c: &mut Cursor, dx: i32, dy: i32) {
     move_to(c, nx, ny);
 }
 
+// c.x/c.y is the logical pointer position (the hotspot). The plane's top-left is
+// placed hotspot-offset back so the hotspot lands exactly at (x, y).
 fn move_to(c: &mut Cursor, x: i32, y: i32) {
     c.x = x;
     c.y = y;
-    unsafe { drmModeMoveCursor(c.fd, c.crtc, x, y) };
+    unsafe {
+        drmModeMoveCursor(c.fd, c.crtc, x - CURSOR_HOT_X, y - CURSOR_HOT_Y)
+    };
 }
 
 pub fn pos(c: &Cursor) -> (i32, i32) {
@@ -257,9 +261,9 @@ fn put(base: *mut u8, pitch: u32, x: i32, y: i32, color: u32) {
     unsafe { *(base.add(off) as *mut u32) = color };
 }
 
-// A 16px white dot centered at (8, 8) with a thin dark outline for contrast.
-// ARGB8888 (little-endian bytes B,G,R,A, matching DRM_FORMAT_ARGB8888).
-fn draw_circle(base: *mut u8, pitch: u32) {
+// A crosshair centered at (10, 10): white 1px arms with a black outline and a
+// small center gap for precision. ARGB8888 (little-endian B,G,R,A).
+fn draw_crosshair(base: *mut u8, pitch: u32) {
     const TRANSPARENT: u32 = 0x0000_0000;
     const WHITE: u32 = 0xFFFF_FFFF;
     const BLACK: u32 = 0xFF00_0000;
@@ -270,17 +274,19 @@ fn draw_circle(base: *mut u8, pitch: u32) {
         }
     }
 
-    let center = 8.0;
-    let radius = 8.0;
-    for y in 0..16 {
-        for x in 0..16 {
-            let dx = x as f32 + 0.5 - center;
-            let dy = y as f32 + 0.5 - center;
-            let d = (dx * dx + dy * dy).sqrt();
-            if d <= radius - 1.0 {
-                put(base, pitch, x, y, WHITE);
-            } else if d <= radius {
-                put(base, pitch, x, y, BLACK);
+    let c = 10i32;
+    let len = 10i32;
+    let gap = 2i32;
+
+    // Black outline pass (3px arms), then white center pass (1px arms) on top.
+    for &(color, thick) in &[(BLACK, 1i32), (WHITE, 0i32)] {
+        for i in -len..=len {
+            if i.abs() < gap {
+                continue;
+            }
+            for w in -thick..=thick {
+                put(base, pitch, c + i, c + w, color); // horizontal arm
+                put(base, pitch, c + w, c + i, color); // vertical arm
             }
         }
     }

@@ -22,10 +22,12 @@ use crate::ray;
 //
 
 const EV_ABS: u16 = 0x03;
+const EV_KEY: u16 = 0x01;
 const ABS_MT_SLOT: u16 = 0x2F;
 const ABS_MT_POSITION_X: u16 = 0x35;
 const ABS_MT_POSITION_Y: u16 = 0x36;
 const ABS_MT_TRACKING_ID: u16 = 0x39;
+const BTN_LEFT: u16 = 0x110;
 
 // struct input_event is 24 bytes on 64-bit Linux: 16-byte timeval, u16 type,
 // u16 code, i32 value.
@@ -49,7 +51,7 @@ const PINCH_DEADZONE: f32 = 2.0;
 // Exponential smoothing of the tracked pan velocity (0..1, higher = snappier).
 const PAN_SMOOTH: f32 = 0.4;
 // Momentum: how fast the release glide decays (per second) and when to stop.
-const PAN_FRICTION: f32 = 3.0;
+const PAN_FRICTION: f32 = 2.0;
 const PAN_STOP_SPEED: f32 = 5.0;
 // One-finger pointer motion: screen pixels moved per trackpad device unit.
 const POINTER_SENS: f32 = 0.25;
@@ -86,10 +88,16 @@ pub struct Touchpad {
     // Smoothed pan velocity (canvas units/sec) for release momentum.
     pan_vx: f32,
     pan_vy: f32,
-    // One-finger pointer tracking (previous finger pos + fractional remainder).
+    // Pointer tracking: which slot drives the cursor, its previous pos, and the
+    // fractional remainder for slow motion.
+    primary_slot: Option<usize>,
     prev_single: Option<(f32, f32)>,
     ptr_accum_x: f32,
     ptr_accum_y: f32,
+    // Physical trackpad button (BTN_LEFT): current level + per-frame edges.
+    btn_left: bool,
+    click_pressed: bool,
+    click_released: bool,
 }
 
 //
@@ -114,9 +122,13 @@ pub fn open() -> Option<Touchpad> {
         mode: GestureMode::None,
         pan_vx: 0.0,
         pan_vy: 0.0,
+        primary_slot: None,
         prev_single: None,
         ptr_accum_x: 0.0,
         ptr_accum_y: 0.0,
+        btn_left: false,
+        click_pressed: false,
+        click_released: false,
     })
 }
 
@@ -166,32 +178,38 @@ fn read_events(tp: &mut Touchpad) {
         }
 
         let etype = u16::from_ne_bytes([buf[16], buf[17]]);
-        if etype != EV_ABS {
-            continue;
-        }
         let code = u16::from_ne_bytes([buf[18], buf[19]]);
         let value = i32::from_ne_bytes([buf[20], buf[21], buf[22], buf[23]]);
 
-        match code {
-            ABS_MT_SLOT => {
+        match (etype, code) {
+            (EV_ABS, ABS_MT_SLOT) => {
                 let s = value as usize;
                 if s < MAX_SLOTS {
                     tp.cur = s;
                 }
             }
-            ABS_MT_TRACKING_ID => {
+            (EV_ABS, ABS_MT_TRACKING_ID) => {
                 if tp.cur < MAX_SLOTS {
                     tp.slots[tp.cur].active = value != -1;
                 }
             }
-            ABS_MT_POSITION_X => {
+            (EV_ABS, ABS_MT_POSITION_X) => {
                 if tp.cur < MAX_SLOTS {
                     tp.slots[tp.cur].x = value;
                 }
             }
-            ABS_MT_POSITION_Y => {
+            (EV_ABS, ABS_MT_POSITION_Y) => {
                 if tp.cur < MAX_SLOTS {
                     tp.slots[tp.cur].y = value;
+                }
+            }
+            (EV_KEY, BTN_LEFT) => {
+                if value == 1 {
+                    tp.btn_left = true;
+                    tp.click_pressed = true;
+                } else if value == 0 {
+                    tp.btn_left = false;
+                    tp.click_released = true;
                 }
             }
             _ => {}
@@ -200,9 +218,19 @@ fn read_events(tp: &mut Touchpad) {
 }
 
 // Drain trackpad events and apply gestures: one finger moves the pointer, two
-// fingers pan (with momentum) and pinch-zoom (with an engage gate).
-pub fn update(tp: &mut Touchpad, cam: &mut Camera, cursor: Option<&mut Cursor>) {
+// fingers pan/zoom (only when gestures_enabled, i.e. no window focused).
+// Returns the BTN_LEFT (pressed, released) edges this frame for the caller to
+// route as a click.
+pub fn update(
+    tp: &mut Touchpad,
+    cam: &mut Camera,
+    cursor: Option<&mut Cursor>,
+    gestures_enabled: bool,
+) -> (bool, bool) {
+    tp.click_pressed = false;
+    tp.click_released = false;
     read_events(tp);
+    let clicks = (tp.click_pressed, tp.click_released);
     let dt = ray::frame_time().max(1e-4);
 
     // Cursor position is the pinch-zoom origin (screen space).
@@ -221,23 +249,43 @@ pub fn update(tp: &mut Touchpad, cam: &mut Camera, cursor: Option<&mut Cursor>) 
         }
     }
 
-    // One finger: move the pointer (fractional remainder kept for slow moves).
-    if count == 1 {
-        let (fx, fy) = pts[0];
-        if let (Some((px, py)), Some(cur)) = (tp.prev_single, cursor) {
-            tp.ptr_accum_x += (fx - px) * POINTER_SENS;
-            tp.ptr_accum_y += (fy - py) * POINTER_SENS;
-            let idx = tp.ptr_accum_x.trunc();
-            let idy = tp.ptr_accum_y.trunc();
-            tp.ptr_accum_x -= idx;
-            tp.ptr_accum_y -= idy;
-            cursor::move_by(cur, idx as i32, idy as i32);
+    // Pointer motion. Unfocused: only a single finger drives the cursor (two
+    // fingers are gestures). Focused: the primary (first) finger always drives
+    // the cursor and extra fingers do nothing. The primary is tracked by slot so
+    // lifting a non-primary finger never jumps.
+    let do_pointer = if gestures_enabled { count == 1 } else { count >= 1 };
+    if do_pointer {
+        // Latch onto the original finger's slot and keep it until that finger
+        // lifts; extra fingers are ignored. Adopt a new primary only once the
+        // current one is up.
+        let primary = match tp.primary_slot {
+            Some(s) if tp.slots[s].active => Some(s),
+            _ => tp.slots.iter().position(|s| s.active),
+        };
+        if primary != tp.primary_slot {
+            tp.primary_slot = primary;
+            tp.prev_single = None;
         }
-        tp.prev_single = Some((fx, fy));
+        if let Some(p) = primary {
+            let (fx, fy) = (tp.slots[p].x as f32, tp.slots[p].y as f32);
+            if let (Some((px, py)), Some(cur)) = (tp.prev_single, cursor) {
+                tp.ptr_accum_x += (fx - px) * POINTER_SENS;
+                tp.ptr_accum_y += (fy - py) * POINTER_SENS;
+                let idx = tp.ptr_accum_x.trunc();
+                let idy = tp.ptr_accum_y.trunc();
+                tp.ptr_accum_x -= idx;
+                tp.ptr_accum_y -= idy;
+                cursor::move_by(cur, idx as i32, idy as i32);
+            }
+            tp.prev_single = Some((fx, fy));
+        }
         tp.prev_centroid = None;
-        return;
+        tp.prev_dist = None;
+        tp.mode = GestureMode::None;
+        return clicks;
     }
     tp.prev_single = None;
+    tp.primary_slot = None;
 
     // Not a two-finger gesture: coast any leftover pan momentum with friction.
     if count != 2 {
@@ -257,13 +305,22 @@ pub fn update(tp: &mut Touchpad, cam: &mut Camera, cursor: Option<&mut Cursor>) 
                 tp.pan_vy = 0.0;
             }
         }
-        return;
+        return clicks;
     }
 
     let centroid = ((pts[0].0 + pts[1].0) * 0.5, (pts[0].1 + pts[1].1) * 0.5);
     let dx = pts[0].0 - pts[1].0;
     let dy = pts[0].1 - pts[1].1;
     let dist = (dx * dx + dy * dy).sqrt();
+
+    // Focused window: pan/zoom disabled. Keep baselines fresh so re-enabling
+    // (after unfocus) does not jump.
+    if !gestures_enabled {
+        tp.prev_centroid = Some(centroid);
+        tp.prev_dist = Some(dist);
+        tp.mode = GestureMode::None;
+        return clicks;
+    }
 
     match (tp.prev_centroid, tp.prev_dist) {
         (Some(pc), Some(pd)) => {
@@ -333,4 +390,5 @@ pub fn update(tp: &mut Touchpad, cam: &mut Camera, cursor: Option<&mut Cursor>) 
 
     tp.prev_centroid = Some(centroid);
     tp.prev_dist = Some(dist);
+    clicks
 }

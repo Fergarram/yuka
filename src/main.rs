@@ -10,6 +10,7 @@
 mod camera;
 mod cursor;
 mod egl;
+mod kbd;
 mod ray;
 mod render;
 mod touch;
@@ -20,11 +21,21 @@ use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+use smithay::backend::input::ButtonState;
+use smithay::input::pointer::{ButtonEvent, MotionEvent};
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::utils::{Logical, Point, SERIAL_COUNTER};
+
+use camera::Camera;
+use render::Windows;
+use wl::state::State;
+
 //
 // Constants
 //
 
 const SHOT_FRAME: u32 = 200;
+const BTN_LEFT: u32 = 0x110;
 
 //
 // State
@@ -60,6 +71,87 @@ fn spawn_client(socket_name: &str, cmd: &str) -> Option<Child> {
 }
 
 //
+// Pointer routing
+//
+// Turns the cursor position + click edges into Wayland pointer events for the
+// focused window. Canvas coordinates are the Wayland global compositor space, so
+// a window's surface origin is its canvas position and the pointer location is
+// the cursor's canvas position; Smithay derives surface-local coords + focus.
+fn route_input(
+    state: &mut State,
+    windows: &Windows,
+    cam: &Camera,
+    cursor_pos: Option<(i32, i32)>,
+    focused: &mut Option<WlSurface>,
+    kb: Option<&kbd::Keyboard>,
+    pressed: bool,
+    released: bool,
+    time_ms: u32,
+) {
+    let Some((cxp, cyp)) = cursor_pos else { return };
+    let sw = ray::screen_width();
+    let sh = ray::screen_height();
+    let (ccx, ccy) = camera::screen_to_canvas(cam, cxp as f32, cyp as f32, sw, sh);
+    let loc = Point::<f64, Logical>::from((ccx as f64, ccy as f64));
+    let pointer = state.pointer.clone();
+
+    let leave = |state: &mut State, focused: &mut Option<WlSurface>| {
+        let serial = SERIAL_COUNTER.next_serial();
+        pointer.motion(state, None, &MotionEvent { location: loc, serial, time: time_ms });
+        pointer.frame(state);
+        *focused = None;
+    };
+
+    // Super+Escape unfocuses.
+    let super_escape = kb
+        .map(|kb| kbd::super_down(kb) && kbd::down(kb, kbd::KEY_ESC))
+        .unwrap_or(false);
+    if super_escape && focused.is_some() {
+        leave(state, focused);
+    }
+
+    // Click: focus the window under the cursor (and forward the press), or
+    // unfocus when clicking empty canvas.
+    if pressed {
+        match render::window_at(windows, ccx, ccy) {
+            Some((surf, ox, oy)) => {
+                *focused = Some(surf.clone());
+                let origin = Point::<f64, Logical>::from((ox as f64, oy as f64));
+                let serial = SERIAL_COUNTER.next_serial();
+                pointer.motion(state, Some((surf.clone(), origin)), &MotionEvent { location: loc, serial, time: time_ms });
+                let serial = SERIAL_COUNTER.next_serial();
+                pointer.button(state, &ButtonEvent { serial, time: time_ms, button: BTN_LEFT, state: ButtonState::Pressed });
+                pointer.frame(state);
+            }
+            None => {
+                if focused.is_some() {
+                    leave(state, focused);
+                }
+            }
+        }
+    }
+
+    // While focused, forward pointer motion (hover/drag) into that window.
+    if let Some(surf) = focused.clone() {
+        match render::window_origin(windows, &surf) {
+            Some((ox, oy)) => {
+                let origin = Point::<f64, Logical>::from((ox as f64, oy as f64));
+                let serial = SERIAL_COUNTER.next_serial();
+                pointer.motion(state, Some((surf.clone(), origin)), &MotionEvent { location: loc, serial, time: time_ms });
+                pointer.frame(state);
+            }
+            None => leave(state, focused), // focused window went away
+        }
+    }
+
+    if released && focused.is_some() {
+        let serial = SERIAL_COUNTER.next_serial();
+        pointer.button(state, &ButtonEvent { serial, time: time_ms, button: BTN_LEFT, state: ButtonState::Released });
+        pointer.frame(state);
+    }
+}
+
+//
 // Entry
 //
 
@@ -74,6 +166,9 @@ fn main() {
         libc::signal(libc::SIGINT, handler);
         libc::signal(libc::SIGTERM, handler);
     }
+
+    // Escape must reach clients, not quit us; unfocus is Super+Escape.
+    ray::set_exit_key(0);
 
     println!(
         "om_wm: screen {}x{}  egl_display={:p}  egl_context={:p}",
@@ -101,6 +196,9 @@ fn main() {
     let mut cam = camera::camera_new();
     let mut touchpad = touch::open();
     let mut cursor = cursor::init(ray::screen_width(), ray::screen_height());
+    let mut keyboard = kbd::open();
+    // The window we are interacting with; while Some, pan/zoom is disabled.
+    let mut focused: Option<WlSurface> = None;
 
     // Spawn a few test clients (shm terminals + dmabuf triangles) so the canvas
     // has several windows to pan and zoom around.
@@ -170,10 +268,32 @@ fn main() {
         }
         wl::state::flush(&mut server);
 
-        if let Some(tp) = touchpad.as_mut() {
-            touch::update(tp, &mut cam, cursor.as_mut());
+        if let Some(kb) = keyboard.as_mut() {
+            kbd::poll(kb);
         }
-        camera::camera_update(&mut cam);
+        let gestures_enabled = focused.is_none();
+        let (pressed, released) = match touchpad.as_mut() {
+            Some(tp) => {
+                touch::update(tp, &mut cam, cursor.as_mut(), gestures_enabled)
+            }
+            None => (false, false),
+        };
+        if gestures_enabled {
+            camera::camera_update(&mut cam, keyboard.as_ref());
+        }
+        render::prune_dead(&mut windows);
+        let cursor_pos = cursor.as_ref().map(cursor::pos);
+        route_input(
+            &mut state,
+            &windows,
+            &cam,
+            cursor_pos,
+            &mut focused,
+            keyboard.as_ref(),
+            pressed,
+            released,
+            start.elapsed().as_millis() as u32,
+        );
 
         ray::begin_drawing();
         ray::clear_background(clear);
