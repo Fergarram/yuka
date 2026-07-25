@@ -223,6 +223,16 @@ pub fn toplevel_surfaces(state: &State) -> Vec<WlSurface> {
         .collect()
 }
 
+// True if the surface is a real xdg toplevel window, not a cursor or subsurface
+// surface (which also commit buffers but must never be composited as a quad).
+pub fn is_toplevel(state: &State, surface: &WlSurface) -> bool {
+    state
+        .xdg_state
+        .toplevel_surfaces()
+        .iter()
+        .any(|t| t.wl_surface() == surface)
+}
+
 // If the surface has a newly committed shm buffer, invoke f with its
 // dimensions, stride and a pointer to the pixel data (valid only for the call),
 // then release the buffer and clear the pending assignment. Returns true when a

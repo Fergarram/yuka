@@ -318,6 +318,13 @@ pub fn upload_committed(
     state: &mut State,
     surface: &WlSurface,
 ) {
+    // Only real windows become quads. Cursor and subsurface commits still carry
+    // buffers; drop them (releasing shm so the client is not stalled) and skip.
+    if !state::is_toplevel(state, surface) {
+        state::take_shm_buffer(surface, |_, _, _, _| {});
+        return;
+    }
+
     let handled_shm = state::take_shm_buffer(surface, |w, h, stride, ptr| {
         upload_shm(windows, surface, w, h, stride, ptr);
     });
