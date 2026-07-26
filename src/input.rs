@@ -124,6 +124,10 @@ pub struct Pointer {
     pub left_released: bool,
     pub right_pressed: bool,
     pub right_released: bool,
+    // Levels, for knowing whether any button is still held: an implicit grab lasts
+    // until the last one comes up.
+    pub left: bool,
+    pub right: bool,
     // Middle is both: edges to forward and for the double-click chord, a level for
     // drag-to-pan.
     pub middle_pressed: bool,
@@ -138,7 +142,9 @@ pub struct Input {
     // Press/release edges this frame: (evdev keycode, pressed).
     events: Vec<(u16, bool)>,
     pointer: Pointer,
-    // Middle button level, kept across frames.
+    // Button levels, kept across frames.
+    left: bool,
+    right: bool,
     middle: bool,
     // Absolute pinch scale reported at the last gesture update, to turn
     // libinput's since-gesture-began scale into a per frame factor.
@@ -228,6 +234,8 @@ pub fn init(grab: bool) -> Option<Input> {
         keys: vec![false; KEY_ARRAY],
         events: Vec::new(),
         pointer: Pointer::default(),
+        left: false,
+        right: false,
         middle: false,
         pinch_scale: 1.0,
         frac_x: 0.0,
@@ -335,6 +343,8 @@ pub fn poll(inp: &mut Input) {
     inp.frac_x = fx - p.dx;
     inp.frac_y = fy - p.dy;
 
+    p.left = inp.left;
+    p.right = inp.right;
     p.middle = inp.middle;
     inp.pointer = p;
 }
@@ -349,6 +359,7 @@ fn pointer_event(inp: &mut Input, p: &mut Pointer, event: PointerEvent) {
             let down = e.button_state() == ButtonState::Pressed;
             match e.button() {
                 BTN_LEFT => {
+                    inp.left = down;
                     if down {
                         p.left_pressed = true;
                     } else {
@@ -356,6 +367,7 @@ fn pointer_event(inp: &mut Input, p: &mut Pointer, event: PointerEvent) {
                     }
                 }
                 BTN_RIGHT => {
+                    inp.right = down;
                     if down {
                         p.right_pressed = true;
                     } else {
@@ -553,6 +565,8 @@ pub fn resume(inp: &mut Input) {
 pub fn reset(inp: &mut Input) {
     inp.events.clear();
     inp.pointer = Pointer::default();
+    inp.left = false;
+    inp.right = false;
     inp.middle = false;
     inp.pinch_scale = 1.0;
     inp.frac_x = 0.0;

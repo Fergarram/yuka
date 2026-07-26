@@ -17,18 +17,24 @@ use smithay::reexports::wayland_server::{
     protocol::{wl_buffer::WlBuffer, wl_seat::WlSeat, wl_surface::WlSurface},
     Client, Display, ListeningSocket, Resource,
 };
-use smithay::desktop::{PopupKind, PopupManager};
+use smithay::desktop::utils::under_from_surface_tree;
+use smithay::desktop::{
+    find_popup_root_surface, PopupKeyboardGrab, PopupKind, PopupManager,
+    PopupPointerGrab, PopupUngrabStrategy, WindowSurfaceType,
+};
+use smithay::input::pointer::Focus;
 use smithay::input::keyboard::{KeyboardHandle, XkbConfig};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::wayland_server::backend::GlobalId;
 use smithay::wayland::output::{OutputHandler, OutputManagerState};
 use smithay::input::pointer::{CursorImageStatus, PointerHandle};
 use smithay::input::{Seat, SeatHandler, SeatState};
-use smithay::utils::Serial;
+use smithay::utils::{Logical, Point, Serial};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
-    with_states, BufferAssignment, CompositorClientState, CompositorHandler,
-    CompositorState, SurfaceAttributes,
+    get_parent, get_role, with_states, with_surface_tree_downward, BufferAssignment,
+    CompositorClientState, CompositorHandler, CompositorState, SubsurfaceCachedState,
+    SurfaceAttributes, TraversalAction,
 };
 use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
@@ -319,38 +325,130 @@ pub fn popups_of(root: &WlSurface) -> Vec<(WlSurface, f32, f32)> {
         .collect()
 }
 
-// Where a surface's window geometry starts relative to the surface itself, as set
-// by xdg_surface::set_window_geometry. Non-zero for clients that draw shadows.
-fn geometry_loc(surface: &WlSurface) -> (f32, f32) {
+// The window geometry a client set with xdg_surface::set_window_geometry: the
+// rectangle of its surface that is actually the window, as offset and size. What
+// is outside it is decoration a client wants ignored, usually a drop shadow, and
+// treating it as part of the window makes shadows clickable and misaligns anything
+// anchored to a window's edge. None when the client never set one, in which case
+// the whole surface is the window.
+pub fn geometry_of(surface: &WlSurface) -> Option<(f32, f32, f32, f32)> {
     with_states(surface, |states| {
         states
             .cached_state
             .get::<SurfaceCachedState>()
             .current()
             .geometry
-            .map(|g| (g.loc.x as f32, g.loc.y as f32))
-            .unwrap_or((0.0, 0.0))
+            .map(|g| {
+                (g.loc.x as f32, g.loc.y as f32, g.size.w as f32, g.size.h as f32)
+            })
     })
 }
 
-// Tell every open popup it is done, which is how a menu closes when the click
-// lands somewhere else. Clients destroy the surface in response.
-pub fn dismiss_popups(state: &State) {
-    for root in toplevel_surfaces(state) {
-        for (popup, _) in PopupManager::popups_for_surface(&root) {
-            match popup {
-                PopupKind::Xdg(p) => p.send_popup_done(),
-                _ => {}
-            }
-        }
+fn geometry_loc(surface: &WlSurface) -> (f32, f32) {
+    geometry_of(surface).map(|(x, y, _, _)| (x, y)).unwrap_or((0.0, 0.0))
+}
+
+// Every surface in a window's tree, bottom to top, each with its offset from the
+// root. The order is the stacking order the client asked for: Wayland lets a
+// subsurface sit *below* its parent, and Smithay records that by putting each
+// surface inside its own children list, so the slot the root occupies is what
+// separates what is behind it from what is in front. The root is included, at its
+// own slot, so callers can tell the two apart.
+//
+// The position has to be read in the traversal's processor rather than its filter:
+// the filter runs pre-order, the processor runs at the surface's real slot.
+pub fn surface_tree(root: &WlSurface) -> Vec<(WlSurface, f32, f32)> {
+    let found = std::cell::RefCell::new(Vec::new());
+    with_surface_tree_downward(
+        root,
+        (0i32, 0i32),
+        |_, states, parent| TraversalAction::DoChildren(subsurface_offset(states, *parent)),
+        |surface, states, parent| {
+            let (x, y) = subsurface_offset(states, *parent);
+            found.borrow_mut().push((surface.clone(), x as f32, y as f32));
+        },
+        |_, _, _| true,
+    );
+    found.into_inner()
+}
+
+// A surface's offset from the root: its parent's, plus its own subsurface
+// location. Roots have no subsurface state, so they contribute nothing.
+fn subsurface_offset(
+    states: &smithay::wayland::compositor::SurfaceData,
+    parent: (i32, i32),
+) -> (i32, i32) {
+    if states.cached_state.has::<SubsurfaceCachedState>() {
+        let mut guard = states.cached_state.get::<SubsurfaceCachedState>();
+        let loc = guard.current().location;
+        (parent.0 + loc.x, parent.1 + loc.y)
+    } else {
+        parent
     }
 }
 
-// Whether any popup is open at all.
-pub fn any_popup(state: &State) -> bool {
-    toplevel_surfaces(state)
-        .iter()
-        .any(|root| PopupManager::popups_for_surface(root).next().is_some())
+// Up out of any subsurfaces, to the toplevel or popup the surface hangs off.
+fn focus_root(surface: &WlSurface) -> WlSurface {
+    let mut current = surface.clone();
+    while is_subsurface(&current) {
+        match get_parent(&current) {
+            Some(parent) => current = parent,
+            None => break,
+        }
+    }
+    current
+}
+
+// The toplevel a surface ultimately belongs to, for raising the right window when a
+// click lands on one of its popups or subsurfaces.
+pub fn window_root(state: &State, surface: &WlSurface) -> WlSurface {
+    let root = focus_root(surface);
+    if let Some(popup) = state.popups.find_popup(&root) {
+        if let Ok(toplevel) = find_popup_root_surface(&popup) {
+            return toplevel;
+        }
+    }
+    root
+}
+
+// True when the surface is a subsurface of something else.
+pub fn is_subsurface(surface: &WlSurface) -> bool {
+    get_role(surface) == Some("subsurface")
+}
+
+// Whether a point inside a surface is one the client wants input for. A client can
+// declare an input region smaller than its buffer, and a transparent surface with
+// no input region would otherwise swallow clicks meant for what is behind it.
+pub fn input_region_contains(surface: &WlSurface, local_x: f32, local_y: f32) -> bool {
+    with_states(surface, |states| {
+        let mut guard = states.cached_state.get::<SurfaceAttributes>();
+        match &guard.current().input_region {
+            Some(region) => {
+                let point =
+                    Point::<i32, Logical>::from((local_x as i32, local_y as i32));
+                region.contains(point)
+            }
+            None => true,
+        }
+    })
+}
+
+// The exact surface under a point inside a window or popup, descending into
+// subsurfaces, with that surface's offset from the root. Pointer events have to go
+// to the surface actually under the cursor: keyboard focus is per window, which is
+// why keyboard menu selection works while a click sent to a parent surface, when
+// the content lives in a child, arrives nowhere.
+//
+// Respects each child's input region, so a client that keeps its content in the
+// root surface simply gets the root back.
+pub fn surface_under(
+    root: &WlSurface,
+    local_x: f32,
+    local_y: f32,
+) -> Option<(WlSurface, f32, f32)> {
+    let point = Point::<f64, Logical>::from((local_x as f64, local_y as f64));
+    under_from_surface_tree(root, point, (0, 0), WindowSurfaceType::ALL)
+        .map(|(surface, offset)| (surface, offset.x as f32, offset.y as f32))
 }
 
 // If the surface has a newly committed shm buffer, invoke f with its
@@ -602,7 +700,43 @@ impl XdgShellHandler for State {
         }
     }
 
-    fn grab(&mut self, _surface: PopupSurface, _seat: WlSeat, _serial: Serial) {}
+    // A menu asking to own the input. Honouring this is what makes a popup behave
+    // like a menu: Smithay's grab routes pointer and keyboard to the popup chain,
+    // keeps other windows out of it, gives the popup keyboard focus so arrows and
+    // Escape work, and dismisses the chain in protocol order when a click lands
+    // outside. Without it we were guessing all of that from hit tests.
+    //
+    // The serial ties the grab to the input event that caused the menu. A client
+    // whose grab collides with an existing one gets refused, which is the check
+    // that stops a window quietly swallowing input.
+    fn grab(&mut self, surface: PopupSurface, seat: WlSeat, serial: Serial) {
+        let Some(seat) = Seat::<State>::from_resource(&seat) else { return };
+        let popup = PopupKind::Xdg(surface);
+        let Ok(root) = find_popup_root_surface(&popup) else { return };
+        let Ok(mut grab) = self.popups.grab_popup(root, popup, &seat, serial) else {
+            return;
+        };
+
+        if let Some(keyboard) = seat.get_keyboard() {
+            let ours = keyboard.has_grab(serial)
+                || keyboard.has_grab(grab.previous_serial().unwrap_or(serial));
+            if keyboard.is_grabbed() && !ours {
+                grab.ungrab(PopupUngrabStrategy::All);
+                return;
+            }
+            keyboard.set_focus(self, grab.current_grab(), serial);
+            keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
+        }
+        if let Some(pointer) = seat.get_pointer() {
+            let ours = pointer.has_grab(serial)
+                || pointer.has_grab(grab.previous_serial().unwrap_or(grab.serial()));
+            if pointer.is_grabbed() && !ours {
+                grab.ungrab(PopupUngrabStrategy::All);
+                return;
+            }
+            pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
+        }
+    }
 
     fn reposition_request(
         &mut self,

@@ -105,11 +105,17 @@ fn route_input(
     cursor_pos: Option<(i32, i32)>,
     focused: &mut Option<WlSurface>,
     hovered: &mut Option<WlSurface>,
+    grabbed: &mut Option<WlSurface>,
+    // What the client was last told about the pointer: which surface, and where in
+    // that surface's own coordinates.
+    last_motion: &mut Option<(WlSurface, f32, f32)>,
+    held: bool,
     kb: Option<&input::Input>,
+    debug: bool,
     super_down: bool,
+    ptr: &input::Pointer,
     pressed: bool,
     released: bool,
-    moved: bool,
     time_ms: u32,
 ) {
     let Some((cxp, cyp)) = cursor_pos else { return };
@@ -138,6 +144,7 @@ fn route_input(
             pointer.motion(state, None, &MotionEvent { location: loc, serial, time: time_ms });
             pointer.frame(state);
             *hovered = None;
+            *last_motion = None;
         }
         return;
     }
@@ -148,16 +155,60 @@ fn route_input(
     // never has keyboard focus while you are reaching for an item. Routing motion
     // to the focused window instead left menus unable to see the pointer at all,
     // so clicking an item did nothing.
-    let under = render::window_at(windows, cam3d, cxp as f32, cyp as f32);
+    // One hit test for everything on the canvas: windows, their popups and their
+    // subsurfaces, all anchored in front of their parents.
+    let mut under = render::window_at(windows, cam3d, cxp as f32, cyp as f32);
+
+    // Implicit pointer grab: from a press until the last button comes up, every
+    // event belongs to the surface the press landed on, wherever the pointer goes.
+    // Without it a drag that leaves the surface it started on (text selection, a
+    // scrollbar, dragging a menu item) silently changes recipient halfway.
+    //
+    // It has to outlive the release it ends on. Clearing it as soon as the button
+    // level drops meant the release itself was routed by hover instead of by the
+    // grab, so a click whose pointer had wandered even slightly delivered its press
+    // to the item and its release to something else, and nothing activated.
+    if let Some(surf) = grabbed.clone() {
+        match render::surface_origin(windows, &surf) {
+            Some((ox, oy)) => under = Some((surf, ox, oy)),
+            // The grabbed surface went away; let the grab lapse.
+            None => *grabbed = None,
+        }
+    }
+    // Descend into subsurfaces: the pointer belongs to the surface actually under
+    // it, which is not always the root one the hit test found.
+    let under = under.map(|(surf, ox, oy)| {
+        match wl::state::surface_under(&surf, (ccx - ox) as f32, (ccy - oy) as f32) {
+            Some((child, dx, dy)) if child != surf => (child, ox + dx, oy + dy),
+            _ => (surf, ox, oy),
+        }
+    });
     let target = under.as_ref().map(|(surf, _, _)| surf.clone());
     let entered = target != *hovered;
     *hovered = target.clone();
 
-    // Motion on a move or on crossing into another surface, which is what makes
-    // Smithay emit leave and enter. Not every frame: a still pointer that keeps
-    // sending motion reads as continuous movement to clients (weston-smoke never
-    // stops smoking).
-    if moved || entered {
+    // Send motion whenever the client's view of the pointer changes: which surface
+    // it is over, or where it is inside that surface. The mouse moving is only one
+    // way for that to happen, and keying off it alone was a bug you could feel:
+    // panning, zooming, or dragging a window under a still cursor moves the pointer
+    // in surface coordinates, and a client that is never told keeps acting on where
+    // the pointer used to be, so its clicks land in the wrong place or nowhere.
+    //
+    // Still not every frame: when nothing has changed we stay quiet, because a
+    // client reading repeated motion treats it as continuous movement (weston-smoke
+    // never stops smoking).
+    let now_at = under
+        .as_ref()
+        .map(|(surf, ox, oy)| (surf.clone(), ccx - ox, ccy - oy));
+    let changed = match (&*last_motion, &now_at) {
+        (Some((was, wx, wy)), Some((is, ix, iy))) => {
+            was != is || (wx - ix).abs() > 0.01 || (wy - iy).abs() > 0.01
+        }
+        (None, None) => false,
+        _ => true,
+    };
+    *last_motion = now_at;
+    if changed || entered {
         let focus = under
             .as_ref()
             .map(|(surf, ox, oy)| (surf.clone(), Point::<f64, Logical>::from((*ox as f64, *oy as f64))));
@@ -166,17 +217,58 @@ fn route_input(
         pointer.frame(state);
     }
 
-    // Left button. It goes wherever the pointer is, and it is also what moves
-    // keyboard focus and raises a window; clicking empty canvas drops focus.
+    // Buttons. All three go to whatever the implicit grab points at, so a press and
+    // its release can never land on different surfaces, and a release is never
+    // dropped for want of something under the pointer. Dropping one is worse than
+    // misplacing it: a client left believing a button is still held goes into a drag
+    // or, for Chromium, middle-click autoscroll, and ignores everything after. Six
+    // presses to one release is what that looked like on the wire.
+    //
+    // Left is also what moves keyboard focus and raises a window; the others never
+    // do. Clicking empty canvas drops focus.
+    if pressed && debug {
+        match under.as_ref() {
+            Some((_, ox, oy)) => println!(
+                "om_wm: press -> surface local {:.0},{:.0} (origin {ox:.0},{oy:.0})",
+                ccx - ox,
+                ccy - oy
+            ),
+            None => println!("om_wm: press -> nothing under the pointer"),
+        }
+    }
+
+    let edges = [
+        (BTN_LEFT, pressed, released),
+        (BTN_RIGHT, ptr.right_pressed, ptr.right_released),
+        (BTN_MIDDLE, ptr.middle_pressed, ptr.middle_released),
+    ];
+
+    // Any press starts the grab, so the rest of that click belongs to this surface.
+    if edges.iter().any(|(_, down, _)| *down) {
+        if let Some((surf, _, _)) = under.as_ref() {
+            *grabbed = Some(surf.clone());
+        }
+    }
+
     if pressed {
         match under.as_ref() {
             Some((surf, _, _)) => {
-                render::front(windows, surf);
-                *focused = Some(surf.clone());
-                keyboard.set_focus(state, Some(surf.clone()), SERIAL_COUNTER.next_serial());
-                let serial = SERIAL_COUNTER.next_serial();
-                pointer.button(state, &ButtonEvent { serial, time: time_ms, button: BTN_LEFT, state: ButtonState::Pressed });
-                pointer.frame(state);
+                // Pointer input goes to the exact surface under the cursor, but
+                // keyboard focus follows the *toplevel*, never a popup or a
+                // subsurface, and only when it actually changes.
+                //
+                // Both halves matter. Smithay implements a focus change as leave then
+                // enter, and a client reads leave on its toplevel as "you lost
+                // focus": Chromium destroys its open menus the instant it arrives. So
+                // handing focus to the popup killed the menu before the click landed,
+                // and re-sending focus a window already has would do the same for no
+                // reason at all.
+                let window = wl::state::window_root(state, surf);
+                render::front(windows, &window);
+                if focused.as_ref() != Some(&window) {
+                    *focused = Some(window.clone());
+                    keyboard.set_focus(state, Some(window), SERIAL_COUNTER.next_serial());
+                }
             }
             None => {
                 if focused.is_some() {
@@ -187,38 +279,17 @@ fn route_input(
         }
     }
 
-    // Release goes to whatever the pointer is over, which is also where the press
-    // went unless the pointer left mid-click. Menu items activate on release, so
-    // this one matters.
-    if released && hovered.is_some() {
-        let serial = SERIAL_COUNTER.next_serial();
-        pointer.button(state, &ButtonEvent { serial, time: time_ms, button: BTN_LEFT, state: ButtonState::Released });
-        pointer.frame(state);
-    }
-}
-
-// Right and middle buttons for whatever the pointer is over. Neither changes
-// focus: right opens a context menu where you already are, middle is open-in-tab
-// to a client. Left is route_input's business, since it is what focuses.
-//
-// Over empty canvas middle stays ours for drag-to-pan, and Super+double-middle
-// stays the zoom reset.
-fn forward_buttons(
-    state: &mut State,
-    ptr: &input::Pointer,
-    hovered: &Option<WlSurface>,
-    time_ms: u32,
-) {
-    if hovered.is_none() {
-        return;
-    }
-    let pointer = state.pointer.clone();
-    let edges = [
-        (BTN_RIGHT, ptr.right_pressed, ptr.right_released),
-        (BTN_MIDDLE, ptr.middle_pressed, ptr.middle_released),
-    ];
     let mut sent = false;
     for (button, down, up) in edges {
+        if !down && !up {
+            continue;
+        }
+        if under.is_none() {
+            if debug {
+                println!("om_wm: button {button:#x} had nothing under the pointer");
+            }
+            continue;
+        }
         if down {
             let serial = SERIAL_COUNTER.next_serial();
             pointer.button(state, &ButtonEvent { serial, time: time_ms, button, state: ButtonState::Pressed });
@@ -232,6 +303,11 @@ fn forward_buttons(
     }
     if sent {
         pointer.frame(state);
+    }
+
+    // Now the grab may lapse, once the release it was holding for has gone out.
+    if !held {
+        *grabbed = None;
     }
 }
 
@@ -307,13 +383,12 @@ fn forward_scroll(state: &mut State, ptr: &input::Pointer, time_ms: u32) {
 
 // Forward keyboard press/release edges to the focused window. Super+Escape is a
 // compositor shortcut (unfocus, handled in route_input) so it is not forwarded.
-fn forward_keys(
-    state: &mut State,
-    kb: &input::Input,
-    focused: &Option<WlSurface>,
-    time_ms: u32,
-) {
-    if focused.is_none() {
+fn forward_keys(state: &mut State, kb: &input::Input, time_ms: u32) {
+    // Ask Smithay where the keyboard is pointed rather than trusting our own
+    // window focus: a popup grab moves keyboard focus to the menu, and a menu
+    // opened by right click on a window nobody clicked first would otherwise get
+    // no keys at all, so no arrows and no Escape.
+    if state.keyboard.current_focus().is_none() {
         return;
     }
     let keyboard = state.keyboard.clone();
@@ -359,6 +434,22 @@ fn main() {
     ray::init_window(0, 0, "om_wm");
     // No SetTargetFPS: the DRM page flip in EndDrawing already vsyncs to the
     // display. A second 60 Hz cap would beat against it and cause stutter.
+
+    // Bail out before touching input if there is no display. raylib reports a failed
+    // DRM/KMS init by logging and carrying on with a zero-sized window, and carrying
+    // on from there is the worst outcome available: no picture, while we grab the
+    // keyboard and, without session control, leave no way to switch away. Usually it
+    // means something else already holds DRM master, i.e. another om_wm is running.
+    if ray::screen_width() <= 0 || ray::screen_height() <= 0 {
+        eprintln!(
+            "om_wm: no display from raylib ({}x{}). Something else probably holds DRM \
+             master: check for another om_wm with 'pgrep -a om_wm'.",
+            ray::screen_width(),
+            ray::screen_height()
+        );
+        ray::close_window();
+        return;
+    }
 
     // Install after InitWindow so nothing in EGL/GBM setup resets the handlers.
     let handler = on_signal as extern "C" fn(c_int) as usize;
@@ -444,10 +535,6 @@ fn main() {
     let mut focused: Option<WlSurface> = None;
     // Active Super+drag: (window, offset from cursor to the window's origin).
     let mut drag: Option<(WlSurface, f32, f32)> = None;
-    // Last cursor position we forwarded, to avoid spamming clients with motion
-    // events every frame while the pointer is still (weston-smoke, for one,
-    // emits smoke on every motion event it receives).
-    let mut last_cursor: Option<(i32, i32)> = None;
     // Windows easing back down after a drop. Each entry is the surface plus its
     // world center and z at release; we hold the visual (screen) center fixed as
     // z returns to 0 so perspective does not slide it toward the screen center.
@@ -490,6 +577,10 @@ fn main() {
     // Surface the pointer is currently over, so crossing into another one can
     // emit leave and enter.
     let mut hovered: Option<WlSurface> = None;
+    // Surface holding the implicit grab while a button is down.
+    let mut grabbed: Option<WlSurface> = None;
+    // Last pointer position we told a client about, in its own coordinates.
+    let mut last_motion: Option<(WlSurface, f32, f32)> = None;
 
     while RUNNING.load(Ordering::Relaxed)
         && !ray::window_should_close()
@@ -571,10 +662,8 @@ fn main() {
             );
         }
 
-        // New windows open where the view is, and menus follow the window they
-        // belong to. Both have to be current before anything is drawn.
+        // New windows open where the view is.
         render::set_place_origin(&mut windows, cam.cx, cam.cy);
-        render::sync_popups(&mut windows);
 
         // Send frame callbacks and flush BEFORE the vsync-blocking draw, so the
         // client renders its next frame concurrently with our page flip instead
@@ -748,6 +837,9 @@ fn main() {
         render::prune_dead(&mut windows);
         render::animate(&mut windows, ray::frame_time());
         let cam3d = camera::camera_3d(&cam, ray::screen_height());
+        // Menus and subsurfaces are anchored to their parent, so they are placed
+        // before anything is hit tested or drawn.
+        render::sync_children(&mut windows);
         let cursor_pos = cursor.as_ref().map(cursor::pos);
 
         // Super+drag: grab the window under the cursor and lift it toward the
@@ -820,34 +912,14 @@ fn main() {
             });
         }
 
-        // A click that misses every popup closes the open menus. Proper menus take
-        // a popup grab and get this from the grab; we do not hold one yet, so the
-        // dismissal is ours to do, which also means a wrong hit test here reads as
-        // a menu that vanishes the moment you click an item. OM_WM_DEBUG_INPUT=1
-        // prints the click, what it hit, and every rect it could have hit.
-        if pressed && wl::state::any_popup(&state) {
-            let hit = render::window_at(&windows, cam3d, sxp, syp);
-            let on_popup = hit
-                .as_ref()
-                .map(|(surf, _, _)| wl::state::is_popup(&state, surf))
-                .unwrap_or(false);
-            if debug_input {
-                let (ccx, ccy) =
-                    camera::screen_to_plane(cam3d, sxp, syp, 0.0).unwrap_or((0.0, 0.0));
-                println!(
-                    "om_wm: click screen {sxp:.0},{syp:.0} canvas {ccx:.0},{ccy:.0} \
-                     on_popup={on_popup} dismiss={}",
-                    !on_popup
-                );
-                render::log_rects(&windows);
-            }
-            if !on_popup {
-                wl::state::dismiss_popups(&state);
-            }
+        // Dismissal is the popup grab's job now, not ours: it knows the chain and
+        // tells the client in the right order. OM_WM_DEBUG_INPUT=1 still dumps the
+        // click and every rect it could have hit.
+        if debug_input && pressed {
+            println!("om_wm: click screen {sxp:.0},{syp:.0}");
+            render::log_rects(&windows);
         }
 
-        let moved = cursor_pos != last_cursor;
-        last_cursor = cursor_pos;
         route_input(
             &mut state,
             &mut windows,
@@ -855,25 +927,23 @@ fn main() {
             cursor_pos,
             &mut focused,
             &mut hovered,
+            &mut grabbed,
+            &mut last_motion,
+            ptr.left || ptr.right || ptr.middle,
             inp.as_ref(),
+            debug_input,
             super_down,
+            &ptr,
             pressed,
             released,
-            moved,
             start.elapsed().as_millis() as u32,
         );
         let time_ms = start.elapsed().as_millis() as u32;
-        forward_buttons(&mut state, &ptr, &hovered, time_ms);
         if pointer_on_client {
             forward_scroll(&mut state, &ptr, time_ms);
         }
         if let Some(i) = inp.as_ref() {
-            forward_keys(
-                &mut state,
-                i,
-                &focused,
-                start.elapsed().as_millis() as u32,
-            );
+            forward_keys(&mut state, i, time_ms);
         }
 
         ray::begin_drawing();

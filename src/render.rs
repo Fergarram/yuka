@@ -25,6 +25,9 @@ use smithay::reexports::wayland_server::Resource;
 // How high (canvas units) a window rises while lifted, and how fast z animates.
 const LIFT_HEIGHT: f32 = 125.0;
 const LIFT_RATE: f32 = 14.0;
+// How far in front of its parent a child surface sits: enough to win the painter's
+// sort, small enough to read as the same plane. Negative z is toward the camera.
+const CHILD_LIFT: f32 = 0.05;
 
 //
 // Types
@@ -45,15 +48,31 @@ pub struct Windows {
     pub z: Vec<f32>,
     pub target_z: Vec<f32>,
     pub order: Vec<u32>,
+    // The window geometry rectangle inside the surface: offset and size. This, not
+    // the whole surface, is what we draw and what we hit test, so a client's drop
+    // shadow is neither visible nor clickable. Falls back to the full texture when
+    // a client never set a geometry.
+    pub geo_x: Vec<f32>,
+    pub geo_y: Vec<f32>,
+    pub geo_w: Vec<f32>,
+    pub geo_h: Vec<f32>,
     // 1.0 for shm (BGRA in memory), 0.0 for dmabuf (correct RGBA via EGL).
     pub swizzle: Vec<f32>,
     // true when we own tex_id (shm, freed via unload). false for dmabuf
     // textures, which the cache owns.
     pub owns: Vec<bool>,
-    // true for popups (menus). They share this store so they share the texture
-    // path and hit testing, but they are positioned from their parent every frame
-    // instead of being placed on the canvas, and they never get dragged.
+    // true for popups (menus). Canvas content like any window, positioned from
+    // their parent every frame and sitting a hair in front of it, so a menu scales
+    // and pans with the window it belongs to.
     pub popup: Vec<bool>,
+    // true for subsurfaces: content a client attaches beside its main surface. Same
+    // deal as popups, positioned from the root every frame, in front of it in tree
+    // order.
+    pub sub: Vec<bool>,
+    // Whether sync_popups placed this popup on the current frame. A popup that has
+    // left its parent's tree but whose surface is not destroyed yet would
+    // otherwise keep its last rectangle, drawing stale and swallowing clicks.
+    pub placed: Vec<bool>,
     // Where new windows go: the canvas point at the middle of the view, which the
     // main loop keeps current, plus a cascade step so a second window does not
     // land exactly on the first. A row from the origin was fine for a fixed test
@@ -92,9 +111,15 @@ pub fn windows_new() -> Windows {
         z: Vec::new(),
         target_z: Vec::new(),
         order: Vec::new(),
+        geo_x: Vec::new(),
+        geo_y: Vec::new(),
+        geo_w: Vec::new(),
+        geo_h: Vec::new(),
         swizzle: Vec::new(),
         owns: Vec::new(),
         popup: Vec::new(),
+        sub: Vec::new(),
+        placed: Vec::new(),
         place_at: (0.0, 0.0),
         cascade: 0,
         next_order: 0,
@@ -111,6 +136,31 @@ pub fn dmabuf_cache_new() -> DmabufCache {
         h: Vec::new(),
         logged: false,
     }
+}
+
+// The part of an entry that is actually the window, in canvas coordinates: its
+// surface origin shifted by the geometry offset, sized to the geometry. Everything
+// visible or clickable is expressed in these, never in raw texture bounds.
+pub fn visible(windows: &Windows, i: usize) -> (f32, f32, f32, f32) {
+    (
+        windows.canvas_x[i] + windows.geo_x[i],
+        windows.canvas_y[i] + windows.geo_y[i],
+        windows.geo_w[i],
+        windows.geo_h[i],
+    )
+}
+
+// Record what the client called its window geometry, clamped to the texture we
+// have, since a stale configure can describe a size the current buffer does not.
+pub fn set_geometry(windows: &mut Windows, surface: &WlSurface, geo: Option<(f32, f32, f32, f32)>) {
+    let Some(i) = index_of(windows, surface) else { return };
+    let tw = windows.tex_w[i] as f32;
+    let th = windows.tex_h[i] as f32;
+    let (x, y, w, h) = geo.unwrap_or((0.0, 0.0, tw, th));
+    windows.geo_x[i] = x.clamp(0.0, tw);
+    windows.geo_y[i] = y.clamp(0.0, th);
+    windows.geo_w[i] = w.min(tw - windows.geo_x[i]).max(1.0);
+    windows.geo_h[i] = h.min(th - windows.geo_y[i]).max(1.0);
 }
 
 fn index_of(windows: &Windows, surface: &WlSurface) -> Option<usize> {
@@ -139,15 +189,37 @@ pub fn prune_dead(windows: &mut Windows) {
         windows.z.remove(i);
         windows.target_z.remove(i);
         windows.order.remove(i);
+        windows.geo_x.remove(i);
+        windows.geo_y.remove(i);
+        windows.geo_w.remove(i);
+        windows.geo_h.remove(i);
         windows.swizzle.remove(i);
         windows.owns.remove(i);
         windows.popup.remove(i);
+        windows.sub.remove(i);
+        windows.placed.remove(i);
     }
 }
 
-// Topmost window under the cursor: cast the cursor ray to the z=0 plane and pick
-// the highest-order window whose rect contains the hit. Returns the surface and
-// its canvas origin.
+// A stored entry is drawable when it has a texture and, if it is a child, when its
+// parent placed it this frame.
+fn drawable(windows: &Windows, i: usize) -> bool {
+    if windows.tex_w[i] <= 0 || windows.tex_h[i] <= 0 {
+        return false;
+    }
+    !child(windows, i) || windows.placed[i]
+}
+
+// Popups and subsurfaces are children: their position comes from a parent each
+// frame, they are never laid out on the canvas themselves, and they are never
+// dragged.
+pub fn child(windows: &Windows, i: usize) -> bool {
+    windows.popup[i] || windows.sub[i]
+}
+
+// Topmost surface under the cursor: cast the ray to the z=0 plane and pick the
+// nearest candidate containing the hit. Nearest means smallest z, since children
+// sit in front of their parents, with stack order breaking ties.
 pub fn window_at(
     windows: &Windows,
     cam3d: ray::Camera3D,
@@ -157,17 +229,37 @@ pub fn window_at(
     let (cx, cy) = camera::screen_to_plane(cam3d, sx, sy, 0.0)?;
     let mut best: Option<usize> = None;
     for i in 0..windows.surface.len() {
-        let x = windows.canvas_x[i];
-        let y = windows.canvas_y[i];
-        let w = windows.tex_w[i] as f32;
-        let h = windows.tex_h[i] as f32;
-        if cx >= x && cx < x + w && cy >= y && cy < y + h {
-            if best.map_or(true, |b| windows.order[i] > windows.order[b]) {
+        if !drawable(windows, i) {
+            continue;
+        }
+        let (x, y, w, h) = visible(windows, i);
+        if cx < x || cx >= x + w || cy < y || cy >= y + h {
+            continue;
+        }
+        // A client can declare an input region smaller than its buffer; a
+        // transparent surface without one would otherwise swallow clicks meant for
+        // whatever is behind it.
+        let local_x = cx - windows.canvas_x[i];
+        let local_y = cy - windows.canvas_y[i];
+        if state::input_region_contains(&windows.surface[i], local_x, local_y) {
+            let nearer = |b: usize| {
+                windows.z[i] < windows.z[b]
+                    || (windows.z[i] == windows.z[b]
+                        && windows.order[i] >= windows.order[b])
+            };
+            if best.map_or(true, nearer) {
                 best = Some(i);
             }
         }
     }
     best.map(|i| (windows.surface[i].clone(), windows.canvas_x[i], windows.canvas_y[i]))
+}
+
+// Canvas origin of a surface's own coordinate space (its top-left, geometry
+// offset included), for following a surface that is holding a pointer grab while
+// it moves.
+pub fn surface_origin(windows: &Windows, surface: &WlSurface) -> Option<(f32, f32)> {
+    index_of(windows, surface).map(|i| (windows.canvas_x[i], windows.canvas_y[i]))
 }
 
 // Current lifted z of a specific surface, if present.
@@ -178,18 +270,16 @@ pub fn window_z(windows: &Windows, surface: &WlSurface) -> Option<f32> {
 // Canvas position of a window's center (origin + half its texture size).
 pub fn window_center(windows: &Windows, surface: &WlSurface) -> Option<(f32, f32)> {
     index_of(windows, surface).map(|i| {
-        (
-            windows.canvas_x[i] + windows.tex_w[i] as f32 * 0.5,
-            windows.canvas_y[i] + windows.tex_h[i] as f32 * 0.5,
-        )
+        let (x, y, w, h) = visible(windows, i);
+        (x + w * 0.5, y + h * 0.5)
     })
 }
 
 // Place a window so its center sits at the given canvas position.
 pub fn set_window_center(windows: &mut Windows, surface: &WlSurface, cx: f32, cy: f32) {
     if let Some(i) = index_of(windows, surface) {
-        windows.canvas_x[i] = cx - windows.tex_w[i] as f32 * 0.5;
-        windows.canvas_y[i] = cy - windows.tex_h[i] as f32 * 0.5;
+        windows.canvas_x[i] = cx - windows.geo_w[i] * 0.5 - windows.geo_x[i];
+        windows.canvas_y[i] = cy - windows.geo_h[i] * 0.5 - windows.geo_y[i];
     }
 }
 
@@ -206,14 +296,21 @@ pub fn set_window_pos(windows: &mut Windows, surface: &WlSurface, x: f32, y: f32
 pub fn log_rects(windows: &Windows) {
     for i in 0..windows.surface.len() {
         println!(
-            "om_wm:   {} {}x{} at {:.0},{:.0} order={} z={:.0}",
-            if windows.popup[i] { "popup " } else { "window" },
+            "om_wm:   {} {}x{} at {:.0},{:.0} z={:.2} order={} placed={}",
+            if windows.popup[i] {
+                "popup "
+            } else if windows.sub[i] {
+                "sub   "
+            } else {
+                "window"
+            },
             windows.tex_w[i],
             windows.tex_h[i],
             windows.canvas_x[i],
             windows.canvas_y[i],
+            windows.z[i],
             windows.order[i],
-            windows.z[i]
+            windows.placed[i]
         );
     }
 }
@@ -225,11 +322,20 @@ pub fn set_place_origin(windows: &mut Windows, cx: f32, cy: f32) {
     windows.place_at = (cx, cy);
 }
 
-// Put every popup under its parent: position from the parent's origin plus the
-// offset Smithay resolved from the positioner, same lift, and one step higher in
-// stack order so a menu draws and hit-tests above the window it belongs to.
-// Called once a frame, so dragging or lifting a window carries its menus along.
-pub fn sync_popups(windows: &mut Windows) {
+// Anchor every popup to its parent on the canvas. The offset is the position the
+// client acked for its positioner, in the parent's surface coordinates, so the
+// menu lands where the client asked, and it scales and pans with the window it
+// belongs to. It sits CHILD_LIFT in front of the parent, which wins the painter's
+// sort without leaving the parent's plane and stacks submenus naturally: each
+// level is one step nearer the camera.
+//
+// Called once a frame, before anything is hit tested or drawn. A child that is no
+// longer in any parent's tree stays unplaced, and unplaced children neither draw
+// nor accept clicks.
+pub fn sync_children(windows: &mut Windows) {
+    for i in 0..windows.surface.len() {
+        windows.placed[i] = false;
+    }
     let mut moves: Vec<(usize, f32, f32, f32, u32)> = Vec::new();
     for i in 0..windows.surface.len() {
         if windows.popup[i] {
@@ -241,8 +347,8 @@ pub fn sync_popups(windows: &mut Windows) {
                     j,
                     windows.canvas_x[i] + ox,
                     windows.canvas_y[i] + oy,
-                    windows.z[i],
-                    windows.order[i] + 1,
+                    windows.z[i] - CHILD_LIFT,
+                    windows.order[i],
                 ));
             }
         }
@@ -253,6 +359,48 @@ pub fn sync_popups(windows: &mut Windows) {
         windows.z[j] = z;
         windows.target_z[j] = z;
         windows.order[j] = order;
+        windows.placed[j] = true;
+    }
+
+    // Then every subsurface tree, from each root that is not itself a subsurface, so
+    // a popup's children are placed off the popup we just moved. The tree comes back
+    // in the client's stacking order with the root at its own slot, and each surface
+    // is offset from the root's z by its distance from that slot: earlier slots are
+    // behind the root, later ones in front. Forcing them all in front, which is what
+    // this did first, puts a client's below-parent shadow on top of its own content
+    // and swallows every click aimed at it.
+    let mut subs: Vec<(usize, f32, f32, f32, u32)> = Vec::new();
+    for i in 0..windows.surface.len() {
+        if windows.sub[i] {
+            continue;
+        }
+        let tree = state::surface_tree(&windows.surface[i]);
+        let root_slot = tree
+            .iter()
+            .position(|(surface, _, _)| *surface == windows.surface[i])
+            .unwrap_or(0);
+        for (slot, (surface, ox, oy)) in tree.iter().enumerate() {
+            if slot == root_slot {
+                continue;
+            }
+            let Some(j) = index_of(windows, surface) else { continue };
+            let steps = root_slot as f32 - slot as f32;
+            subs.push((
+                j,
+                windows.canvas_x[i] + ox,
+                windows.canvas_y[i] + oy,
+                windows.z[i] + CHILD_LIFT * steps,
+                windows.order[i],
+            ));
+        }
+    }
+    for (j, x, y, z, order) in subs {
+        windows.canvas_x[j] = x;
+        windows.canvas_y[j] = y;
+        windows.z[j] = z;
+        windows.target_z[j] = z;
+        windows.order[j] = order;
+        windows.placed[j] = true;
     }
 }
 
@@ -297,6 +445,7 @@ fn store_entry(
     swizzle: f32,
     owns: bool,
     popup: bool,
+    sub: bool,
 ) {
     match index_of(windows, surface) {
         Some(i) => {
@@ -317,7 +466,7 @@ fn store_entry(
             // under their parent before the first draw.
             const CASCADE_STEP: f32 = 48.0;
             const CASCADE_WRAP: u32 = 6;
-            let (cx, cy) = if popup {
+            let (cx, cy) = if popup || sub {
                 (0.0, 0.0)
             } else {
                 let step = (windows.cascade % CASCADE_WRAP) as f32 * CASCADE_STEP;
@@ -326,6 +475,8 @@ fn store_entry(
                     windows.place_at.0 - w as f32 * 0.5 + step,
                     windows.place_at.1 - h as f32 * 0.5 + step,
                 )
+                // Geometry is not known until the client's first commit lands, so
+                // this centres on the buffer and set_geometry refines it after.
             };
             let order = windows.next_order;
             windows.next_order += 1;
@@ -338,9 +489,15 @@ fn store_entry(
             windows.z.push(0.0);
             windows.target_z.push(0.0);
             windows.order.push(order);
+            windows.geo_x.push(0.0);
+            windows.geo_y.push(0.0);
+            windows.geo_w.push(w as f32);
+            windows.geo_h.push(h as f32);
             windows.swizzle.push(swizzle);
             windows.owns.push(owns);
             windows.popup.push(popup);
+            windows.sub.push(sub);
+            windows.placed.push(false);
             println!(
                 "om_wm: {} + {w}x{h} at {cx:.0},{cy:.0}",
                 if popup { "popup" } else { "window" }
@@ -419,22 +576,25 @@ pub fn upload_committed(
     state: &mut State,
     surface: &WlSurface,
 ) {
-    // Windows and their popups become quads. Cursor and subsurface commits still
-    // carry buffers; drop them (releasing shm so the client is not stalled) and
-    // skip.
-    let popup = if state::is_toplevel(state, surface) {
-        false
+    // Windows, their popups and their subsurfaces all become quads. Anything else
+    // that commits a buffer (a cursor surface, say) is dropped, releasing shm so the
+    // client is not left waiting on it.
+    let (popup, sub) = if state::is_toplevel(state, surface) {
+        (false, false)
     } else if state::is_popup(state, surface) {
-        true
+        (true, false)
+    } else if state::is_subsurface(surface) {
+        (false, true)
     } else {
         state::take_shm_buffer(surface, |_, _, _, _| {});
         return;
     };
 
     let handled_shm = state::take_shm_buffer(surface, |w, h, stride, ptr| {
-        upload_shm(windows, surface, w, h, stride, ptr, popup);
+        upload_shm(windows, surface, w, h, stride, ptr, popup, sub);
     });
     if handled_shm {
+        set_geometry(windows, surface, state::geometry_of(surface));
         // Surface is on an shm buffer now; drop any dmabuf we were holding.
         state::release_held_dmabuf(state, surface);
         return;
@@ -443,7 +603,7 @@ pub fn upload_committed(
     state::take_dmabuf_and_retain(state, surface, |key, info| {
         match cache.get_or_import(egl, key, info) {
             Some((tex, w, h)) => {
-                store_entry(windows, surface, tex, w, h, 0.0, false, popup);
+                store_entry(windows, surface, tex, w, h, 0.0, false, popup, sub);
             }
             None => eprintln!(
                 "om_wm: dmabuf import failed {}x{} fourcc={:#x} mod={:#x}",
@@ -451,6 +611,7 @@ pub fn upload_committed(
             ),
         }
     });
+    set_geometry(windows, surface, state::geometry_of(surface));
 }
 
 fn upload_shm(
@@ -461,6 +622,7 @@ fn upload_shm(
     stride: i32,
     ptr: *const u8,
     popup: bool,
+    sub: bool,
 ) {
     if w <= 0 || h <= 0 {
         return;
@@ -491,7 +653,7 @@ fn upload_shm(
     }
 
     let id = ray::load_texture_rgba(data, w, h);
-    store_entry(windows, surface, id, w, h, 1.0, true, popup);
+    store_entry(windows, surface, id, w, h, 1.0, true, popup, sub);
 }
 
 // Release the shm textures we own. dmabuf textures live in the cache.
@@ -510,9 +672,15 @@ pub fn destroy_owned(windows: &mut Windows) {
     windows.z.clear();
     windows.target_z.clear();
     windows.order.clear();
+    windows.geo_x.clear();
+    windows.geo_y.clear();
+    windows.geo_w.clear();
+    windows.geo_h.clear();
     windows.swizzle.clear();
     windows.owns.clear();
     windows.popup.clear();
+    windows.sub.clear();
+    windows.placed.clear();
     windows.cascade = 0;
 }
 
@@ -531,7 +699,7 @@ pub fn draw_windows(
     // near (low z) last; ties broken by stack order. Depth test is off so later
     // draws win among equal z.
     let mut idx: Vec<usize> = (0..windows.surface.len())
-        .filter(|&i| windows.tex_w[i] > 0 && windows.tex_h[i] > 0)
+        .filter(|&i| drawable(windows, i))
         .collect();
     idx.sort_by(|&a, &b| {
         windows.z[b]
@@ -544,17 +712,22 @@ pub fn draw_windows(
     ray::disable_backface_culling();
     ray::disable_depth_test();
     for i in idx {
-        let x = windows.canvas_x[i];
-        let y = windows.canvas_y[i];
-        let w = windows.tex_w[i] as f32;
-        let h = windows.tex_h[i] as f32;
+        let (x, y, w, h) = visible(windows, i);
         let z = windows.z[i];
+        // Texture coordinates cover only the geometry rectangle, so whatever the
+        // client padded around its window is cropped rather than drawn.
+        let tw = windows.tex_w[i] as f32;
+        let th = windows.tex_h[i] as f32;
+        let u0 = windows.geo_x[i] / tw;
+        let v0 = windows.geo_y[i] / th;
+        let u1 = (windows.geo_x[i] + w) / tw;
+        let v1 = (windows.geo_y[i] + h) / th;
         // Quad on a plane parallel to the canvas, raised by z. Top-left origin.
         let corners = [
-            (Vector3 { x, y, z }, 0.0, 0.0),
-            (Vector3 { x: x + w, y, z }, 1.0, 0.0),
-            (Vector3 { x: x + w, y: y + h, z }, 1.0, 1.0),
-            (Vector3 { x, y: y + h, z }, 0.0, 1.0),
+            (Vector3 { x, y, z }, u0, v0),
+            (Vector3 { x: x + w, y, z }, u1, v0),
+            (Vector3 { x: x + w, y: y + h, z }, u1, v1),
+            (Vector3 { x, y: y + h, z }, u0, v1),
         ];
         ray::begin_shader_mode(shader);
         ray::set_shader_float(shader, alpha_loc, 0.0);
