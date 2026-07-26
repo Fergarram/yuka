@@ -435,15 +435,12 @@ fn main() {
     // No SetTargetFPS: the DRM page flip in EndDrawing already vsyncs to the
     // display. A second 60 Hz cap would beat against it and cause stutter.
 
-    // Bail out before touching input if there is no display. raylib reports a failed
-    // DRM/KMS init by logging and carrying on with a zero-sized window, and carrying
-    // on from there is the worst outcome available: no picture, while we grab the
-    // keyboard and, without session control, leave no way to switch away. Usually it
-    // means something else already holds DRM master, i.e. another om_wm is running.
-    if ray::screen_width() <= 0 || ray::screen_height() <= 0 {
+    // Bail out before touching input if we have no display. Running on regardless is
+    // the worst outcome available: no picture, while we hold the keyboard and, without
+    // session control, leave no obvious way to switch away.
+    if ray::screen_width() <= 0 || ray::screen_height() <= 0 || !seat::drm_is_ours() {
         eprintln!(
-            "om_wm: no display from raylib ({}x{}). Something else probably holds DRM \
-             master: check for another om_wm with 'pgrep -a om_wm'.",
+            "om_wm: no usable display ({}x{}), exiting before taking any input.",
             ray::screen_width(),
             ray::screen_height()
         );

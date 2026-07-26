@@ -291,6 +291,27 @@ fn drop_master(drm_fd: i32) -> bool {
     unsafe { libc::ioctl(drm_fd, DRM_IOCTL_DROP_MASTER) == 0 }
 }
 
+// Whether the display is actually ours to drive. raylib will open the card, build a
+// GBM surface and report a healthy 1440x900 window without ever being DRM master:
+// only the per-frame modeset fails, silently, so a second instance runs blind while
+// holding the keyboard. Asking for master answers it properly, and asking is
+// harmless when we already have it.
+pub fn drm_is_ours() -> bool {
+    let fd = find_drm_fd();
+    if fd < 0 {
+        return true; // No card found; whatever is wrong, it is not contention.
+    }
+    if unsafe { libc::ioctl(fd, DRM_IOCTL_SET_MASTER) } == 0 {
+        return true;
+    }
+    let err = std::io::Error::last_os_error();
+    eprintln!(
+        "om_wm: the display belongs to another process ({err}). Only one thing can \
+         drive DRM at a time: check 'pgrep -a om_wm'."
+    );
+    false
+}
+
 //
 // Query
 //
