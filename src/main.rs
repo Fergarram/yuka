@@ -518,7 +518,27 @@ fn main() {
     // it opens them, since the console would otherwise read everything we type,
     // and that costs us VT switching: ctrl+alt+backspace is then the way out.
     let mut inp = input::init(seat.is_none());
-    if seat.is_none() && inp.is_some() {
+
+    // Nothing to drive us: no device opened, or no libinput at all. Carrying on from
+    // here is how you end up rebooting the machine, because with session control
+    // logind has already silenced the console, so neither our chords nor the kernel's
+    // work and there is no way left to quit. Session control is released on the way
+    // out, which restores the VT.
+    let opened = inp.as_ref().map(input::devices).unwrap_or(0);
+    if opened == 0 {
+        eprintln!(
+            "om_wm: libinput opened no input devices, so nothing could quit or switch \
+             away from om_wm. Exiting instead of locking the seat. This is usually \
+             permissions on /dev/input: try 'sg input -c ./target/debug/om_wm'."
+        );
+        if let Some(s) = seat.as_mut() {
+            seat::shutdown(s);
+        }
+        ray::close_window();
+        return;
+    }
+
+    if seat.is_none() {
         println!(
             "om_wm: no session control: input grabbed, no vt switching, \
              ctrl+alt+backspace quits"

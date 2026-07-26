@@ -506,6 +506,13 @@ pub fn pointer(inp: &Input) -> Pointer {
     inp.pointer
 }
 
+// How many devices libinput actually opened. Zero means we are deaf and blind: the
+// nodes exist (any_keyboard_present read them from /proc) but we could not open
+// them, which is almost always a permissions problem.
+pub fn devices(inp: &Input) -> u32 {
+    inp.keyboards + inp.pointers
+}
+
 pub fn down(inp: &Input, code: u16) -> bool {
     inp.keys.get(code as usize).copied().unwrap_or(false)
 }
