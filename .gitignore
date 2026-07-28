@@ -91,3 +91,6 @@ $RECYCLE.BIN/
 # Local scratch / logs
 *.log
 
+
+# Nested build, so the two platforms stop clobbering one binary path.
+/target-windowed/

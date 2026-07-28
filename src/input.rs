@@ -102,7 +102,7 @@ pub enum TrackpadMode {
 
 // Everything the pointer did since the last poll. Deltas are accumulated, button
 // fields are edges except middle, which is a level for drag-to-pan.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct Pointer {
     pub dx: f32,
     pub dy: f32,
@@ -133,6 +133,32 @@ pub struct Pointer {
     pub middle_pressed: bool,
     pub middle_released: bool,
     pub middle: bool,
+}
+
+// A frame with nothing in it. Written out rather than derived because pinch is a
+// multiplier: derived Default would make it 0.0, and a caller with no input device
+// would multiply the canvas zoom by zero every frame.
+impl Default for Pointer {
+    fn default() -> Self {
+        Pointer {
+            dx: 0.0,
+            dy: 0.0,
+            wheel: 0.0,
+            hwheel: 0.0,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            pinch: 1.0,
+            left_pressed: false,
+            left_released: false,
+            right_pressed: false,
+            right_released: false,
+            left: false,
+            right: false,
+            middle_pressed: false,
+            middle_released: false,
+            middle: false,
+        }
+    }
 }
 
 pub struct Input {
@@ -314,7 +340,7 @@ fn bit_set(words: &[u64], bit: u16) -> bool {
 
 pub fn poll(inp: &mut Input) {
     inp.events.clear();
-    let mut p = Pointer { pinch: 1.0, ..Pointer::default() };
+    let mut p = Pointer::default();
     if let Err(e) = inp.li.dispatch() {
         eprintln!("om_wm: input: libinput dispatch failed: {e}");
     }

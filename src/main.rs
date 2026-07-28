@@ -57,6 +57,9 @@ const WHEEL_STEP_PX: f32 = 15.0;
 const CLIENT_SCROLL_SIGN: f32 = if INVERT_SCROLL { 1.0 } else { -1.0 };
 // How long to sleep per iteration while another VT owns the display.
 const VT_IDLE_MS: u64 = 30;
+// Size of the window in the nested build. On DRM we take the whole screen instead.
+const WINDOWED_W: i32 = 1280;
+const WINDOWED_H: i32 = 800;
 
 //
 // State
@@ -431,7 +434,18 @@ fn main() {
         .with_writer(std::io::stderr)
         .init();
 
-    ray::init_window(0, 0, "om_wm");
+    // Nested build: om_wm is a client of another compositor, which owns the display
+    // and the input devices. Everything that reaches for hardware stays out of it, so
+    // there is no session to control, no DRM master to hold, no evdev to read, and
+    // nothing that can lock the machine. Same source, one flag apart.
+    let windowed = cfg!(feature = "windowed");
+    if windowed {
+        ray::disable_libdecor();
+        ray::set_config_flags(ray::FLAG_WINDOW_UNDECORATED);
+        ray::init_window(WINDOWED_W, WINDOWED_H, "om_wm (nested)");
+    } else {
+        ray::init_window(0, 0, "om_wm");
+    }
     // No SetTargetFPS: the DRM page flip in EndDrawing already vsyncs to the
     // display. A second 60 Hz cap would beat against it and cause stutter.
 
@@ -492,7 +506,12 @@ fn main() {
     let mut windows = render::windows_new();
     let mut dmabuf_cache = render::dmabuf_cache_new();
     let mut cam = camera::camera_new();
-    let mut cursor = cursor::init(ray::screen_width(), ray::screen_height());
+    // The hardware cursor plane is a DRM thing; nested, the host draws the pointer.
+    let mut cursor = if windowed {
+        None
+    } else {
+        cursor::init(ray::screen_width(), ray::screen_height())
+    };
 
     // Session control. With it, logind owns our VT (K_OFF, KD_GRAPHICS) so the
     // switch chords are ours to implement and input needs no grab.
@@ -502,7 +521,10 @@ fn main() {
     // would leave no way off this VT at all. OM_WM_NO_SEAT opts out by hand, which
     // is also what non-interactive runs want.
     let no_seat = std::env::var("OM_WM_NO_SEAT").is_ok();
-    let mut seat = if input::any_keyboard_present() && !no_seat {
+    let mut seat = if windowed {
+        println!("om_wm: nested in another compositor: no session control, no vt switching");
+        None
+    } else if input::any_keyboard_present() && !no_seat {
         seat::init()
     } else {
         if !input::any_keyboard_present() {
@@ -517,7 +539,9 @@ fn main() {
     // libinput drives keyboards and pointers. Without a session it grabs them as
     // it opens them, since the console would otherwise read everything we type,
     // and that costs us VT switching: ctrl+alt+backspace is then the way out.
-    let mut inp = input::init(seat.is_none());
+    // libinput would read the real devices even nested, so the host and om_wm would
+    // both react to every key. Host input comes through raylib instead.
+    let mut inp = if windowed { None } else { input::init(seat.is_none()) };
 
     // Nothing to drive us: no device opened, or no libinput at all. Carrying on from
     // here is how you end up rebooting the machine, because with session control
@@ -525,7 +549,7 @@ fn main() {
     // work and there is no way left to quit. Session control is released on the way
     // out, which restores the VT.
     let opened = inp.as_ref().map(input::devices).unwrap_or(0);
-    if opened == 0 {
+    if opened == 0 && !windowed {
         eprintln!(
             "om_wm: libinput opened no input devices, so nothing could quit or switch \
              away from om_wm. Exiting instead of locking the seat. This is usually \
@@ -538,7 +562,7 @@ fn main() {
         return;
     }
 
-    if seat.is_none() {
+    if seat.is_none() && !windowed {
         println!(
             "om_wm: no session control: input grabbed, no vt switching, \
              ctrl+alt+backspace quits"

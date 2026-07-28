@@ -7,6 +7,13 @@ edition = "2021"
 name = "om_wm"
 path = "src/main.rs"
 
+# Windowed (nested) build: om_wm runs as a client of another compositor instead of
+# owning the hardware. Same source, different platform for raylib, and the DRM-only
+# paths (session control, cursor plane, libinput) stay out of the way.
+[features]
+default = []
+windowed = []
+
 [dependencies]
 smithay = { version = "0.7", default-features = false, features = ["wayland_frontend", "backend_drm", "desktop"] }
 libc = "0.2"

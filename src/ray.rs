@@ -5,7 +5,7 @@
 // stay here; callers get plain Rust types. Grows as milestones need more.
 //
 
-use std::ffi::{c_char, c_int, c_void, CString};
+use std::ffi::{c_char, c_int, c_uint, c_void, CString};
 
 //
 // Constants
@@ -79,6 +79,10 @@ pub struct Shader {
 
 extern "C" {
     fn InitWindow(width: c_int, height: c_int, title: *const c_char);
+    fn SetConfigFlags(flags: c_uint);
+    // GLFW is linked inside raylib, and init hints set before raylib calls glfwInit
+    // are honoured.
+    fn glfwInitHint(hint: c_int, value: c_int);
     fn CloseWindow();
     fn WindowShouldClose() -> bool;
     fn BeginDrawing();
@@ -146,6 +150,24 @@ extern "C" {
 //
 // Window
 //
+
+// FLAG_WINDOW_UNDECORATED: a nested canvas wants no host titlebar around it.
+pub const FLAG_WINDOW_UNDECORATED: u32 = 0x0000_0008;
+
+// GLFW loads libdecor at init to draw client-side decorations, and the only libdecor
+// plugin installed here is the GTK one, which initialises GDK. Against a host with no
+// keyboard capability (headless weston) GDK asserts and the process dies before a
+// window ever exists. We draw our own everything anyway, so tell GLFW to skip it.
+const GLFW_WAYLAND_LIBDECOR: c_int = 0x0005_3001;
+const GLFW_WAYLAND_DISABLE_LIBDECOR: c_int = 0x0003_8002;
+
+pub fn disable_libdecor() {
+    unsafe { glfwInitHint(GLFW_WAYLAND_LIBDECOR, GLFW_WAYLAND_DISABLE_LIBDECOR) };
+}
+
+pub fn set_config_flags(flags: u32) {
+    unsafe { SetConfigFlags(flags) };
+}
 
 pub fn init_window(width: i32, height: i32, title: &str) {
     let c_title = CString::new(title).unwrap();
