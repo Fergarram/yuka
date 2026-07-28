@@ -138,6 +138,11 @@ extern "C" {
     fn rlSetClipPlanes(near_plane: f64, far_plane: f64);
     fn BeginMode3D(camera: Camera3D);
     fn EndMode3D();
+    fn GetWorldToScreen(position: Vector3, camera: Camera3D) -> Vector2;
+    fn rlDrawRenderBatchActive();
+    fn DrawText(text: *const c_char, x: c_int, y: c_int, size: c_int, color: Color);
+    fn MeasureText(text: *const c_char, size: c_int) -> c_int;
+    fn DrawRectangle(x: c_int, y: c_int, w: c_int, h: c_int, color: Color);
     fn GetScreenToWorldRay(position: Vector2, camera: Camera3D) -> Ray;
     fn rlSetTexture(id: u32);
     fn rlBegin(mode: c_int);
@@ -324,6 +329,40 @@ pub fn unload_texture(id: u32) {
 // GetScreenToWorldRay, so set it once at startup.
 pub fn set_clip_planes(near_plane: f64, far_plane: f64) {
     unsafe { rlSetClipPlanes(near_plane, far_plane) };
+}
+
+// Where a canvas point lands on screen, through the same perspective camera the
+// windows are drawn with. Debug labels are drawn in 2D at these points, so they follow
+// the pan and the lift exactly.
+pub fn world_to_screen(position: Vector3, camera: Camera3D) -> Vector2 {
+    unsafe { GetWorldToScreen(position, camera) }
+}
+
+// Push whatever 2D geometry is still queued to the framebuffer. rlgl batches it and
+// normally flushes at EndDrawing, which is after take_screenshot reads the pixels: any
+// text or rectangle drawn this frame would be missing from the file.
+pub fn flush_batch() {
+    unsafe { rlDrawRenderBatchActive() };
+}
+
+pub fn draw_rectangle(x: i32, y: i32, w: i32, h: i32, color: Color) {
+    unsafe { DrawRectangle(x, y, w, h, color) };
+}
+
+pub fn draw_text(text: &str, x: i32, y: i32, size: i32, color: Color) {
+    let c = match CString::new(text) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    unsafe { DrawText(c.as_ptr(), x, y, size, color) };
+}
+
+pub fn measure_text(text: &str, size: i32) -> i32 {
+    let c = match CString::new(text) {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+    unsafe { MeasureText(c.as_ptr(), size) }
 }
 
 pub fn begin_mode_3d(camera: Camera3D) {

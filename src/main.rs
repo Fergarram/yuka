@@ -548,10 +548,21 @@ fn main() {
         ray::egl_current_context(),
     );
 
+    // A label under every window saying what it is made of and how it is sampled.
+    // OM_WM_DEBUG_LABELS=1, or Super+I at any time.
+    let mut debug_labels = std::env::var("OM_WM_DEBUG_LABELS").is_ok();
+
     let egl = egl::init().expect("egl init");
+    // How much anisotropic filtering the driver offers, asked once. It only matters
+    // for minified windows, which is also the only time we build the mip chain it
+    // needs, and the perspective tilt is what makes it worth having at all.
+    let anisotropy = egl::max_anisotropy();
     let dmabuf_formats = egl.query_formats();
     let render_node_dev = egl.render_node_dev();
-    println!("om_wm: egl reports {} dmabuf format/modifier pairs", dmabuf_formats.len());
+    println!(
+        "om_wm: egl reports {} dmabuf format/modifier pairs, anisotropy {anisotropy:.0}x",
+        dmabuf_formats.len()
+    );
 
     let shader = ray::load_shader("shaders/window.vert", "shaders/window.frag");
     let alpha_loc = ray::shader_location(shader, "alphaBlend");
@@ -850,6 +861,17 @@ fn main() {
         pressed |= ptr.left_pressed;
         released |= ptr.left_released;
 
+        // Debug labels on and off, so a run that started plain can answer a question
+        // about sampling without being restarted.
+        if let Some(i) = inp.as_ref() {
+            let toggle = input::super_down(i)
+                && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_I);
+            if toggle {
+                debug_labels = !debug_labels;
+                println!("om_wm: debug labels {}", if debug_labels { "on" } else { "off" });
+            }
+        }
+
         // Zoom reset: Super+0 from the keyboard, Super + double middle click from
         // the mouse. The trackpad's two-finger double tap lives in touch.rs.
         let reset_key = inp
@@ -929,6 +951,16 @@ fn main() {
         if gestures_enabled {
             camera::camera_update(&mut cam, inp.as_ref());
         }
+
+        // The view lands on whole pixels every frame, whatever moved it: keys, wheel,
+        // middle drag, trackpad, or a zoom reset that changed the scale without touching
+        // the pan. Nothing has to remember to do it, so nothing can forget.
+        camera::snap_pan(
+            &mut cam,
+            ray::screen_width() as f32,
+            ray::screen_height() as f32,
+        );
+
         render::prune_dead(&mut windows);
         render::animate(&mut windows, ray::frame_time());
         let cam3d = camera::camera_3d(&cam, ray::screen_height());
@@ -1007,6 +1039,12 @@ fn main() {
             });
         }
 
+        // Everything that could move a window has run: the drag, the settle, and the
+        // child placement above. Put them all on the pixel grid, then decide how each
+        // one is sampled from where it actually ended up.
+        render::align_positions(&mut windows, cam.zoom);
+        render::prepare_textures(&mut windows, cam.zoom, anisotropy);
+
         // Dismissal is the popup grab's job now, not ours: it knows the chain and
         // tells the client in the right order. OM_WM_DEBUG_INPUT=1 still dumps the
         // click and every rect it could have hit.
@@ -1044,7 +1082,11 @@ fn main() {
         ray::begin_drawing();
         ray::clear_background(clear);
         render::draw_windows(&windows, cam3d, shader, alpha_loc, swizzle_loc);
+        if debug_labels {
+            render::draw_debug_labels(&windows, cam3d, cam.zoom, anisotropy);
+        }
         if screenshot && frame == shot_frame {
+            ray::flush_batch();
             ray::take_screenshot("shot.png");
         }
         ray::end_drawing();

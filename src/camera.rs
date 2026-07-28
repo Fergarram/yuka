@@ -105,6 +105,32 @@ pub fn zoom_at(cam: &mut Camera, factor: f32, sx: f32, sy: f32, sw: f32, sh: f32
     cam.cy = py - (sy - sh * 0.5) / cam.zoom;
 }
 
+// Land the view on whole pixels. Called every frame, unconditionally: the view is never
+// allowed to hold a fractional offset, so no code path can leave one behind. Doing this
+// on gesture end instead left the zoom resets blurry, because they change the zoom
+// without touching the pan, and the alignment depends on both.
+//
+// At the z=0 plane a canvas point maps to screen as x * zoom - cx * zoom + sw/2, so what
+// has to be an integer is (cx * zoom - sw/2): then every canvas coordinate that is
+// itself an integer lands on a pixel boundary, and a window at rest is sampled 1:1
+// instead of being resampled across two columns.
+//
+// Rounding every frame quantises panning to whole screen pixels, which is exactly the
+// resolution the screen has: the positions being discarded could not have been shown.
+// The correction is never more than half a pixel.
+//
+// Carrying the screen half-size through is what makes it right on an odd sized screen,
+// where the center itself sits on a half pixel.
+//
+// Only the pan is snapped. A fractional zoom cannot put every canvas unit on a pixel,
+// and rounding the zoom itself would fight the gesture that set it.
+pub fn snap_pan(cam: &mut Camera, sw: f32, sh: f32) {
+    let half_w = sw * 0.5;
+    let half_h = sh * 0.5;
+    cam.cx = ((cam.cx * cam.zoom - half_w).round() + half_w) / cam.zoom;
+    cam.cy = ((cam.cy * cam.zoom - half_h).round() + half_h) / cam.zoom;
+}
+
 // Build the perspective 3D camera. It floats on the -z side of the canvas,
 // looking toward +z, at a distance chosen so that at the z=0 plane `zoom` screen
 // pixels map to one canvas unit (keeping the 2D zoom controls meaningful).

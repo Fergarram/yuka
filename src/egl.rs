@@ -39,8 +39,18 @@ const GL_TEXTURE_MIN_FILTER: u32 = 0x2801;
 const GL_TEXTURE_MAG_FILTER: u32 = 0x2800;
 const GL_TEXTURE_WRAP_S: u32 = 0x2802;
 const GL_TEXTURE_WRAP_T: u32 = 0x2803;
+const GL_NEAREST: i32 = 0x2600;
 const GL_LINEAR: i32 = 0x2601;
+const GL_LINEAR_MIPMAP_LINEAR: i32 = 0x2703;
 const GL_CLAMP_TO_EDGE: i32 = 0x812F;
+const GL_EXTENSIONS: u32 = 0x1F03;
+const GL_NO_ERROR: u32 = 0;
+// EXT_texture_filter_anisotropic.
+const GL_TEXTURE_MAX_ANISOTROPY: u32 = 0x84FE;
+const GL_MAX_TEXTURE_MAX_ANISOTROPY: u32 = 0x84FF;
+// More than this buys nothing visible and costs bandwidth on a window that is only
+// ever mildly oblique (ours tilt only in perspective, never edge-on).
+const ANISOTROPY_CAP: f32 = 8.0;
 
 //
 // Types
@@ -91,7 +101,106 @@ extern "C" {
     fn glGenTextures(n: i32, textures: *mut u32);
     fn glBindTexture(target: u32, texture: u32);
     fn glTexParameteri(target: u32, pname: u32, param: i32);
+    fn glTexParameterf(target: u32, pname: u32, param: f32);
     fn glDeleteTextures(n: i32, textures: *const u32);
+    fn glGenerateMipmap(target: u32);
+    fn glGetError() -> u32;
+    fn glGetString(name: u32) -> *const c_char;
+    fn glGetFloatv(name: u32, data: *mut f32);
+}
+
+//
+// Texture sampling
+//
+// One policy for both upload paths, stated here rather than inherited: bilinear
+// magnification, and trilinear plus anisotropic minification once a window has a mip
+// chain. raylib's own default for the shm path was nearest on both, which is why a
+// terminal used to go blocky under the same zoom that made a browser go smooth.
+//
+// Minification is where the quality actually goes. A window drawn at half scale reads
+// one texel in four with no mip chain, so text crawls and shimmers as you pan. The
+// chain is built lazily, only for windows that are really being minified, because
+// generating one costs real GPU time per commit and a window at 1:1 or larger has no
+// use for it.
+
+// How much anisotropy the driver will give us, queried once. 1.0 means the extension
+// is missing, which is also the value that disables it per texture.
+pub fn max_anisotropy() -> f32 {
+    let exts = unsafe { glGetString(GL_EXTENSIONS) };
+    if exts.is_null() {
+        return 1.0;
+    }
+    let exts = unsafe { std::ffi::CStr::from_ptr(exts) }.to_string_lossy();
+    if !exts.contains("GL_EXT_texture_filter_anisotropic") {
+        return 1.0;
+    }
+    let mut max: f32 = 1.0;
+    unsafe { glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY, &mut max) };
+    max.clamp(1.0, ANISOTROPY_CAP)
+}
+
+// Bilinear both ways, no mip chain. What every window starts on.
+pub fn set_filter_linear(tex: u32) {
+    unsafe {
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+}
+
+// Exact texels, no blending. Only correct when a window is drawn at 1:1 with its
+// pixels on pixel boundaries, and then it is strictly better than bilinear: the sample
+// point sits a hair off a texel centre in practice, and bilinear turns that into a
+// two-texel blend, which is the faint blur on text at native scale.
+pub fn set_filter_nearest(tex: u32) {
+    unsafe {
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+}
+
+// Trilinear + anisotropic on a texture that already has a chain, for going back to it
+// after a spell at 1:1.
+pub fn set_filter_trilinear(tex: u32, anisotropy: f32) {
+    unsafe {
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        if anisotropy > 1.0 {
+            glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY, anisotropy);
+        }
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+}
+
+// Build a mip chain and switch this texture to trilinear + anisotropic. False means
+// the driver refused, which is a real possibility for a dmabuf texture: level 0 of
+// those is an EGLImage the client owns, and defining the smaller levels around it is
+// not something every driver allows. The caller then leaves it on bilinear rather
+// than asking again every frame.
+pub fn build_mips(tex: u32, anisotropy: f32) -> bool {
+    unsafe {
+        glBindTexture(GL_TEXTURE_2D, tex);
+        // Clear anything an earlier call left pending, so the check below is ours.
+        while glGetError() != GL_NO_ERROR {}
+        glGenerateMipmap(GL_TEXTURE_2D);
+        if glGetError() != GL_NO_ERROR {
+            glBindTexture(GL_TEXTURE_2D, 0);
+            return false;
+        }
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        if anisotropy > 1.0 {
+            glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY, anisotropy);
+        }
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+    true
 }
 
 //

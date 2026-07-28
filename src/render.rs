@@ -11,12 +11,22 @@
 //
 
 use crate::camera;
-use crate::egl::{Egl, EglImage};
+use crate::egl::{self, Egl, EglImage};
 use crate::ray::{self, Shader, Vector3};
 use crate::wl::state::{self, State};
 use smithay::reexports::wayland_server::backend::ObjectId;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
+
+//
+// Settings
+//
+
+// Whether a minified window gets a mip chain and trilinear + anisotropic sampling.
+// Off for now: plain bilinear when zoomed out, nearest at 1:1 and above. Only shm
+// textures can have a chain at all, so this is uneven across windows until dmabuf
+// minification is solved another way (see prepare_textures).
+const MIPS_WHEN_MINIFIED: bool = false;
 
 //
 // Constants
@@ -58,6 +68,14 @@ pub struct Windows {
     pub geo_h: Vec<f32>,
     // 1.0 for shm (BGRA in memory), 0.0 for dmabuf (correct RGBA via EGL).
     pub swizzle: Vec<f32>,
+    // What the sampler is set to right now, so the choice is only pushed to GL when it
+    // actually changes rather than every frame.
+    pub filter: Vec<u8>,
+    // Sampling state of the texture: MIP_NONE until a window is minified enough to
+    // want a mip chain, MIP_READY once it has one, MIP_REFUSED for a texture the
+    // driver will not build one for (see egl::build_mips). Reset to MIP_NONE on every
+    // commit, because new content makes any existing chain stale.
+    pub mip: Vec<u8>,
     // true when we own tex_id (shm, freed via unload). false for dmabuf
     // textures, which the cache owns.
     pub owns: Vec<bool>,
@@ -116,6 +134,8 @@ pub fn windows_new() -> Windows {
         geo_w: Vec::new(),
         geo_h: Vec::new(),
         swizzle: Vec::new(),
+        filter: Vec::new(),
+        mip: Vec::new(),
         owns: Vec::new(),
         popup: Vec::new(),
         sub: Vec::new(),
@@ -126,6 +146,16 @@ pub fn windows_new() -> Windows {
         scratch: Vec::new(),
     }
 }
+
+// Values for the mip column.
+pub const MIP_NONE: u8 = 0;
+pub const MIP_READY: u8 = 1;
+pub const MIP_REFUSED: u8 = 2;
+
+// Values for the filter column. Bilinear is where every texture starts.
+pub const FILTER_LINEAR: u8 = 0;
+pub const FILTER_NEAREST: u8 = 1;
+pub const FILTER_TRILINEAR: u8 = 2;
 
 pub fn dmabuf_cache_new() -> DmabufCache {
     DmabufCache {
@@ -194,6 +224,8 @@ pub fn prune_dead(windows: &mut Windows) {
         windows.geo_w.remove(i);
         windows.geo_h.remove(i);
         windows.swizzle.remove(i);
+        windows.filter.remove(i);
+        windows.mip.remove(i);
         windows.owns.remove(i);
         windows.popup.remove(i);
         windows.sub.remove(i);
@@ -288,6 +320,185 @@ pub fn set_window_pos(windows: &mut Windows, surface: &WlSurface, x: f32, y: f32
     if let Some(i) = index_of(windows, surface) {
         windows.canvas_x[i] = x;
         windows.canvas_y[i] = y;
+    }
+}
+
+// Land every window on whole pixels, every frame, the way the camera does. Same rule as
+// camera::snap_pan from the other side of the same product: with the view already on a
+// whole pixel, a canvas position whose product with the zoom is an integer puts the
+// window's edges on pixel boundaries, so its texture is sampled 1:1 rather than blurred
+// across two columns. At zoom 1 that is simply rounding to whole canvas units.
+//
+// Unconditional, rather than at the end of a drag: nothing then has to remember to round
+// after moving a window, and a position that was never fractional cannot be caught
+// fractional. Rounding to the pixel grid rather than to canvas units is what keeps a
+// drag smooth when zoomed in, where one canvas unit is several pixels wide.
+//
+// Run this after everything that moves a window (drag, settle, child placement) and
+// before the pixels are read for sampling decisions or drawn.
+pub fn align_positions(windows: &mut Windows, zoom: f32) {
+    if zoom <= 0.0 {
+        return;
+    }
+    for i in 0..windows.canvas_x.len() {
+        windows.canvas_x[i] = (windows.canvas_x[i] * zoom).round() / zoom;
+        windows.canvas_y[i] = (windows.canvas_y[i] * zoom).round() / zoom;
+    }
+}
+
+// Decide how each window is sampled. Runs every frame, after everything that could move
+// a window and before anything is drawn.
+//
+// The policy:
+//
+//   nearest    At 1:1 and above, on a window that is not lifted. Exact texels, no
+//              blending, which is the sharpest a client's own rendering can look and the
+//              right answer for magnifying: showing bigger pixels beats showing a blur
+//              of pixels that were never rendered. Safe to do unconditionally now that
+//              the view and every window position are rounded to the pixel grid every
+//              frame (camera::snap_pan, align_positions).
+//   bilinear   Zoomed out, and on a lifted window, where the scale is neither 1:1 nor
+//              constant across the quad.
+//
+// A lift is excluded because it magnifies through perspective while the window is in
+// motion, and a smooth blur reads better there than crawling texel blocks.
+//
+// MIPS_WHEN_MINIFIED turns on the better answer for zooming out: a mip chain per shm
+// texture, sampled trilinear with anisotropy. It measurably reduces the shimmer on
+// minified text, but it only ever applies to half the windows, so it is off while the
+// zoomed-out look is still being judged. Only textures we own can have one. A dmabuf
+// texture's level 0 is an EGLImage the client owns, and building the smaller levels
+// around it is not something a driver has to support: Mesa reports no error and creates
+// nothing, so glGetError cannot tell us it failed. Switching that texture to a mipmap
+// min filter then leaves it incomplete, an incomplete texture samples as transparent
+// black, and our shader discards on zero alpha, so the window silently vanishes the
+// moment you zoom out. That is exactly what Chromium did.
+pub fn prepare_textures(windows: &mut Windows, zoom: f32, anisotropy: f32) {
+    // Below this a window is being shrunk; at or above it, it is being magnified.
+    const NATIVE_ZOOM: f32 = 0.999;
+    // A lift this small is a window that has finished settling.
+    const FLAT_Z: f32 = 0.5;
+
+    let magnified = zoom >= NATIVE_ZOOM;
+
+    for i in 0..windows.surface.len() {
+        if !drawable(windows, i) {
+            continue;
+        }
+        let flat = windows.z[i].abs() < FLAT_Z;
+
+        // A chain, if this window is being shrunk and does not have one yet.
+        if MIPS_WHEN_MINIFIED && !magnified && windows.mip[i] == MIP_NONE {
+            windows.mip[i] = if !windows.owns[i] {
+                MIP_REFUSED
+            } else if egl::build_mips(windows.tex_id[i], anisotropy) {
+                // build_mips leaves the texture on trilinear.
+                windows.filter[i] = FILTER_TRILINEAR;
+                MIP_READY
+            } else {
+                MIP_REFUSED
+            };
+        }
+
+        let want = if magnified && flat {
+            FILTER_NEAREST
+        } else if MIPS_WHEN_MINIFIED && !magnified && windows.mip[i] == MIP_READY {
+            FILTER_TRILINEAR
+        } else {
+            FILTER_LINEAR
+        };
+        if want == windows.filter[i] {
+            continue;
+        }
+        match want {
+            FILTER_NEAREST => egl::set_filter_nearest(windows.tex_id[i]),
+            FILTER_TRILINEAR => egl::set_filter_trilinear(windows.tex_id[i], anisotropy),
+            _ => egl::set_filter_linear(windows.tex_id[i]),
+        }
+        windows.filter[i] = want;
+    }
+}
+
+// A label under every window, in the canvas rather than in a corner of the screen:
+// what it is made of, how it is being sampled and at what scale. Reading it off the
+// same columns the draw pass reads means it cannot drift from what is actually
+// happening, which is the whole point of having it.
+//
+// Drawn in 2D at the projected canvas point, so it pans and scales with the view and
+// rides along when a window is lifted. The size follows the zoom with a floor, since a
+// label that scales all the way down is unreadable exactly when you are zoomed out
+// looking for why something shimmers.
+pub fn draw_debug_labels(windows: &Windows, cam3d: ray::Camera3D, zoom: f32, anisotropy: f32) {
+    const BASE_SIZE: f32 = 13.0;
+    const MIN_SIZE: i32 = 10;
+    const PAD: i32 = 3;
+    let fg = ray::Color { r: 240, g: 230, b: 120, a: 255 };
+    let bg = ray::Color { r: 0, g: 0, b: 0, a: 170 };
+
+    let size = ((BASE_SIZE * zoom) as i32).max(MIN_SIZE);
+    for i in 0..windows.surface.len() {
+        if !drawable(windows, i) {
+            continue;
+        }
+        let (x, y, w, h) = visible(windows, i);
+        // Bottom-left of the window, at its own lifted z so the label travels with it.
+        let anchor = ray::world_to_screen(
+            Vector3 { x, y: y + h, z: windows.z[i] },
+            cam3d,
+        );
+
+        let kind = if windows.popup[i] {
+            "popup"
+        } else if windows.sub[i] {
+            "sub"
+        } else {
+            "window"
+        };
+        let source = if windows.owns[i] { "shm" } else { "dmabuf" };
+        // What the sampler is actually set to, read from the column prepare_textures
+        // wrote, with the reason when it is not the best available.
+        let sampling = match windows.filter[i] {
+            FILTER_NEAREST => "nearest".to_string(),
+            FILTER_TRILINEAR => format!("trilinear+{anisotropy:.0}x aniso"),
+            _ if windows.mip[i] == MIP_REFUSED && !windows.owns[i] => {
+                "bilinear (no mips on dmabuf)".to_string()
+            }
+            _ if windows.mip[i] == MIP_REFUSED => "bilinear (driver refused mips)".to_string(),
+            _ => "bilinear".to_string(),
+        };
+        // Screen pixels per texel: the zoom, times what perspective adds for a lifted
+        // window. Measured off the quad itself rather than assumed, so a lifted window
+        // reports the scale it is really being drawn at.
+        let right = ray::world_to_screen(
+            Vector3 { x: x + w, y: y + h, z: windows.z[i] },
+            cam3d,
+        );
+        let scale = if w > 0.0 { (right.x - anchor.x) / w } else { zoom };
+
+        let lines = [
+            format!("{kind} {source} tex{} {}x{}", windows.tex_id[i], windows.tex_w[i], windows.tex_h[i]),
+            format!("{sampling}  scale {scale:.2}x"),
+            format!(
+                "canvas {:.1},{:.1}  geo {:.0},{:.0} {:.0}x{:.0}  z {:.1}",
+                windows.canvas_x[i], windows.canvas_y[i],
+                windows.geo_x[i], windows.geo_y[i], windows.geo_w[i], windows.geo_h[i],
+                windows.z[i],
+            ),
+        ];
+
+        let widest = lines.iter().map(|l| ray::measure_text(l, size)).max().unwrap_or(0);
+        let line_h = size + PAD;
+        let top = anchor.y as i32 + PAD;
+        ray::draw_rectangle(
+            anchor.x as i32 - PAD,
+            top - PAD,
+            widest + PAD * 2,
+            line_h * lines.len() as i32 + PAD,
+            bg,
+        );
+        for (n, line) in lines.iter().enumerate() {
+            ray::draw_text(line, anchor.x as i32, top + line_h * n as i32, size, fg);
+        }
     }
 }
 
@@ -459,6 +670,9 @@ fn store_entry(
             windows.tex_h[i] = h;
             windows.swizzle[i] = swizzle;
             windows.owns[i] = owns;
+            // New texture, so no chain and nothing learned about this one yet.
+            windows.mip[i] = MIP_NONE;
+            windows.filter[i] = FILTER_LINEAR;
         }
         None => {
             // Centre new windows on the view, stepped so successive ones do not
@@ -471,9 +685,12 @@ fn store_entry(
             } else {
                 let step = (windows.cascade % CASCADE_WRAP) as f32 * CASCADE_STEP;
                 windows.cascade += 1;
+                // Rounded, because centring a window with an odd dimension lands it on
+                // a half unit, and a window off the pixel grid can never be drawn at
+                // 1:1 with exact texels (see prepare_textures).
                 (
-                    windows.place_at.0 - w as f32 * 0.5 + step,
-                    windows.place_at.1 - h as f32 * 0.5 + step,
+                    (windows.place_at.0 - w as f32 * 0.5 + step).round(),
+                    (windows.place_at.1 - h as f32 * 0.5 + step).round(),
                 )
                 // Geometry is not known until the client's first commit lands, so
                 // this centres on the buffer and set_geometry refines it after.
@@ -494,6 +711,8 @@ fn store_entry(
             windows.geo_w.push(w as f32);
             windows.geo_h.push(h as f32);
             windows.swizzle.push(swizzle);
+            windows.filter.push(FILTER_LINEAR);
+            windows.mip.push(MIP_NONE);
             windows.owns.push(owns);
             windows.popup.push(popup);
             windows.sub.push(sub);
@@ -648,11 +867,19 @@ fn upload_shm(
         if windows.owns[i] && windows.tex_w[i] == w && windows.tex_h[i] == h {
             ray::update_texture_rgba(windows.tex_id[i], data, w, h);
             windows.swizzle[i] = 1.0;
+            // Same texture, new pixels: whatever chain it had describes the old ones.
+            // Keep a refusal, since that is a property of the texture, not the content.
+            if windows.mip[i] != MIP_REFUSED {
+                windows.mip[i] = MIP_NONE;
+            }
             return;
         }
     }
 
     let id = ray::load_texture_rgba(data, w, h);
+    // raylib's own default here is nearest on both filters. Say what we want instead,
+    // so an shm window and a dmabuf window are sampled the same way.
+    egl::set_filter_linear(id);
     store_entry(windows, surface, id, w, h, 1.0, true, popup, sub);
 }
 
@@ -677,6 +904,8 @@ pub fn destroy_owned(windows: &mut Windows) {
     windows.geo_w.clear();
     windows.geo_h.clear();
     windows.swizzle.clear();
+    windows.filter.clear();
+    windows.mip.clear();
     windows.owns.clear();
     windows.popup.clear();
     windows.sub.clear();
