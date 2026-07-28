@@ -441,7 +441,7 @@ fn main() {
     let windowed = cfg!(feature = "windowed");
     if windowed {
         ray::disable_libdecor();
-        ray::set_config_flags(ray::FLAG_WINDOW_UNDECORATED);
+        ray::set_config_flags(ray::FLAG_WINDOW_UNDECORATED | ray::FLAG_VSYNC_HINT);
         ray::init_window(WINDOWED_W, WINDOWED_H, "om_wm (nested)");
     } else {
         ray::init_window(0, 0, "om_wm");
@@ -541,7 +541,11 @@ fn main() {
     // and that costs us VT switching: ctrl+alt+backspace is then the way out.
     // libinput would read the real devices even nested, so the host and om_wm would
     // both react to every key. Host input comes through raylib instead.
-    let mut inp = if windowed { None } else { input::init(seat.is_none()) };
+    let mut inp = if windowed {
+        Some(input::init_host())
+    } else {
+        input::init(seat.is_none())
+    };
 
     // Nothing to drive us: no device opened, or no libinput at all. Carrying on from
     // here is how you end up rebooting the machine, because with session control
@@ -787,6 +791,14 @@ fn main() {
         if let Some(cur) = cursor.as_mut() {
             cursor::move_by(cur, ptr.dx as i32, ptr.dy as i32);
         }
+        // Where the pointer is, in screen pixels. On DRM it is ours to track, since
+        // we move the hardware cursor ourselves. Nested, the host tracks it and
+        // reports it through the window, and our deltas are only there for panning.
+        let pointer_xy = if windowed {
+            Some(ray::mouse_position())
+        } else {
+            cursor.as_ref().map(cursor::pos)
+        };
         // Wheel-click drag also pans; moving the cursor by the same delta keeps
         // the grabbed canvas point exactly under the cursor.
         if ptr.middle && !pointer_on_client {
@@ -819,7 +831,7 @@ fn main() {
         // Super+0 scales around the screen center; the middle click has a cursor
         // to anchor on, so it keeps the canvas under the pointer fixed.
         if reset_click {
-            let (cxp, cyp) = cursor.as_ref().map(cursor::pos).unwrap_or((0, 0));
+            let (cxp, cyp) = pointer_xy.unwrap_or((0, 0));
             camera::reset_zoom_at(
                 &mut cam,
                 cxp as f32,
@@ -837,7 +849,7 @@ fn main() {
         // one value for both branches is what stops them both firing on the frame
         // the pointer crosses a window edge.
         if !pointer_on_client {
-            let (cxp, cyp) = cursor.as_ref().map(cursor::pos).unwrap_or((0, 0));
+            let (cxp, cyp) = pointer_xy.unwrap_or((0, 0));
             if ptr.wheel != 0.0 {
                 let wheel = if INVERT_SCROLL { -ptr.wheel } else { ptr.wheel };
                 camera::zoom_at(
@@ -881,7 +893,7 @@ fn main() {
         // Menus and subsurfaces are anchored to their parent, so they are placed
         // before anything is hit tested or drawn.
         render::sync_children(&mut windows);
-        let cursor_pos = cursor.as_ref().map(cursor::pos);
+        let cursor_pos = pointer_xy;
 
         // Super+drag: grab the window under the cursor and lift it toward the
         // camera. Consumes the click so it is not also focused/forwarded. The

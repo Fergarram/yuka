@@ -82,7 +82,16 @@ extern "C" {
     fn SetConfigFlags(flags: c_uint);
     // GLFW is linked inside raylib, and init hints set before raylib calls glfwInit
     // are honoured.
-    fn glfwInitHint(hint: c_int, value: c_int);
+    // Host input, for the nested build: the compositor we run inside owns the
+    // devices and hands these to us through GLFW.
+    fn GetMousePosition() -> Vector2;
+    fn GetMouseDelta() -> Vector2;
+    fn GetMouseWheelMoveV() -> Vector2;
+    fn IsMouseButtonPressed(button: c_int) -> bool;
+    fn IsMouseButtonReleased(button: c_int) -> bool;
+    fn IsMouseButtonDown(button: c_int) -> bool;
+    fn IsKeyPressed(key: c_int) -> bool;
+    fn IsKeyReleased(key: c_int) -> bool;
     fn CloseWindow();
     fn WindowShouldClose() -> bool;
     fn BeginDrawing();
@@ -153,17 +162,43 @@ extern "C" {
 
 // FLAG_WINDOW_UNDECORATED: a nested canvas wants no host titlebar around it.
 pub const FLAG_WINDOW_UNDECORATED: u32 = 0x0000_0008;
+// FLAG_VSYNC_HINT: nested, nothing paces us, so ask GLFW for a swap interval of 1
+// and let the host's frame callbacks set our frame rate.
+pub const FLAG_VSYNC_HINT: u32 = 0x0000_0040;
 
 // GLFW loads libdecor at init to draw client-side decorations, and the only libdecor
 // plugin installed here is the GTK one, which initialises GDK. Against a host with no
 // keyboard capability (headless weston) GDK asserts and the process dies before a
 // window ever exists. We draw our own everything anyway, so tell GLFW to skip it.
+//
+// GLFW, in the nested build only
+//
+// raylib links GLFW for its desktop platform and not for DRM, so these two are
+// cfg'd rather than merely unused: calling them in a DRM build would be a missing
+// symbol at link time.
+
+#[cfg(feature = "windowed")]
+extern "C" {
+    fn glfwInitHint(hint: c_int, value: c_int);
+    // GLFW's own scancode for a key. Its Wayland backend, the only one the nested
+    // build compiles, builds that table straight out of linux/input-event-codes.h,
+    // so the scancode IS the evdev code. This is what lets host keys reach clients
+    // without a hand-written key table of our own.
+    fn glfwGetKeyScancode(key: c_int) -> c_int;
+}
+
+#[cfg(feature = "windowed")]
 const GLFW_WAYLAND_LIBDECOR: c_int = 0x0005_3001;
+#[cfg(feature = "windowed")]
 const GLFW_WAYLAND_DISABLE_LIBDECOR: c_int = 0x0003_8002;
 
+#[cfg(feature = "windowed")]
 pub fn disable_libdecor() {
     unsafe { glfwInitHint(GLFW_WAYLAND_LIBDECOR, GLFW_WAYLAND_DISABLE_LIBDECOR) };
 }
+
+#[cfg(not(feature = "windowed"))]
+pub fn disable_libdecor() {}
 
 pub fn set_config_flags(flags: u32) {
     unsafe { SetConfigFlags(flags) };
@@ -306,6 +341,66 @@ pub fn draw_textured_quad(
         rlEnd();
         rlSetTexture(0);
     }
+}
+
+//
+// Host input (nested build)
+//
+
+pub fn mouse_position() -> (i32, i32) {
+    let p = unsafe { GetMousePosition() };
+    (p.x as i32, p.y as i32)
+}
+
+pub fn mouse_delta() -> (f32, f32) {
+    let d = unsafe { GetMouseDelta() };
+    (d.x, d.y)
+}
+
+// Wheel movement this frame: (horizontal, vertical), positive up and right, which
+// is the convention the rest of om_wm uses.
+pub fn mouse_wheel() -> (f32, f32) {
+    let w = unsafe { GetMouseWheelMoveV() };
+    (w.x, w.y)
+}
+
+pub fn mouse_pressed(button: i32) -> bool {
+    unsafe { IsMouseButtonPressed(button) }
+}
+
+pub fn mouse_released(button: i32) -> bool {
+    unsafe { IsMouseButtonReleased(button) }
+}
+
+pub fn mouse_down(button: i32) -> bool {
+    unsafe { IsMouseButtonDown(button) }
+}
+
+pub fn key_pressed(key: i32) -> bool {
+    unsafe { IsKeyPressed(key) }
+}
+
+pub fn key_released(key: i32) -> bool {
+    unsafe { IsKeyReleased(key) }
+}
+
+// The evdev keycode behind a GLFW key, or None for the keys this platform has no
+// code for (the table is filled with -1 and only the known keys are written). GLFW's
+// Wayland backend keys its table by evdev code, so no arithmetic is needed here;
+// its X11 backend would report evdev+8, and we do not build that one.
+#[cfg(feature = "windowed")]
+pub fn key_to_evdev(key: i32) -> Option<u16> {
+    let scancode = unsafe { glfwGetKeyScancode(key) };
+    if scancode > 0 {
+        Some(scancode as u16)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(feature = "windowed"))]
+pub fn key_to_evdev(_key: i32) -> Option<u16> {
+    None
 }
 
 //

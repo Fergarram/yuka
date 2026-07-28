@@ -4,5 +4,7 @@ TODO:
 
 EVENTUALLY:
 
-[ ] Have a window mode for quicker development (not all devs will start in tty)
+[x] Have a window mode for quicker development (not all devs will start in tty)
+    cargo build --features windowed, run inside another compositor. Host input
+    comes through raylib; the custom trackpad path is DRM only.
 [ ] Have a way to run this as mac app, would basically abstract setup into a canvas engine.

@@ -20,6 +20,10 @@
 // All libinput FFI lives behind the `input` crate. The only raw work here is the
 // device open path, which the crate hands us as a trait to implement.
 //
+// The nested build has no libinput at all: the compositor we run inside owns the
+// devices, and raylib hands us what it forwards to our window. init_host fills the
+// same Pointer and key data, so nothing downstream branches on which source it is.
+//
 
 use std::ffi::CString;
 use std::fs;
@@ -37,6 +41,8 @@ use input::event::pointer::{
 };
 use input::event::{EventTrait, GestureEvent};
 use input::{Device, DeviceCapability, Event, Libinput, LibinputInterface, SendEventsMode};
+
+use crate::ray;
 
 //
 // Settings
@@ -162,7 +168,14 @@ impl Default for Pointer {
 }
 
 pub struct Input {
-    li: Libinput,
+    // None in the nested build: there is no libinput, the host compositor hands us
+    // input through raylib instead. Everything downstream reads the same fields
+    // either way, so the main loop never learns which source it is talking to.
+    li: Option<Libinput>,
+    // GLFW key codes paired with their evdev codes, built once at init from GLFW's
+    // own scancode table. Nested key handling walks this, so the chords keep
+    // comparing evdev codes and clients keep receiving them.
+    host_keys: Vec<(i32, u16)>,
     mode: TrackpadMode,
     keys: Vec<bool>,
     // Press/release edges this frame: (evdev keycode, pressed).
@@ -255,7 +268,8 @@ pub fn init(grab: bool) -> Option<Input> {
         return None;
     }
     let mut inp = Input {
-        li,
+        li: Some(li),
+        host_keys: Vec::new(),
         mode: TRACKPAD_MODE,
         keys: vec![false; KEY_ARRAY],
         events: Vec::new(),
@@ -289,6 +303,41 @@ pub fn init(grab: bool) -> Option<Input> {
         if grab { ", devices grabbed" } else { "" }
     );
     Some(inp)
+}
+
+// The nested build's input: no devices of our own, just what the host reports
+// through raylib. GLFW's scancodes give us the evdev code for every key it knows, so
+// nothing downstream needs a translation table.
+pub fn init_host() -> Input {
+    let mut host_keys: Vec<(i32, u16)> = Vec::new();
+    // GLFW key codes run from space (32) to the last modifier (348).
+    for key in 32..=348 {
+        if let Some(evdev) = ray::key_to_evdev(key) {
+            if (evdev as usize) < KEY_ARRAY {
+                host_keys.push((key, evdev));
+            }
+        }
+    }
+    println!("om_wm: host input via the compositor we are nested in, {} keys mapped", host_keys.len());
+    Input {
+        li: None,
+        host_keys,
+        mode: TrackpadMode::Libinput,
+        keys: vec![false; KEY_ARRAY],
+        events: Vec::new(),
+        pointer: Pointer::default(),
+        left: false,
+        right: false,
+        middle: false,
+        pinch_scale: 1.0,
+        frac_x: 0.0,
+        frac_y: 0.0,
+        // One of each, as far as anything else is concerned: the host has them.
+        keyboards: 1,
+        pointers: 1,
+        trackpad: None,
+        trackpad_changed: false,
+    }
 }
 
 // Whether the machine has a keyboard at all, read from /proc so it can be
@@ -340,11 +389,17 @@ fn bit_set(words: &[u64], bit: u16) -> bool {
 
 pub fn poll(inp: &mut Input) {
     inp.events.clear();
-    let mut p = Pointer::default();
-    if let Err(e) = inp.li.dispatch() {
-        eprintln!("om_wm: input: libinput dispatch failed: {e}");
+    if inp.li.is_none() {
+        poll_host(inp);
+        return;
     }
-    while let Some(event) = inp.li.next() {
+    let mut p = Pointer::default();
+    if let Some(li) = inp.li.as_mut() {
+        if let Err(e) = li.dispatch() {
+            eprintln!("om_wm: input: libinput dispatch failed: {e}");
+        }
+    }
+    while let Some(event) = inp.li.as_mut().and_then(|li| li.next()) {
         match event {
             Event::Device(DeviceEvent::Added(e)) => added(inp, &e.device()),
             Event::Device(DeviceEvent::Removed(e)) => removed(inp, &e.device()),
@@ -469,6 +524,45 @@ fn gesture_event(inp: &mut Input, p: &mut Pointer, event: GestureEvent) {
     }
 }
 
+// Host input, read straight off raylib. Buttons are 0/1/2 for left/right/middle,
+// wheel movement is already in notches, and motion deltas are whole pixels the host
+// has accelerated for us, so none of libinput's bookkeeping applies here.
+fn poll_host(inp: &mut Input) {
+    let mut p = Pointer::default();
+    let (dx, dy) = ray::mouse_delta();
+    p.dx = dx.trunc();
+    p.dy = dy.trunc();
+    let (wx, wy) = ray::mouse_wheel();
+    p.hwheel = wx;
+    p.wheel = wy;
+
+    p.left_pressed = ray::mouse_pressed(0);
+    p.left_released = ray::mouse_released(0);
+    p.left = ray::mouse_down(0);
+    p.right_pressed = ray::mouse_pressed(1);
+    p.right_released = ray::mouse_released(1);
+    p.right = ray::mouse_down(1);
+    p.middle_pressed = ray::mouse_pressed(2);
+    p.middle_released = ray::mouse_released(2);
+    p.middle = ray::mouse_down(2);
+    inp.left = p.left;
+    inp.right = p.right;
+    inp.middle = p.middle;
+    inp.pointer = p;
+
+    for i in 0..inp.host_keys.len() {
+        let (key, evdev) = inp.host_keys[i];
+        if ray::key_pressed(key) {
+            inp.keys[evdev as usize] = true;
+            inp.events.push((evdev, true));
+        }
+        if ray::key_released(key) {
+            inp.keys[evdev as usize] = false;
+            inp.events.push((evdev, false));
+        }
+    }
+}
+
 //
 // Devices
 //
@@ -583,12 +677,16 @@ pub fn trackpad_changed(inp: &mut Input) -> bool {
 // Hand the devices back while another VT owns the display, and take them again
 // when it returns. libinput closes and reopens the nodes for us.
 pub fn suspend(inp: &mut Input) {
-    inp.li.suspend();
+    if let Some(li) = inp.li.as_mut() {
+        li.suspend();
+    }
 }
 
 pub fn resume(inp: &mut Input) {
-    if inp.li.resume().is_err() {
-        eprintln!("om_wm: input: libinput resume failed");
+    if let Some(li) = inp.li.as_mut() {
+        if li.resume().is_err() {
+            eprintln!("om_wm: input: libinput resume failed");
+        }
     }
     reset(inp);
 }
