@@ -439,6 +439,54 @@ fn main() {
     // there is no session to control, no DRM master to hold, no evdev to read, and
     // nothing that can lock the machine. Same source, one flag apart.
     let windowed = cfg!(feature = "windowed");
+
+    // Session control. With it, logind owns our VT (K_OFF, KD_GRAPHICS) so the
+    // switch chords are ours to implement and input needs no grab.
+    //
+    // Taking control makes us the only thing that can switch VTs, so we refuse it
+    // when the machine has no keyboard to switch with: silencing the console then
+    // would leave no way off this VT at all. OM_WM_NO_SEAT opts out by hand, which
+    // is also what non-interactive runs want.
+    let no_seat = std::env::var("OM_WM_NO_SEAT").is_ok();
+    let mut seat = if windowed {
+        println!("om_wm: nested in another compositor: no session control, no vt switching");
+        None
+    } else if input::any_keyboard_present() && !no_seat {
+        seat::init()
+    } else {
+        if !input::any_keyboard_present() {
+            eprintln!(
+                "om_wm: no keyboard on this machine, so not taking session control: \
+                 the console keeps its own ctrl+alt+Fn"
+            );
+        }
+        None
+    };
+
+    // The card, before the window: logind hands out KMS devices, and raylib takes the
+    // fd from us rather than opening one itself. Without the raylib patch there is
+    // nothing to hand it to, so raylib opens the card and we adopt its fd afterwards.
+    // OM_WM_CARD picks the opener by hand: logind (the default) or raylib, which is
+    // also what a raylib without the patch gets. It keeps that older path tested, and
+    // is the first thing to try if the handoff ever misbehaves.
+    let mut handed_card = false;
+    let handoff = match std::env::var("OM_WM_CARD").unwrap_or_default().as_str() {
+        "" | "logind" => ray::can_set_drm_fd(),
+        "raylib" => false,
+        other => {
+            eprintln!("om_wm: OM_WM_CARD={other} is neither logind nor raylib, using logind");
+            ray::can_set_drm_fd()
+        }
+    };
+    if let Some(s) = seat.as_mut() {
+        if handoff {
+            if let Some(fd) = seat::open_card(s) {
+                ray::set_drm_fd(fd);
+                handed_card = true;
+            }
+        }
+    }
+
     if windowed {
         ray::disable_libdecor();
         ray::set_config_flags(ray::FLAG_WINDOW_UNDECORATED | ray::FLAG_VSYNC_HINT);
@@ -449,16 +497,32 @@ fn main() {
     // No SetTargetFPS: the DRM page flip in EndDrawing already vsyncs to the
     // display. A second 60 Hz cap would beat against it and cause stutter.
 
+    // The fallback path: the card is raylib's, so find its fd for the master handover
+    // on a VT switch.
+    if let Some(s) = seat.as_mut() {
+        if !handed_card {
+            seat::adopt_card(s);
+        }
+    }
+
     // Bail out before touching input if we have no display. Running on regardless is
     // the worst outcome available: no picture, while we hold the keyboard and, without
     // session control, leave no obvious way to switch away.
-    if ray::screen_width() <= 0 || ray::screen_height() <= 0 || !seat::drm_is_ours() {
+    // A card from logind needs no contention check: it is handed to one session at a
+    // time, so a second om_wm is refused at open and ends up on the path below.
+    let logind_card = seat.as_ref().map(seat::card_from_logind).unwrap_or(false);
+    let display_ours = logind_card || seat::drm_is_ours();
+    if ray::screen_width() <= 0 || ray::screen_height() <= 0 || !display_ours {
         eprintln!(
             "om_wm: no usable display ({}x{}), exiting before taking any input.",
             ray::screen_width(),
             ray::screen_height()
         );
         ray::close_window();
+        // Releasing the session puts the VT back to text and a working keyboard.
+        if let Some(s) = seat.as_mut() {
+            seat::shutdown(s);
+        }
         return;
     }
 
@@ -513,28 +577,6 @@ fn main() {
         cursor::init(ray::screen_width(), ray::screen_height())
     };
 
-    // Session control. With it, logind owns our VT (K_OFF, KD_GRAPHICS) so the
-    // switch chords are ours to implement and input needs no grab.
-    //
-    // Taking control makes us the only thing that can switch VTs, so we refuse it
-    // when the machine has no keyboard to switch with: silencing the console then
-    // would leave no way off this VT at all. OM_WM_NO_SEAT opts out by hand, which
-    // is also what non-interactive runs want.
-    let no_seat = std::env::var("OM_WM_NO_SEAT").is_ok();
-    let mut seat = if windowed {
-        println!("om_wm: nested in another compositor: no session control, no vt switching");
-        None
-    } else if input::any_keyboard_present() && !no_seat {
-        seat::init()
-    } else {
-        if !input::any_keyboard_present() {
-            eprintln!(
-                "om_wm: no keyboard on this machine, so not taking session control: \
-                 the console keeps its own ctrl+alt+Fn"
-            );
-        }
-        None
-    };
 
     // libinput drives keyboards and pointers. Without a session it grabs them as
     // it opens them, since the console would otherwise read everything we type,

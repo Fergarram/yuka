@@ -136,6 +136,20 @@ extern CoreData CORE;                   // Global CORE state context
 
 static PlatformData platform = { 0 };   // Platform specific data
 
+// om_wm patch: a KMS device fd the application opened for us, or -1 to open one
+// ourselves as before. A session controller (logind, through libseat) has to be the
+// one that opens the card: it hands out the fd, revokes it on a VT switch and waits
+// for an acknowledgement before the switch completes. A card we opened behind its
+// back gets none of that. The application owns this fd and closes it, so we leave it
+// alone in ClosePlatform.
+static int externalDeviceFd = -1;
+
+// om_wm patch: set before InitWindow(), which is the only time it is read.
+void SetGraphicDeviceFd(int fd)
+{
+    externalDeviceFd = fd;
+}
+
 //----------------------------------------------------------------------------------
 // Local Variables Definition
 //----------------------------------------------------------------------------------
@@ -723,24 +737,33 @@ int InitPlatform(void)
     CORE.Window.fullscreen = true;
     CORE.Window.flags |= FLAG_FULLSCREEN_MODE;
 
+    // om_wm patch: prefer the fd the application handed us.
+    if (externalDeviceFd != -1)
+    {
+        platform.fd = externalDeviceFd;
+        TRACELOG(LOG_INFO, "DISPLAY: Using graphic device fd %i from the application", platform.fd);
+    }
+    else
+    {
 #if defined(DEFAULT_GRAPHIC_DEVICE_DRM)
-    platform.fd = open(DEFAULT_GRAPHIC_DEVICE_DRM, O_RDWR);
+        platform.fd = open(DEFAULT_GRAPHIC_DEVICE_DRM, O_RDWR);
 #else
-    TRACELOG(LOG_INFO, "DISPLAY: No graphic card set, trying platform-gpu-card");
-    platform.fd = open("/dev/dri/by-path/platform-gpu-card",  O_RDWR); // VideoCore VI (Raspberry Pi 4)
+        TRACELOG(LOG_INFO, "DISPLAY: No graphic card set, trying platform-gpu-card");
+        platform.fd = open("/dev/dri/by-path/platform-gpu-card",  O_RDWR); // VideoCore VI (Raspberry Pi 4)
 
-    if ((platform.fd == -1) || (drmModeGetResources(platform.fd) == NULL))
-    {
-        TRACELOG(LOG_INFO, "DISPLAY: Failed to open platform-gpu-card, trying card1");
-        platform.fd = open("/dev/dri/card1", O_RDWR); // Other Embedded
-    }
+        if ((platform.fd == -1) || (drmModeGetResources(platform.fd) == NULL))
+        {
+            TRACELOG(LOG_INFO, "DISPLAY: Failed to open platform-gpu-card, trying card1");
+            platform.fd = open("/dev/dri/card1", O_RDWR); // Other Embedded
+        }
 
-    if ((platform.fd == -1) || (drmModeGetResources(platform.fd) == NULL))
-    {
-        TRACELOG(LOG_INFO, "DISPLAY: Failed to open graphic card1, trying card0");
-        platform.fd = open("/dev/dri/card0", O_RDWR); // VideoCore IV (Raspberry Pi 1-3)
-    }
+        if ((platform.fd == -1) || (drmModeGetResources(platform.fd) == NULL))
+        {
+            TRACELOG(LOG_INFO, "DISPLAY: Failed to open graphic card1, trying card0");
+            platform.fd = open("/dev/dri/card0", O_RDWR); // VideoCore IV (Raspberry Pi 1-3)
+        }
 #endif
+    }
 
     if (platform.fd == -1)
     {
@@ -1118,7 +1141,8 @@ void ClosePlatform(void)
 
     if (platform.fd != -1)
     {
-        close(platform.fd);
+        // om_wm patch: the application's fd is the application's to close.
+        if (platform.fd != externalDeviceFd) close(platform.fd);
         platform.fd = -1;
     }
 

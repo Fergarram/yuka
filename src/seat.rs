@@ -20,10 +20,13 @@
 // dependency. Without it (or without a session to control) init returns None and
 // main falls back to grabbing input with no VT switching at all.
 //
-// Stage 2, when raylib can be handed an externally opened DRM fd: take the card
-// and the input devices through libseat_open_device, so logind pauses them and
-// waits for our ack before completing a switch. Today it does not wait, so an
-// outside switch can beat us to the display by a few milliseconds.
+// The card comes from libseat_open_device, and raylib is handed the fd (our patch to
+// its DRM platform, see ray::set_drm_fd). That is what makes a switch orderly: logind
+// revokes a device it gave us and waits for our acknowledgement before completing the
+// switch, so nothing else can be drawing while we still think we own the display. A
+// card we opened ourselves behind logind's back gets none of that, which is why
+// open_card is preferred and adopt_card is only the fallback for a raylib without the
+// patch. The input devices are still opened directly and could follow the same route.
 //
 // All the dlopen/FFI and raw pointer work is contained here.
 //
@@ -40,6 +43,10 @@ use crate::input;
 // <drm/drm.h>: DRM_IOCTL_SET_MASTER = _IO('d', 0x1e), DROP_MASTER = _IO('d', 0x1f).
 const DRM_IOCTL_SET_MASTER: libc::c_ulong = 0x0000_641e;
 const DRM_IOCTL_DROP_MASTER: libc::c_ulong = 0x0000_641f;
+// DRM_IOCTL_GET_CAP = _IOWR('d', 0x0c, struct drm_get_cap), asked only to find out
+// whether an fd is a KMS node at all.
+const DRM_IOCTL_GET_CAP: libc::c_ulong = 0xc010_640c;
+const DRM_CAP_DUMB_BUFFER: u64 = 0x1;
 // <linux/vt.h>
 const VT_GETSTATE: libc::c_ulong = 0x5603;
 
@@ -75,6 +82,9 @@ type CloseSeat = unsafe extern "C" fn(*mut LibSeat) -> c_int;
 type SeatName = unsafe extern "C" fn(*mut LibSeat) -> *const c_char;
 type SwitchSession = unsafe extern "C" fn(*mut LibSeat, c_int) -> c_int;
 type Dispatch = unsafe extern "C" fn(*mut LibSeat, c_int) -> c_int;
+type OpenDevice =
+    unsafe extern "C" fn(*mut LibSeat, *const c_char, *mut c_int) -> c_int;
+type CloseDevice = unsafe extern "C" fn(*mut LibSeat, c_int) -> c_int;
 
 struct Api {
     open_seat: OpenSeat,
@@ -83,6 +93,8 @@ struct Api {
     seat_name: SeatName,
     switch_session: SwitchSession,
     dispatch: Dispatch,
+    open_device: OpenDevice,
+    close_device: CloseDevice,
 }
 
 //
@@ -93,7 +105,16 @@ struct Api {
 // this thread, so a raw pointer handed to libseat as userdata is enough; there is
 // no concurrent access to guard.
 struct Shared {
+    // The card, once we have it. Session control is taken before there is any card
+    // at all, so the callbacks have to tolerate -1: they simply have no display to
+    // hand over yet.
     drm_fd: i32,
+    // Whether the DRM master handover is ours to perform. It is only ours for a card
+    // we opened ourselves. For a card logind handed us, logind does it (setmaster on
+    // activate, dropmaster on pause) and the kernel refuses ours anyway: SET_MASTER
+    // from an unprivileged process needs the fd to have been opened by that same
+    // process, and this one was opened by logind.
+    own_master: bool,
     active: bool,
     // Set once the session has been activated for the first time.
     enabled: bool,
@@ -105,11 +126,21 @@ pub struct Seat {
     api: Api,
     handle: *mut LibSeat,
     shared: *mut Shared,
+    // libseat's id for the card, when we opened it through libseat. -1 when we did
+    // not, in which case the fd is raylib's and only borrowed here.
+    card: i32,
     // The VT logind gave our session.
     our_vt: u16,
     // Our VT's device node, only read for the list of VTs in use. -1 if we could
     // not open it.
     tty_fd: i32,
+}
+
+// struct drm_get_cap from <drm/drm.h>.
+#[repr(C)]
+struct DrmGetCap {
+    capability: u64,
+    value: u64,
 }
 
 // struct vt_stat from <linux/vt.h>.
@@ -128,16 +159,20 @@ struct VtStat {
 
 extern "C" fn on_enable(_seat: *mut LibSeat, data: *mut c_void) {
     let s = unsafe { &mut *(data as *mut Shared) };
-    take_master(s.drm_fd);
+    if s.own_master {
+        take_master(s.drm_fd);
+    }
     s.active = true;
     s.enabled = true;
 }
 
 extern "C" fn on_disable(seat: *mut LibSeat, data: *mut c_void) {
     let s = unsafe { &mut *(data as *mut Shared) };
-    // Stop using the display before acknowledging: logind may complete the
-    // switch as soon as we do.
-    drop_master(s.drm_fd);
+    // Stop using the display before acknowledging: logind completes the switch as
+    // soon as we do, and for a card it handed us it takes master away itself.
+    if s.own_master {
+        drop_master(s.drm_fd);
+    }
     s.active = false;
     unsafe { (s.disable_seat)(seat) };
 }
@@ -147,15 +182,11 @@ extern "C" fn on_disable(seat: *mut LibSeat, data: *mut c_void) {
 //
 
 pub fn init() -> Option<Seat> {
-    let drm_fd = find_drm_fd();
-    if drm_fd < 0 {
-        eprintln!("om_wm: seat: no /dev/dri/card* fd open, session control disabled");
-        return None;
-    }
     let api = load_api()?;
 
     let shared = Box::into_raw(Box::new(Shared {
-        drm_fd,
+        drm_fd: -1,
+        own_master: false,
         active: false,
         enabled: false,
         disable_seat: api.disable_seat,
@@ -200,7 +231,7 @@ pub fn init() -> Option<Seat> {
          switch with ctrl+alt+F1..F12 or alt+left/right, ctrl+alt+F{our_vt} comes back"
     );
 
-    Some(Seat { api, handle, shared, our_vt, tty_fd })
+    Some(Seat { api, handle, shared, card: -1, our_vt, tty_fd })
 }
 
 fn load_api() -> Option<Api> {
@@ -220,6 +251,8 @@ fn load_api() -> Option<Api> {
             std::mem::transmute(sym(lib, c"libseat_switch_session")?)
         },
         dispatch: unsafe { std::mem::transmute(sym(lib, c"libseat_dispatch")?) },
+        open_device: unsafe { std::mem::transmute(sym(lib, c"libseat_open_device")?) },
+        close_device: unsafe { std::mem::transmute(sym(lib, c"libseat_close_device")?) },
     })
 }
 
@@ -232,21 +265,122 @@ fn sym(lib: *mut c_void, name: &std::ffi::CStr) -> Option<*mut c_void> {
     Some(p)
 }
 
-// raylib opens the KMS device itself and keeps the fd private, so find it by
-// looking for the /dev/dri/card* link in our own fd table.
+//
+// The card
+//
+
+// Open the KMS device through libseat, so logind is the one handing it out and the
+// one revoking it on a switch. The fd is the caller's to give to raylib and stays
+// open until shutdown. Returns None if there is no card or libseat refuses it, and
+// the caller can then fall back to adopt_card.
+pub fn open_card(s: &mut Seat) -> Option<i32> {
+    let path = card_path()?;
+    let c_path = CString::new(path.clone()).ok()?;
+    let mut fd: c_int = -1;
+    let id = unsafe { (s.api.open_device)(s.handle, c_path.as_ptr(), &mut fd) };
+    if id < 0 || fd < 0 {
+        let err = std::io::Error::last_os_error();
+        eprintln!("om_wm: seat: libseat would not open {path} ({err})");
+        return None;
+    }
+    s.card = id;
+    unsafe { (*s.shared).drm_fd = fd };
+    // No SET_MASTER here on purpose: logind takes master on this fd while our session
+    // is active and drops it when it pauses the device, and our own attempt would be
+    // refused. See own_master.
+    println!("om_wm: seat: {path} through libseat, fd {fd}");
+    Some(fd)
+}
+
+// The fallback: raylib opened the card itself, so find its fd and use that for the
+// master handover. Everything still works, minus logind's pause-and-wait on a switch.
+pub fn adopt_card(s: &mut Seat) -> bool {
+    let fd = find_drm_fd();
+    if fd < 0 {
+        eprintln!("om_wm: seat: no /dev/dri/card* fd open, vt switches will not release the display");
+        return false;
+    }
+    unsafe { (*s.shared).drm_fd = fd };
+    unsafe { (*s.shared).own_master = true };
+    if active(s) {
+        take_master(fd);
+    }
+    true
+}
+
+// Whether logind is the one moving DRM master around, which it is for a card it
+// opened for us. Callers use it to skip ownership checks that only make sense for a
+// card we opened ourselves.
+pub fn card_from_logind(s: &Seat) -> bool {
+    s.card >= 0
+}
+
+// Which card to drive: the one with something plugged into it, since raylib's own
+// guesswork (platform-gpu-card, then card1, then card0) can land on a headless one.
+fn card_path() -> Option<String> {
+    let mut cards: Vec<String> = Vec::new();
+    for entry in fs::read_dir("/dev/dri").ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("card") {
+            cards.push(name);
+        }
+    }
+    cards.sort();
+    for card in &cards {
+        if card_is_connected(card) {
+            return Some(format!("/dev/dri/{card}"));
+        }
+    }
+    cards.first().map(|card| format!("/dev/dri/{card}"))
+}
+
+// Whether any of this card's connectors has a display on it. /sys/class/drm holds one
+// directory per connector, named cardN-<connector>, each with a status file.
+fn card_is_connected(card: &str) -> bool {
+    let Ok(entries) = fs::read_dir("/sys/class/drm") else { return false };
+    let prefix = format!("{card}-");
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        if let Ok(status) = fs::read_to_string(entry.path().join("status")) {
+            if status.trim() == "connected" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// Where raylib's own card fd is: it keeps it private, so find the /dev/dri/card*
+// link in our own fd table. A card-shaped name is not enough to go on, because raylib
+// leaks the fd of every card it probes and rejects (see its open chain: by-path, then
+// card1, then card0), so each candidate has to answer a DRM ioctl before we use it for
+// the master handover.
 fn find_drm_fd() -> i32 {
     let Ok(entries) = fs::read_dir("/proc/self/fd") else { return -1 };
     for entry in entries.flatten() {
         let Ok(target) = fs::read_link(entry.path()) else { continue };
-        let Some(name) = target.file_name().and_then(|n| n.to_str()) else { continue };
-        if !name.starts_with("card") {
+        let Some(path) = target.to_str() else { continue };
+        if !path.starts_with("/dev/dri/card") {
             continue;
         }
-        if let Some(fd) = entry.file_name().to_str().and_then(|n| n.parse::<i32>().ok()) {
+        let Some(fd) = entry.file_name().to_str().and_then(|n| n.parse::<i32>().ok()) else {
+            continue;
+        };
+        if is_drm_node(fd) {
             return fd;
         }
     }
     -1
+}
+
+// Whether this fd is a KMS node that answers DRM ioctls. Any capability would do; the
+// dumb buffer one is the oldest and every driver knows it.
+fn is_drm_node(fd: i32) -> bool {
+    let mut cap = DrmGetCap { capability: DRM_CAP_DUMB_BUFFER, value: 0 };
+    unsafe { libc::ioctl(fd, DRM_IOCTL_GET_CAP, &mut cap as *mut DrmGetCap) == 0 }
 }
 
 // The VT of our session. XDG_VTNR is what logind exports for it; the VT on screen
@@ -281,6 +415,9 @@ fn open_vt_dev(vt: u16) -> i32 {
 //
 
 fn take_master(drm_fd: i32) {
+    if drm_fd < 0 {
+        return;
+    }
     if unsafe { libc::ioctl(drm_fd, DRM_IOCTL_SET_MASTER) } != 0 {
         let err = std::io::Error::last_os_error();
         eprintln!("om_wm: seat: set master failed: {err}");
@@ -288,7 +425,7 @@ fn take_master(drm_fd: i32) {
 }
 
 fn drop_master(drm_fd: i32) -> bool {
-    unsafe { libc::ioctl(drm_fd, DRM_IOCTL_DROP_MASTER) == 0 }
+    drm_fd >= 0 && unsafe { libc::ioctl(drm_fd, DRM_IOCTL_DROP_MASTER) == 0 }
 }
 
 // Whether the display is actually ours to drive. raylib will open the card, build a
@@ -296,6 +433,10 @@ fn drop_master(drm_fd: i32) -> bool {
 // only the per-frame modeset fails, silently, so a second instance runs blind while
 // holding the keyboard. Asking for master answers it properly, and asking is
 // harmless when we already have it.
+//
+// Only meaningful for a card we opened ourselves. For a logind card the kernel refuses
+// the question (see own_master) and there is nothing to ask anyway: logind gives the
+// device to one session at a time, and a second taker is refused at open.
 pub fn drm_is_ours() -> bool {
     let fd = find_drm_fd();
     if fd < 0 {
@@ -418,7 +559,10 @@ pub fn switch_to(s: &Seat, target: u16) -> bool {
     if target == 0 || target == s.our_vt || !active(s) {
         return false;
     }
-    let dropped = drop_master(unsafe { (*s.shared).drm_fd });
+    // For a logind card this is logind's job, and it does it before the switch
+    // completes; for our own card, stop driving the display first.
+    let own = unsafe { (*s.shared).own_master };
+    let dropped = own && drop_master(unsafe { (*s.shared).drm_fd });
     if unsafe { (s.api.switch_session)(s.handle, target as c_int) } < 0 {
         let err = std::io::Error::last_os_error();
         eprintln!("om_wm: seat: switch to vt{target} failed: {err}");
@@ -437,6 +581,17 @@ pub fn shutdown(s: &mut Seat) {
     if s.tty_fd >= 0 {
         unsafe { libc::close(s.tty_fd) };
         s.tty_fd = -1;
+    }
+    // Ours to close only if libseat gave it to us. Call this after the window is
+    // closed: raylib is still drawing through this fd until then.
+    if s.card >= 0 {
+        let fd = unsafe { (*s.shared).drm_fd };
+        unsafe { (s.api.close_device)(s.handle, s.card) };
+        if fd >= 0 {
+            unsafe { libc::close(fd) };
+        }
+        s.card = -1;
+        unsafe { (*s.shared).drm_fd = -1 };
     }
     unsafe { (s.api.close_seat)(s.handle) };
     drop(unsafe { Box::from_raw(s.shared) });

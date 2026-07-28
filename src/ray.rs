@@ -171,6 +171,35 @@ pub const FLAG_VSYNC_HINT: u32 = 0x0000_0040;
 // keyboard capability (headless weston) GDK asserts and the process dies before a
 // window ever exists. We draw our own everything anyway, so tell GLFW to skip it.
 //
+// KMS device handoff, in the DRM build only
+//
+// SetGraphicDeviceFd is our patch to raylib's DRM platform (rcore_drm.c). build.rs
+// looks for it in the vendored source and sets raylib_external_fd, so a raylib that
+// does not carry the patch still builds: can_set_drm_fd() then answers false and the
+// caller lets raylib open the card itself, the way it did before.
+
+#[cfg(raylib_external_fd)]
+extern "C" {
+    fn SetGraphicDeviceFd(fd: c_int);
+}
+
+// Whether this build can be handed a KMS fd at all.
+pub fn can_set_drm_fd() -> bool {
+    cfg!(raylib_external_fd)
+}
+
+// Hand raylib an open KMS device to use instead of opening one. Must be called
+// before init_window, which is the only time raylib reads it. The fd stays ours to
+// close.
+#[cfg(raylib_external_fd)]
+pub fn set_drm_fd(fd: i32) {
+    unsafe { SetGraphicDeviceFd(fd) };
+}
+
+#[cfg(not(raylib_external_fd))]
+pub fn set_drm_fd(_fd: i32) {}
+
+//
 // GLFW, in the nested build only
 //
 // raylib links GLFW for its desktop platform and not for DRM, so these two are

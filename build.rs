@@ -16,12 +16,32 @@
 //
 
 use std::env;
+use std::fs;
 use std::path::PathBuf;
 
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let raylib_src = PathBuf::from(&manifest_dir).join("third_party/raylib");
     let windowed = env::var("CARGO_FEATURE_WINDOWED").is_ok();
+
+    // Whether this raylib carries our patch for taking an already open KMS fd
+    // (SetGraphicDeviceFd in rcore_drm.c). Detected rather than assumed: a raylib
+    // update that drops the patch must not turn into a link error or, worse, a
+    // silently ignored fd. Without it om_wm opens the card the old way, so this is a
+    // cfg and not a build failure.
+    let drm_platform = raylib_src.join("src/platforms/rcore_drm.c");
+    let external_fd = fs::read_to_string(&drm_platform)
+        .map(|src| src.contains("void SetGraphicDeviceFd(int fd)"))
+        .unwrap_or(false);
+    println!("cargo:rustc-check-cfg=cfg(raylib_external_fd)");
+    if external_fd && !windowed {
+        println!("cargo:rustc-cfg=raylib_external_fd");
+    } else if !windowed {
+        println!(
+            "cargo:warning=vendored raylib has no SetGraphicDeviceFd patch: \
+             om_wm will let raylib open the KMS device itself"
+        );
+    }
 
     let mut cfg = cmake::Config::new(&raylib_src);
     cfg.define("BUILD_EXAMPLES", "OFF")

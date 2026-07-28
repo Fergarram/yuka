@@ -1,6 +1,10 @@
 TODO:
 
-[ ] Update raylib so we can hand an fd, basically it's currently too manual or some shit.
+[x] Update raylib so we can hand an fd, basically it's currently too manual or some shit.
+    SetGraphicDeviceFd patch in rcore_drm.c, so logind opens the card through
+    libseat and raylib takes our fd. build.rs detects the patch; without it we
+    fall back to raylib opening the card. OM_WM_CARD=raylib forces the fallback.
+    Still direct: the input devices, which could go through libseat too.
 
 EVENTUALLY:
 
