@@ -551,6 +551,9 @@ fn main() {
     // A label under every window saying what it is made of and how it is sampled.
     // OM_WM_DEBUG_LABELS=1, or Super+I at any time.
     let mut debug_labels = std::env::var("OM_WM_DEBUG_LABELS").is_ok();
+    // The trackpad instrument in the corner: fingers, button regions, live gesture
+    // state. OM_WM_DEBUG_PAD=1, or Super+P at any time.
+    let mut debug_pad = std::env::var("OM_WM_DEBUG_PAD").is_ok();
 
     let egl = egl::init().expect("egl init");
     // How much anisotropic filtering the driver offers, asked once. It only matters
@@ -825,21 +828,29 @@ fn main() {
         let gestures_enabled = focused.is_none();
         // Suppress trackpad gestures while Super is held (reserved for window
         // manipulation) so a pinch does not zoom the canvas.
-        let (mut pressed, mut released) = match touchpad.as_mut() {
+        let taps = match touchpad.as_mut() {
             Some(tp) => touch::update(
                 tp,
                 &mut cam,
                 cursor.as_mut(),
                 gestures_enabled && !super_down,
             ),
-            None => (false, false),
+            None => touch::Clicks::default(),
         };
+        let (mut pressed, mut released) = (taps.left_pressed, taps.left_released);
 
         // Pointers, as libinput reports them: motion moves the cursor, clicks add
         // to the click edges, the wheel zooms at the cursor when unfocused. In
         // Libinput trackpad mode the scroll and pinch fields carry the trackpad
         // too; in Custom mode they stay zero because the device is muted there.
-        let ptr = inp.as_ref().map(input::pointer).unwrap_or_default();
+        let mut ptr = inp.as_ref().map(input::pointer).unwrap_or_default();
+        // The trackpad's buttons join the mouse's, so nothing downstream has to know
+        // which device a click came from. On a clickpad the right button is a region of
+        // the surface (touch.rs), and it arrives here looking like a real one.
+        ptr.right_pressed |= taps.right_pressed;
+        ptr.right_released |= taps.right_released;
+        ptr.right |= taps.right;
+        ptr.left |= taps.left;
         let pointer_on_client = !super_down && hovered.is_some();
         if let Some(cur) = cursor.as_mut() {
             cursor::move_by(cur, ptr.dx as i32, ptr.dy as i32);
@@ -869,6 +880,12 @@ fn main() {
             if toggle {
                 debug_labels = !debug_labels;
                 println!("om_wm: debug labels {}", if debug_labels { "on" } else { "off" });
+            }
+            let toggle_pad = input::super_down(i)
+                && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_P);
+            if toggle_pad {
+                debug_pad = !debug_pad;
+                println!("om_wm: trackpad overlay {}", if debug_pad { "on" } else { "off" });
             }
         }
 
@@ -1084,6 +1101,15 @@ fn main() {
         render::draw_windows(&windows, cam3d, shader, alpha_loc, swizzle_loc);
         if debug_labels {
             render::draw_debug_labels(&windows, cam3d, cam.zoom, anisotropy);
+        }
+        if debug_pad {
+            if let Some(tp) = touchpad.as_ref() {
+                render::draw_pad_debug(
+                    &touch::view(tp),
+                    ray::screen_width(),
+                    ray::screen_height(),
+                );
+            }
         }
         if screenshot && frame == shot_frame {
             ray::flush_batch();

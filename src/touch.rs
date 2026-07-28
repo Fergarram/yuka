@@ -27,6 +27,9 @@ const ABS_MT_POSITION_X: u16 = 0x35;
 const ABS_MT_POSITION_Y: u16 = 0x36;
 const ABS_MT_TRACKING_ID: u16 = 0x39;
 const BTN_LEFT: u16 = 0x110;
+const BTN_RIGHT: u16 = 0x111;
+// INPUT_PROP_BUTTONPAD is property bit 2: the whole surface is one physical button.
+const INPUT_PROP_BUTTONPAD: usize = 2;
 
 // struct input_event is 24 bytes on 64-bit Linux: 16-byte timeval, u16 type,
 // u16 code, i32 value.
@@ -77,6 +80,20 @@ const TAP_NEVER: f64 = -1000.0;
 // One-finger pointer motion: screen pixels moved per trackpad device unit.
 const POINTER_SENS: f32 = 0.25;
 
+// How far a finger has to travel before it moves the cursor at all, as a fraction of
+// the pad. A finger landing rolls and spreads, and pressing the pad down slides it, so
+// without this the cursor drifts off target in the moment before a click lands.
+const POINTER_START_FRAC: f32 = 0.008; // ~54 units, ~0.6 mm
+// And how long after a press the cursor stays parked regardless, for the roll as the
+// finger takes the pad's travel. Longer than this and a click-drag would feel stuck.
+const PRESS_FREEZE_SECS: f64 = 0.12;
+
+// Software button strip on a clickpad: the bottom third of the surface, split in half.
+// A click with a finger in the right half of that strip is a right click, everything
+// else is a left click. Only used on hardware that has no buttons of its own.
+const BUTTON_STRIP: f32 = 1.0 / 3.0;
+const BUTTON_SPLIT: f32 = 0.5;
+
 //
 // Types
 //
@@ -107,6 +124,15 @@ pub struct Touchpad {
     // Shorter axis of the device's coordinate span, the reference every distance
     // threshold is a fraction of.
     span: f32,
+    // Full extent of each axis, for locating a finger on the surface as a fraction
+    // rather than in device units, which differ per model.
+    x_min: f32,
+    x_span: f32,
+    y_min: f32,
+    y_span: f32,
+    // True when this device has no buttons of its own and we have to make them out of
+    // regions (see BUTTON_STRIP). Read from the kernel at open, not guessed.
+    software_buttons: bool,
     slots: [Slot; MAX_SLOTS],
     cur: usize,
     // Baselines for the current two-finger gesture; None when not exactly two
@@ -143,10 +169,56 @@ pub struct Touchpad {
     prev_single: Option<(f32, f32)>,
     ptr_accum_x: f32,
     ptr_accum_y: f32,
-    // Physical trackpad button (BTN_LEFT): current level + per-frame edges.
-    btn_left: bool,
-    click_pressed: bool,
-    click_released: bool,
+    // Where the cursor was parked and whether the finger has since travelled far
+    // enough to drive it. Re-parked on landing and on every press and release.
+    ptr_ref: Option<(f32, f32)>,
+    ptr_armed: bool,
+    // Latest event time, and when the button last went down, for the press freeze.
+    now: f64,
+    press_time: f64,
+    // The trackpad's one physical button: current level, and which button it counts as
+    // this time round. The choice is made on the press and held until the release,
+    // because a finger can slide out of the strip while still holding the pad down, and
+    // a press and its release have to be the same button.
+    btn_down: bool,
+    right_click: bool,
+    clicks: Clicks,
+    // What the last gesture frame applied, kept only so the debug overlay can report
+    // what is being detected rather than what we hope is being detected.
+    last_pan: (f32, f32),
+    last_zoom: f32,
+}
+
+// A read-only snapshot of the pad for the debug overlay: fingers as fractions of the
+// surface, the button regions, and what the gesture code currently believes.
+pub struct PadView {
+    pub fingers: [(f32, f32); MAX_SLOTS],
+    pub count: usize,
+    pub contact_max: usize,
+    pub left: bool,
+    pub right: bool,
+    pub mode: &'static str,
+    pub pan_armed: bool,
+    pub zoom_armed: bool,
+    pub ptr_armed: bool,
+    pub software_buttons: bool,
+    pub strip: f32,
+    pub split: f32,
+    pub aspect: f32,
+    pub pan: (f32, f32),
+    pub zoom: f32,
+}
+
+// Button edges and levels from the pad this frame, shaped like the mouse's so that
+// everything downstream can treat a clickpad and a two button mouse identically.
+#[derive(Clone, Copy, Default)]
+pub struct Clicks {
+    pub left_pressed: bool,
+    pub left_released: bool,
+    pub left: bool,
+    pub right_pressed: bool,
+    pub right_released: bool,
+    pub right: bool,
 }
 
 //
@@ -164,20 +236,45 @@ pub fn open(path: &str) -> Option<Touchpad> {
     }
     // Not grabbed: in Custom mode libinput already has this device muted, and a
     // grab here would only starve libinput's own handle on it.
-    let span = match (abs_span(fd, ABS_MT_POSITION_X), abs_span(fd, ABS_MT_POSITION_Y)) {
-        (Some(x), Some(y)) => x.min(y),
-        (Some(x), None) => x,
-        (None, Some(y)) => y,
+    let x_axis = abs_range(fd, ABS_MT_POSITION_X);
+    let y_axis = abs_range(fd, ABS_MT_POSITION_Y);
+    let span = match (x_axis, y_axis) {
+        (Some((_, x)), Some((_, y))) => x.min(y),
+        (Some((_, x)), None) => x,
+        (None, Some((_, y))) => y,
         (None, None) => SPAN_FALLBACK,
     };
+    let (x_min, x_span) = x_axis.unwrap_or((0.0, SPAN_FALLBACK));
+    let (y_min, y_span) = y_axis.unwrap_or((0.0, SPAN_FALLBACK));
+    // Two questions, both answered by the kernel: does the surface sit under a single
+    // button, and is there a right button anywhere on the device. A real right button
+    // settles it on its own, whatever the property says.
+    let buttonpad = has_property(fd, INPUT_PROP_BUTTONPAD);
+    let has_right = has_key(fd, BTN_RIGHT);
+    let software_buttons = buttonpad && !has_right;
     println!(
         "om_wm: touchpad {path} (span {span:.0}: pan/tap {:.0}, pinch {:.0} units)",
         span * MOVE_START_FRAC,
         span * PINCH_START_FRAC
     );
+    println!(
+        "om_wm: touchpad buttons: {}",
+        if software_buttons {
+            "clickpad, bottom third of the surface split in half (left | right)"
+        } else if has_right {
+            "physical left and right"
+        } else {
+            "one button, and the kernel does not call it a clickpad: left only"
+        }
+    );
     Some(Touchpad {
         fd,
         span,
+        x_min,
+        x_span,
+        y_min,
+        y_span,
+        software_buttons,
         slots: [Slot { active: false, x: 0, y: 0, start_x: 0, start_y: 0, start_set: false }; MAX_SLOTS],
         cur: 0,
         prev_centroid: None,
@@ -198,15 +295,21 @@ pub fn open(path: &str) -> Option<Touchpad> {
         prev_single: None,
         ptr_accum_x: 0.0,
         ptr_accum_y: 0.0,
-        btn_left: false,
-        click_pressed: false,
-        click_released: false,
+        ptr_ref: None,
+        ptr_armed: false,
+        now: 0.0,
+        press_time: TAP_NEVER,
+        btn_down: false,
+        right_click: false,
+        clicks: Clicks::default(),
+        last_pan: (0.0, 0.0),
+        last_zoom: 1.0,
     })
 }
 
-// The travel of one axis in device units, from the driver.
+// Where one axis starts and how far it travels, in device units, from the driver.
 // EVIOCGABS(axis) = _IOR('E', 0x40 + axis, struct input_absinfo).
-fn abs_span(fd: i32, axis: u16) -> Option<f32> {
+fn abs_range(fd: i32, axis: u16) -> Option<(f32, f32)> {
     #[repr(C)]
     #[derive(Default)]
     struct AbsInfo {
@@ -226,10 +329,41 @@ fn abs_span(fd: i32, axis: u16) -> Option<f32> {
     }
     let span = (info.maximum - info.minimum) as f32;
     if span > 0.0 {
-        Some(span)
+        Some((info.minimum as f32, span))
     } else {
         None
     }
+}
+
+// Whether the device reports a property bit. EVIOCGPROP(len) = _IOR('E', 0x09, len).
+fn has_property(fd: i32, prop: usize) -> bool {
+    let mut bits = [0u8; 4];
+    let req: libc::c_ulong =
+        (2 << 30) | ((bits.len() as libc::c_ulong) << 16) | (0x45 << 8) | 0x09;
+    if unsafe { libc::ioctl(fd, req, bits.as_mut_ptr()) } < 0 {
+        return false;
+    }
+    bit_set(&bits, prop)
+}
+
+// Whether the device can report a key or button code. EVIOCGBIT(EV_KEY, len) =
+// _IOR('E', 0x20 + EV_KEY, len).
+fn has_key(fd: i32, code: u16) -> bool {
+    // KEY_MAX is 0x2ff, so this covers every code the kernel can report.
+    let mut bits = [0u8; 96];
+    let req: libc::c_ulong = (2 << 30)
+        | ((bits.len() as libc::c_ulong) << 16)
+        | (0x45 << 8)
+        | (0x20 + EV_KEY as libc::c_ulong);
+    if unsafe { libc::ioctl(fd, req, bits.as_mut_ptr()) } < 0 {
+        return false;
+    }
+    bit_set(&bits, code as usize)
+}
+
+fn bit_set(bits: &[u8], n: usize) -> bool {
+    let byte = n / 8;
+    byte < bits.len() && bits[byte] & (1 << (n % 8)) != 0
 }
 
 // Close the device, for when it is unplugged or libinput hands us a different
@@ -267,9 +401,49 @@ pub fn reset(tp: &mut Touchpad) {
     tp.prev_single = None;
     tp.ptr_accum_x = 0.0;
     tp.ptr_accum_y = 0.0;
-    tp.btn_left = false;
-    tp.click_pressed = false;
-    tp.click_released = false;
+    tp.ptr_ref = None;
+    tp.ptr_armed = false;
+    tp.press_time = TAP_NEVER;
+    tp.btn_down = false;
+    tp.right_click = false;
+    tp.clicks = Clicks::default();
+}
+
+// A snapshot for the debug overlay. Fractions of the surface rather than device units,
+// so the drawing code needs to know nothing about this model of trackpad.
+pub fn view(tp: &Touchpad) -> PadView {
+    let mut fingers = [(0.0f32, 0.0f32); MAX_SLOTS];
+    let mut count = 0;
+    for slot in &tp.slots {
+        if slot.active {
+            fingers[count] = (
+                (slot.x as f32 - tp.x_min) / tp.x_span,
+                (slot.y as f32 - tp.y_min) / tp.y_span,
+            );
+            count += 1;
+        }
+    }
+    PadView {
+        fingers,
+        count,
+        contact_max: tp.contact_max,
+        left: tp.btn_down && !tp.right_click,
+        right: tp.btn_down && tp.right_click,
+        mode: match tp.mode {
+            GestureMode::None => "none",
+            GestureMode::Pan => "pan",
+            GestureMode::Zoom => "zoom",
+        },
+        pan_armed: tp.pan_armed,
+        zoom_armed: tp.zoom_armed,
+        ptr_armed: tp.ptr_armed,
+        software_buttons: tp.software_buttons,
+        strip: BUTTON_STRIP,
+        split: BUTTON_SPLIT,
+        aspect: tp.x_span / tp.y_span,
+        pan: tp.last_pan,
+        zoom: tp.last_zoom,
+    }
 }
 
 //
@@ -333,6 +507,7 @@ fn read_events(tp: &mut Touchpad) {
         let time =
             i64::from_ne_bytes(secs) as f64 + i64::from_ne_bytes(usecs) as f64 * 1e-6;
 
+        tp.now = time;
         let etype = u16::from_ne_bytes([buf[16], buf[17]]);
         let code = u16::from_ne_bytes([buf[18], buf[19]]);
         let value = i32::from_ne_bytes([buf[20], buf[21], buf[22], buf[23]]);
@@ -392,12 +567,38 @@ fn read_events(tp: &mut Touchpad) {
                 }
             }
             (EV_KEY, BTN_LEFT) => {
+                // Park the cursor around the click, at both edges: the finger rolls as
+                // it presses and again as it lifts, and neither should move the pointer
+                // away from what is being clicked.
+                tp.press_time = time;
+                tp.ptr_ref = None;
+                tp.ptr_armed = false;
                 if value == 1 {
-                    tp.btn_left = true;
-                    tp.click_pressed = true;
+                    tp.btn_down = true;
+                    tp.right_click = press_is_right(tp);
+                    if tp.right_click {
+                        tp.clicks.right_pressed = true;
+                    } else {
+                        tp.clicks.left_pressed = true;
+                    }
                 } else if value == 0 {
-                    tp.btn_left = false;
-                    tp.click_released = true;
+                    tp.btn_down = false;
+                    if tp.right_click {
+                        tp.clicks.right_released = true;
+                    } else {
+                        tp.clicks.left_released = true;
+                    }
+                    tp.right_click = false;
+                }
+            }
+            // A pad with real buttons reports its own right click, so pass it through.
+            (EV_KEY, BTN_RIGHT) => {
+                if value == 1 {
+                    tp.clicks.right_pressed = true;
+                    tp.right_click = true;
+                } else if value == 0 {
+                    tp.clicks.right_released = true;
+                    tp.right_click = false;
                 }
             }
             _ => {}
@@ -405,20 +606,52 @@ fn read_events(tp: &mut Touchpad) {
     }
 }
 
+// Which button a press on the pad's single button counts as. On hardware with real
+// buttons the question does not arise. On a clickpad, the finger doing the pressing
+// decides: the lowest one on the surface, since with a second finger resting higher up
+// it is the low one that is on the button. In the right half of the bottom strip it is a
+// right click, anywhere else a left one.
+fn press_is_right(tp: &Touchpad) -> bool {
+    if !tp.software_buttons {
+        return false;
+    }
+    let mut lowest: Option<(i32, i32)> = None;
+    for slot in &tp.slots {
+        if slot.active && lowest.map_or(true, |(y, _)| slot.y > y) {
+            lowest = Some((slot.y, slot.x));
+        }
+    }
+    // No finger reported: nothing can be pressing the pad, so take the safe answer.
+    let Some((y, x)) = lowest else {
+        return false;
+    };
+    let fy = (y as f32 - tp.y_min) / tp.y_span;
+    let fx = (x as f32 - tp.x_min) / tp.x_span;
+    let right = fy >= 1.0 - BUTTON_STRIP && fx >= BUTTON_SPLIT;
+    if tp.debug_taps {
+        eprintln!(
+            "om_wm: touchpad click at {fx:.2},{fy:.2} of the surface -> {}",
+            if right { "right" } else { "left" }
+        );
+    }
+    right
+}
+
 // Drain trackpad events and apply gestures: one finger moves the pointer, two
 // fingers pan/zoom (only when gestures_enabled, i.e. no window focused).
-// Returns the BTN_LEFT (pressed, released) edges this frame for the caller to
-// route as a click.
+// Returns this frame's button edges and levels for the caller to route as clicks.
 pub fn update(
     tp: &mut Touchpad,
     cam: &mut Camera,
     cursor: Option<&mut Cursor>,
     gestures_enabled: bool,
-) -> (bool, bool) {
-    tp.click_pressed = false;
-    tp.click_released = false;
+) -> Clicks {
+    tp.clicks = Clicks::default();
     read_events(tp);
-    let clicks = (tp.click_pressed, tp.click_released);
+    // Levels, after the edges: held down and it is still whichever button it became.
+    tp.clicks.left = tp.btn_down && !tp.right_click;
+    tp.clicks.right = tp.btn_down && tp.right_click;
+    let clicks = tp.clicks;
 
     // Cursor position is the pinch-zoom origin (screen space).
     let screen_w = ray::screen_width() as f32;
@@ -461,19 +694,42 @@ pub fn update(
         if primary != tp.primary_slot {
             tp.primary_slot = primary;
             tp.prev_single = None;
+            // A different finger is driving: park until it has moved deliberately.
+            tp.ptr_ref = None;
+            tp.ptr_armed = false;
         }
         if let Some(p) = primary {
             let (fx, fy) = (tp.slots[p].x as f32, tp.slots[p].y as f32);
-            if let (Some((px, py)), Some(cur)) = (tp.prev_single, cursor) {
-                tp.ptr_accum_x += (fx - px) * POINTER_SENS;
-                tp.ptr_accum_y += (fy - py) * POINTER_SENS;
-                let idx = tp.ptr_accum_x.trunc();
-                let idy = tp.ptr_accum_y.trunc();
-                tp.ptr_accum_x -= idx;
-                tp.ptr_accum_y -= idy;
-                cursor::move_by(cur, idx as i32, idy as i32);
+            if tp.ptr_ref.is_none() {
+                tp.ptr_ref = Some((fx, fy));
             }
-            tp.prev_single = Some((fx, fy));
+            // Park the cursor until the finger has travelled far enough from where it
+            // landed, or was last pressed, to count as a move rather than the wobble of
+            // a finger settling or pushing the pad down. The freeze covers the press
+            // itself, where the travel can be larger than any sane threshold.
+            if !tp.ptr_armed {
+                let frozen = tp.now - tp.press_time < PRESS_FREEZE_SECS;
+                if let Some((rx, ry)) = tp.ptr_ref {
+                    let moved = ((fx - rx).powi(2) + (fy - ry).powi(2)).sqrt();
+                    if !frozen && moved >= tp.span * POINTER_START_FRAC {
+                        tp.ptr_armed = true;
+                        // Start from here, so arming does not jump by the threshold.
+                        tp.prev_single = Some((fx, fy));
+                    }
+                }
+            }
+            if tp.ptr_armed {
+                if let (Some((px, py)), Some(cur)) = (tp.prev_single, cursor) {
+                    tp.ptr_accum_x += (fx - px) * POINTER_SENS;
+                    tp.ptr_accum_y += (fy - py) * POINTER_SENS;
+                    let idx = tp.ptr_accum_x.trunc();
+                    let idy = tp.ptr_accum_y.trunc();
+                    tp.ptr_accum_x -= idx;
+                    tp.ptr_accum_y -= idy;
+                    cursor::move_by(cur, idx as i32, idy as i32);
+                }
+                tp.prev_single = Some((fx, fy));
+            }
         }
         tp.prev_centroid = None;
         tp.prev_dist = None;
@@ -582,6 +838,8 @@ pub fn update(
                     // Content follows the fingers, so the view shifts opposite.
                     let move_x = -(centroid.0 - pc.0) * PAN_SENS / cam.zoom;
                     let move_y = -(centroid.1 - pc.1) * PAN_SENS / cam.zoom;
+                    tp.last_pan = (move_x, move_y);
+                    tp.last_zoom = 1.0;
                     cam.cx += move_x;
                     cam.cy += move_y;
                 }
@@ -595,9 +853,14 @@ pub fn update(
                             .map(|(x, y)| (x as f32, y as f32))
                             .unwrap_or((screen_w * 0.5, screen_h * 0.5));
                         camera::zoom_at(cam, ratio, ox, oy, screen_w, screen_h);
+                        tp.last_zoom = ratio;
+                        tp.last_pan = (0.0, 0.0);
                     }
                 }
-                GestureMode::None => {}
+                GestureMode::None => {
+                    tp.last_pan = (0.0, 0.0);
+                    tp.last_zoom = 1.0;
+                }
             }
         }
         _ => {

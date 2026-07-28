@@ -11,6 +11,7 @@
 //
 
 use crate::camera;
+use crate::touch;
 use crate::egl::{self, Egl, EglImage};
 use crate::ray::{self, Shader, Vector3};
 use crate::wl::state::{self, State};
@@ -499,6 +500,97 @@ pub fn draw_debug_labels(windows: &Windows, cam3d: ray::Camera3D, zoom: f32, ani
         for (n, line) in lines.iter().enumerate() {
             ray::draw_text(line, anchor.x as i32, top + line_h * n as i32, size, fg);
         }
+    }
+}
+
+// The trackpad, drawn in the bottom right corner: the surface at its real aspect ratio,
+// the button regions marked, a dot per finger, and what the gesture code currently
+// thinks is happening. Screen space, not canvas: it is an instrument, not content.
+//
+// Everything here comes from touch::view, so it shows what the gesture code decided
+// rather than a second interpretation of the same events.
+pub fn draw_pad_debug(pad: &touch::PadView, screen_w: i32, screen_h: i32) {
+    const WIDTH: i32 = 260;
+    const MARGIN: i32 = 16;
+    const TEXT: i32 = 12;
+    const LINE: i32 = 15;
+
+    let bg = ray::Color { r: 12, g: 12, b: 16, a: 210 };
+    let frame = ray::Color { r: 90, g: 95, b: 110, a: 255 };
+    let region = ray::Color { r: 60, g: 65, b: 80, a: 255 };
+    let live = ray::Color { r: 240, g: 230, b: 120, a: 255 };
+    let hot = ray::Color { r: 250, g: 120, b: 90, a: 255 };
+    let dim = ray::Color { r: 150, g: 155, b: 170, a: 255 };
+
+    // The pad, at its own aspect ratio so the regions look like they feel.
+    let pad_w = WIDTH;
+    let pad_h = if pad.aspect > 0.1 { (WIDTH as f32 / pad.aspect) as i32 } else { WIDTH / 2 };
+    let lines = 4;
+    let panel_h = pad_h + LINE * lines + MARGIN;
+    let x0 = screen_w - WIDTH - MARGIN;
+    let y0 = screen_h - panel_h - MARGIN;
+
+    ray::draw_rectangle(x0 - 8, y0 - 8, WIDTH + 16, panel_h + 16, bg);
+
+    let px = x0;
+    let py = y0 + LINE * lines;
+    ray::draw_rectangle_lines(px, py, pad_w, pad_h, frame);
+
+    // Button regions: the strip along the bottom, split in two.
+    if pad.software_buttons {
+        let strip_y = py + (pad_h as f32 * (1.0 - pad.strip)) as i32;
+        let split_x = px + (pad_w as f32 * pad.split) as i32;
+        ray::draw_line(px, strip_y, px + pad_w, strip_y, region);
+        ray::draw_line(split_x, strip_y, split_x, py + pad_h, region);
+        let label_y = py + pad_h - TEXT - 4;
+        ray::draw_text("L", px + 6, label_y, TEXT, if pad.left { live } else { region });
+        ray::draw_text("R", split_x + 6, label_y, TEXT, if pad.right { live } else { region });
+    }
+
+    // Fingers. The lowest one is the one that would decide a click, so mark it.
+    let mut lowest = 0usize;
+    for i in 1..pad.count {
+        if pad.fingers[i].1 > pad.fingers[lowest].1 {
+            lowest = i;
+        }
+    }
+    for i in 0..pad.count {
+        let (fx, fy) = pad.fingers[i];
+        let cx = px + (fx * pad_w as f32) as i32;
+        let cy = py + (fy * pad_h as f32) as i32;
+        let colour = if i == lowest && pad.software_buttons { hot } else { live };
+        ray::draw_circle(cx, cy, 5.0, colour);
+    }
+
+    // What it thinks is going on.
+    let armed = |on: bool| if on { "armed" } else { "idle" };
+    let text = [
+        format!(
+            "trackpad  {} finger{}  max {}",
+            pad.count,
+            if pad.count == 1 { "" } else { "s" },
+            pad.contact_max
+        ),
+        format!(
+            "gesture {}  pan {}  zoom {}",
+            pad.mode,
+            armed(pad.pan_armed),
+            armed(pad.zoom_armed)
+        ),
+        format!(
+            "pan {:+.1},{:+.1}  zoom {:.3}  cursor {}",
+            pad.pan.0, pad.pan.1, pad.zoom, armed(pad.ptr_armed)
+        ),
+        format!(
+            "buttons {}{}{}",
+            if pad.software_buttons { "regions" } else { "physical" },
+            if pad.left { "  LEFT" } else { "" },
+            if pad.right { "  RIGHT" } else { "" }
+        ),
+    ];
+    for (n, line) in text.iter().enumerate() {
+        let colour = if n == 3 && (pad.left || pad.right) { live } else { dim };
+        ray::draw_text(line, x0, y0 + LINE * n as i32, TEXT, colour);
     }
 }
 

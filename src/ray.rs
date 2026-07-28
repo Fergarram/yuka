@@ -143,6 +143,9 @@ extern "C" {
     fn DrawText(text: *const c_char, x: c_int, y: c_int, size: c_int, color: Color);
     fn MeasureText(text: *const c_char, size: c_int) -> c_int;
     fn DrawRectangle(x: c_int, y: c_int, w: c_int, h: c_int, color: Color);
+    fn DrawRectangleLines(x: c_int, y: c_int, w: c_int, h: c_int, color: Color);
+    fn DrawLine(x1: c_int, y1: c_int, x2: c_int, y2: c_int, color: Color);
+    fn DrawCircle(x: c_int, y: c_int, radius: f32, color: Color);
     fn GetScreenToWorldRay(position: Vector2, camera: Camera3D) -> Ray;
     fn rlSetTexture(id: u32);
     fn rlBegin(mode: c_int);
@@ -347,6 +350,18 @@ pub fn flush_batch() {
 
 pub fn draw_rectangle(x: i32, y: i32, w: i32, h: i32, color: Color) {
     unsafe { DrawRectangle(x, y, w, h, color) };
+}
+
+pub fn draw_rectangle_lines(x: i32, y: i32, w: i32, h: i32, color: Color) {
+    unsafe { DrawRectangleLines(x, y, w, h, color) };
+}
+
+pub fn draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: Color) {
+    unsafe { DrawLine(x1, y1, x2, y2, color) };
+}
+
+pub fn draw_circle(x: i32, y: i32, radius: f32, color: Color) {
+    unsafe { DrawCircle(x, y, radius, color) };
 }
 
 pub fn draw_text(text: &str, x: i32, y: i32, size: i32, color: Color) {
