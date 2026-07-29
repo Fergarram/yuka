@@ -69,6 +69,13 @@ pub struct Windows {
     pub geo_h: Vec<f32>,
     // 1.0 for shm (BGRA in memory), 0.0 for dmabuf (correct RGBA via EGL).
     pub swizzle: Vec<f32>,
+    // Live stretch, while a resize drag is in progress. A resize on Wayland is a
+    // request: we ask, the client renders, and its pixels arrive a round trip later,
+    // which reads as the window trailing your hand. So during the drag we scale the
+    // quad here instead and ask nothing, then ask once on release. 1.0 the rest of the
+    // time, which is every window almost always.
+    pub scale_x: Vec<f32>,
+    pub scale_y: Vec<f32>,
     // What the sampler is set to right now, so the choice is only pushed to GL when it
     // actually changes rather than every frame.
     pub filter: Vec<u8>,
@@ -135,6 +142,8 @@ pub fn windows_new() -> Windows {
         geo_w: Vec::new(),
         geo_h: Vec::new(),
         swizzle: Vec::new(),
+        scale_x: Vec::new(),
+        scale_y: Vec::new(),
         filter: Vec::new(),
         mip: Vec::new(),
         owns: Vec::new(),
@@ -173,12 +182,37 @@ pub fn dmabuf_cache_new() -> DmabufCache {
 // surface origin shifted by the geometry offset, sized to the geometry. Everything
 // visible or clickable is expressed in these, never in raw texture bounds.
 pub fn visible(windows: &Windows, i: usize) -> (f32, f32, f32, f32) {
+    // The stretch is anchored at the top left, which is where a resize drag holds the
+    // window while its far corner follows the cursor.
     (
         windows.canvas_x[i] + windows.geo_x[i],
         windows.canvas_y[i] + windows.geo_y[i],
-        windows.geo_w[i],
-        windows.geo_h[i],
+        windows.geo_w[i] * windows.scale_x[i],
+        windows.geo_h[i] * windows.scale_y[i],
     )
+}
+
+// The window's real size, with no stretch applied: what the client last committed, and
+// therefore what a resize measures from and watches for a change in.
+pub fn geo_size(windows: &Windows, surface: &WlSurface) -> Option<(f32, f32)> {
+    index_of(windows, surface).map(|i| (windows.geo_w[i], windows.geo_h[i]))
+}
+
+// Stretch a window without telling it. Only for the duration of a resize drag: the
+// texture is the old size, so the content is scaled, and a window left like this would
+// stay wrong until its next commit.
+pub fn set_scale(windows: &mut Windows, surface: &WlSurface, sx: f32, sy: f32) {
+    if let Some(i) = index_of(windows, surface) {
+        windows.scale_x[i] = sx.max(0.01);
+        windows.scale_y[i] = sy.max(0.01);
+    }
+}
+
+pub fn clear_scale(windows: &mut Windows, surface: &WlSurface) {
+    if let Some(i) = index_of(windows, surface) {
+        windows.scale_x[i] = 1.0;
+        windows.scale_y[i] = 1.0;
+    }
 }
 
 // Record what the client called its window geometry, clamped to the texture we
@@ -225,6 +259,8 @@ pub fn prune_dead(windows: &mut Windows) {
         windows.geo_w.remove(i);
         windows.geo_h.remove(i);
         windows.swizzle.remove(i);
+        windows.scale_x.remove(i);
+        windows.scale_y.remove(i);
         windows.filter.remove(i);
         windows.mip.remove(i);
         windows.owns.remove(i);
@@ -379,6 +415,8 @@ pub fn prepare_textures(windows: &mut Windows, zoom: f32, anisotropy: f32) {
     const NATIVE_ZOOM: f32 = 0.999;
     // A lift this small is a window that has finished settling.
     const FLAT_Z: f32 = 0.5;
+    // And a stretch this small is not one.
+    const SCALE_EPS: f32 = 0.001;
 
     let magnified = zoom >= NATIVE_ZOOM;
 
@@ -387,6 +425,10 @@ pub fn prepare_textures(windows: &mut Windows, zoom: f32, anisotropy: f32) {
             continue;
         }
         let flat = windows.z[i].abs() < FLAT_Z;
+        // A window being stretched by a resize drag is not at 1:1 whatever the zoom is,
+        // so it wants the smooth filter, not exact texels of the wrong size.
+        let unscaled = (windows.scale_x[i] - 1.0).abs() < SCALE_EPS
+            && (windows.scale_y[i] - 1.0).abs() < SCALE_EPS;
 
         // A chain, if this window is being shrunk and does not have one yet.
         if MIPS_WHEN_MINIFIED && !magnified && windows.mip[i] == MIP_NONE {
@@ -401,7 +443,7 @@ pub fn prepare_textures(windows: &mut Windows, zoom: f32, anisotropy: f32) {
             };
         }
 
-        let want = if magnified && flat {
+        let want = if magnified && flat && unscaled {
             FILTER_NEAREST
         } else if MIPS_WHEN_MINIFIED && !magnified && windows.mip[i] == MIP_READY {
             FILTER_TRILINEAR
@@ -501,6 +543,32 @@ pub fn draw_debug_labels(windows: &Windows, cam3d: ray::Camera3D, zoom: f32, ani
             ray::draw_text(line, anchor.x as i32, top + line_h * n as i32, size, fg);
         }
     }
+}
+
+// Frame timing, top left. Three numbers because one is not enough to see lag: the rate,
+// this frame, and the worst frame in the last second or so. An average hides exactly the
+// stutter you are looking for, so the worst is what to watch while dragging something.
+//
+// Coloured by the worst rather than the average, and against the frame budget: green
+// while every frame fits in a 60Hz refresh, amber when some frame missed it, red when
+// something missed it badly.
+pub fn draw_frame_stats(fps: f32, ms: f32, worst_ms: f32) {
+    const PAD: i32 = 6;
+    const TEXT: i32 = 14;
+    let bg = ray::Color { r: 12, g: 12, b: 16, a: 190 };
+    let colour = if worst_ms <= 17.0 {
+        ray::Color { r: 130, g: 230, b: 140, a: 255 }
+    } else if worst_ms <= 25.0 {
+        ray::Color { r: 240, g: 210, b: 110, a: 255 }
+    } else {
+        ray::Color { r: 250, g: 120, b: 90, a: 255 }
+    };
+    // The latch margin is here because it is the number you tune against the other
+    // three: it is how far before the vblank the frame was composed.
+    let line = format!("{fps:.0} fps   {ms:.1} ms   worst {worst_ms:.1} ms");
+    let w = ray::measure_text(&line, TEXT);
+    ray::draw_rectangle(PAD, PAD, w + PAD * 2, TEXT + PAD * 2, bg);
+    ray::draw_text(&line, PAD * 2, PAD * 2, TEXT, colour);
 }
 
 // The trackpad, drawn in the bottom right corner: the surface at its real aspect ratio,
@@ -849,6 +917,8 @@ fn store_entry(
             windows.geo_w.push(w as f32);
             windows.geo_h.push(h as f32);
             windows.swizzle.push(swizzle);
+            windows.scale_x.push(1.0);
+            windows.scale_y.push(1.0);
             windows.filter.push(FILTER_LINEAR);
             windows.mip.push(MIP_NONE);
             windows.owns.push(owns);
@@ -1042,6 +1112,8 @@ pub fn destroy_owned(windows: &mut Windows) {
     windows.geo_w.clear();
     windows.geo_h.clear();
     windows.swizzle.clear();
+    windows.scale_x.clear();
+    windows.scale_y.clear();
     windows.filter.clear();
     windows.mip.clear();
     windows.owns.clear();

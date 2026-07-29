@@ -104,6 +104,23 @@ pub struct Settings {
     // Gap within which a second middle click counts as a double click, milliseconds.
     pub double_click_ms: u32,
 
+    // Windows.
+    // Smallest a Super+right-drag will ask a window to be, in canvas units, for clients
+    // that never declared a minimum of their own.
+    pub resize_min_px: f32,
+    // Whether a resize drag stretches the window locally while it waits for the client.
+    // On, the corner tracks the cursor exactly and the contents are scaled until the
+    // client's own render catches up. Off, nothing moves until the client answers, which
+    // is what every other Wayland compositor does, and what makes a slow client feel like
+    // the window is trailing your hand.
+    pub resize_stretch: bool,
+    // During a resize drag the quad already shows the size you are dragging to, so this
+    // only paces how often the client is asked to re-render into it: the next ask waits
+    // for the client to answer, or for this many frames, whichever comes first. Lower
+    // means fresher content from a client that ignores configures, at the cost of asking
+    // one that is merely slow to redraw work it will throw away.
+    pub resize_wait_frames: u32,
+
     // Camera.
     // Keyboard pan speed in screen pixels per second, and keyboard zoom rate.
     pub pan_px_per_sec: f32,
@@ -160,6 +177,10 @@ pub fn defaults() -> Settings {
         hwheel_pan: 60.0,
         wheel_step_px: 15.0,
         double_click_ms: 400,
+
+        resize_min_px: 120.0,
+        resize_stretch: true,
+        resize_wait_frames: 8,
 
         pan_px_per_sec: 900.0,
         zoom_rate_per_sec: 2.0,
@@ -275,6 +296,22 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
         "button_split" => f32_key!(button_split),
         "hwheel_pan" => f32_key!(hwheel_pan),
         "wheel_step_px" => f32_key!(wheel_step_px),
+        "resize_min_px" => f32_key!(resize_min_px),
+        "resize_stretch" => match value {
+            "true" | "1" | "yes" => set.resize_stretch = true,
+            "false" | "0" | "no" => set.resize_stretch = false,
+            _ => {
+                eprintln!("om_wm: settings: {path}:{line}: resize_stretch wants true or false");
+                return false;
+            }
+        },
+        "resize_wait_frames" => match value.parse::<u32>() {
+            Ok(v) => set.resize_wait_frames = v.max(1),
+            Err(_) => {
+                eprintln!("om_wm: settings: {path}:{line}: resize_wait_frames wants a whole number");
+                return false;
+            }
+        },
         "pan_px_per_sec" => f32_key!(pan_px_per_sec),
         "zoom_rate_per_sec" => f32_key!(zoom_rate_per_sec),
         "zoom_min" => f32_key!(zoom_min),
@@ -324,6 +361,7 @@ fn sanitise(set: &mut Settings) {
     set.rest_zone_frac = set.rest_zone_frac.clamp(0.0, 1.0);
     set.rest_secs = set.rest_secs.max(0.0);
     set.rest_move_frac = set.rest_move_frac.max(0.0);
+    set.resize_min_px = set.resize_min_px.max(1.0);
     set.button_split = set.button_split.clamp(0.0, 1.0);
     set.pointer_start_frac = set.pointer_start_frac.max(0.0);
     set.press_freeze_secs = set.press_freeze_secs.max(0.0);

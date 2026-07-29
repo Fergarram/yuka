@@ -286,6 +286,56 @@ pub fn toplevel_surfaces(state: &State) -> Vec<WlSurface> {
         .collect()
 }
 
+// Ask a client to be a different size. This is what resizing a window is on Wayland:
+// there is nothing to stretch, only a configure telling the client what we want, which
+// it renders at and acks in its own time. The client is allowed to refuse, and a
+// well-behaved one will clamp to whatever it declared through set_min_size and
+// set_max_size, so those bounds are read here rather than assumed.
+//
+// Called every frame of a resize drag: Smithay only puts a configure on the wire when
+// the pending state actually differs, so a drag that has not moved sends nothing.
+pub fn resize_toplevel(state: &State, surface: &WlSurface, w: i32, h: i32) {
+    let Some(toplevel) = state
+        .xdg_state
+        .toplevel_surfaces()
+        .iter()
+        .find(|t| t.wl_surface() == surface)
+    else {
+        return;
+    };
+    let (min, max) = size_limits(surface);
+    let w = clamp_dim(w, min.0, max.0);
+    let h = clamp_dim(h, min.1, max.1);
+    toplevel.with_pending_state(|pending| {
+        pending.size = Some((w, h).into());
+    });
+    toplevel.send_pending_configure();
+}
+
+// What the client said it can be. Zero in either direction means it did not say, which
+// Wayland spells as "no limit".
+pub fn size_limits(surface: &WlSurface) -> ((i32, i32), (i32, i32)) {
+    with_states(surface, |states| {
+        let mut cached = states.cached_state.get::<SurfaceCachedState>();
+        let current = cached.current();
+        (
+            (current.min_size.w, current.min_size.h),
+            (current.max_size.w, current.max_size.h),
+        )
+    })
+}
+
+fn clamp_dim(v: i32, min: i32, max: i32) -> i32 {
+    let mut v = v;
+    if min > 0 {
+        v = v.max(min);
+    }
+    if max > 0 {
+        v = v.min(max);
+    }
+    v
+}
+
 // True if the surface is a real xdg toplevel window, not a cursor or subsurface
 // surface (which also commit buffers but must never be composited as a quad).
 pub fn is_toplevel(state: &State, surface: &WlSurface) -> bool {

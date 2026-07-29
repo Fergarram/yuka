@@ -65,6 +65,7 @@ pub const KEY_W: u16 = 17;
 pub const KEY_I: u16 = 23;
 pub const KEY_P: u16 = 25;
 pub const KEY_R: u16 = 19;
+pub const KEY_F: u16 = 33;
 pub const KEY_LEFTCTRL: u16 = 29;
 pub const KEY_A: u16 = 30;
 pub const KEY_S: u16 = 31;

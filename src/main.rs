@@ -43,6 +43,10 @@ const SHOT_FRAME: u32 = 200;
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
 const BTN_MIDDLE: u32 = 0x112;
+// How long to keep a released resize stretched while waiting for the client to commit
+// the size we asked for. A client that ignores the ask gets snapped back after this, so
+// a stretched window is never left lying about its size.
+const RESIZE_SETTLE_FRAMES: u32 = 90;
 // How often to stat the settings file. Once a second is instant to a human hitting
 // save, and 60 stats a minute is nothing next to a frame.
 const SETTINGS_POLL_FRAMES: u32 = 60;
@@ -57,6 +61,70 @@ const WINDOWED_H: i32 = 800;
 //
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
+
+// An in-progress Super+right-drag resize.
+//
+// Two things happen at once, because a resize on Wayland cannot be immediate: the
+// configure goes out, the client re-renders, commits, we import and upload, we draw.
+// That round trip is why waiting for the client made the window lerp behind the cursor.
+//
+// So the geometry is ours and the pixels are the client's. Every frame the quad is
+// scaled to exactly where the cursor is, which costs nothing and cannot lag. In parallel
+// the client is told the same size as fast as it can answer, so its content keeps
+// reflowing at whatever rate it manages: text rewraps, a page relayouts, and the
+// stretch shrinks toward 1.0 as its buffer catches up with the quad it is being drawn
+// into. Neither half waits for the other.
+//
+// Sizes are computed from where the drag started rather than accumulated per frame, so
+// nothing drifts, and the scale is recomputed against whatever the client has actually
+// committed, so a commit mid-drag changes the pixels without moving the corner.
+struct Resize {
+    surface: WlSurface,
+    // Canvas point where the drag started, and the window's real size then.
+    grab_x: f32,
+    grab_y: f32,
+    from_w: f32,
+    from_h: f32,
+    // The last size we asked for, what the client was drawing when we asked, and how many
+    // frames ago. Asking again is gated on the client having answered, because a
+    // configure it has not caught up with yet is a re-render it will throw away.
+    asked: (f32, f32),
+    seen: (f32, f32),
+    waited: u32,
+    // The smallest and largest the client has actually managed during this drag, and how
+    // many commits it has made since either improved. Most clients declare no limits at
+    // all (weston's toolkit reports none) and simply refuse to go further, so the limits
+    // have to be learned. Stretching past a refusal is a lie the release has to undo.
+    //
+    // Learned from what the client manages, not by pairing asks with answers: with asks
+    // going out every frame a commit answers something several asks old, and reading that
+    // as a refusal produced contradictory limits, one of which crossed the other and
+    // panicked a clamp. Monotone behaviour is the honest signal, and it does not care how
+    // far behind the client is.
+    least_w: f32,
+    least_h: f32,
+    most_w: f32,
+    most_h: f32,
+    stuck_small: u32,
+    stuck_large: u32,
+}
+
+// How many commits without progress mean the client has stopped moving in that direction.
+// A couple would misread a client that is merely a frame or two behind.
+const RESIZE_STUCK_COMMITS: u32 = 5;
+// And how much progress counts as progress, since a terminal answers in whole character
+// cells and a pixel of rounding is not movement.
+const RESIZE_PROGRESS_PX: f32 = 4.0;
+
+// A resize that has been released and asked for, waiting for the client to answer so the
+// stretch can come off.
+struct ResizeSettle {
+    surface: WlSurface,
+    // The size the client was drawing when we asked. Any change from this means it has
+    // answered, whatever it decided.
+    was: (f32, f32),
+    frames: u32,
+}
 
 extern "C" fn on_signal(_sig: c_int) {
     RUNNING.store(false, Ordering::Relaxed);
@@ -559,6 +627,9 @@ fn main() {
     // The trackpad instrument in the corner: fingers, button regions, live gesture
     // state. OM_WM_DEBUG_PAD=1, or Super+P at any time.
     let mut debug_pad = std::env::var("OM_WM_DEBUG_PAD").is_ok();
+    // Frame rate, this frame and the worst of the last second. OM_WM_DEBUG_FPS=1, or
+    // Super+F at any time.
+    let mut debug_fps = std::env::var("OM_WM_DEBUG_FPS").is_ok();
 
     let egl = egl::init().expect("egl init");
     // How much anisotropic filtering the driver offers, asked once. It only matters
@@ -641,6 +712,9 @@ fn main() {
     let mut focused: Option<WlSurface> = None;
     // Active Super+drag: (window, offset from cursor to the window's origin).
     let mut drag: Option<(WlSurface, f32, f32)> = None;
+    // Active Super+right-drag resize, if any, and one released and waiting to be answered.
+    let mut resize: Option<Resize> = None;
+    let mut resize_settle: Option<ResizeSettle> = None;
     // Windows easing back down after a drop. Each entry is the surface plus its
     // world center and z at release; we hold the visual (screen) center fixed as
     // z returns to 0 so perspective does not slide it toward the screen center.
@@ -675,6 +749,11 @@ fn main() {
         .unwrap_or(u32::MAX);
     let mut last = Instant::now();
     let mut max_dt_ms: f64 = 0.0;
+    // The last second of frame times, for the on-screen counter. A run-long maximum is
+    // the wrong thing to watch while dragging something: one stall from startup would
+    // colour it red forever.
+    let mut dt_ring = [0.0f32; 60];
+    let mut dt_slot = 0usize;
     let mut slow_frames: u32 = 0;
     // Last session state we acted on, to catch activation edges from libseat.
     let mut session_active = true;
@@ -741,6 +820,8 @@ fn main() {
         let now = Instant::now();
         let dt_ms = now.duration_since(last).as_secs_f64() * 1000.0;
         last = now;
+        dt_ring[dt_slot] = dt_ms as f32;
+        dt_slot = (dt_slot + 1) % dt_ring.len();
         if frame > 5 {
             if dt_ms > max_dt_ms {
                 max_dt_ms = dt_ms;
@@ -770,6 +851,7 @@ fn main() {
 
         // New windows open where the view is.
         render::set_place_origin(&mut windows, cam.cx, cam.cy);
+
 
         // Send frame callbacks and flush BEFORE the vsync-blocking draw, so the
         // client renders its next frame concurrently with our page flip instead
@@ -906,6 +988,12 @@ fn main() {
                 debug_labels = !debug_labels;
                 println!("om_wm: debug labels {}", if debug_labels { "on" } else { "off" });
             }
+            let toggle_fps = input::super_down(i)
+                && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_F);
+            if toggle_fps {
+                debug_fps = !debug_fps;
+                println!("om_wm: fps counter {}", if debug_fps { "on" } else { "off" });
+            }
             let toggle_pad = input::super_down(i)
                 && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_P);
             if toggle_pad {
@@ -1023,6 +1111,145 @@ fn main() {
         let (sxp, syp) = cursor_pos
             .map(|(x, y)| (x as f32, y as f32))
             .unwrap_or((0.0, 0.0));
+        // Super+right-drag resizes. Wayland has nothing to stretch: we send the client
+        // a configure with the size we want and it renders at that size in its own time,
+        // clamping to whatever it declared as its minimum and maximum. So this drag
+        // asks, it does not impose, and a window that stops growing has said no.
+        //
+        // The window's top-left stays put and the far corner follows the cursor, which
+        // is the one mapping that needs no handle to grab.
+        if ptr.right_pressed && super_down && resize.is_none() {
+            if let Some((surf, ..)) = render::window_at(&windows, cam3d, sxp, syp) {
+                if let Some((gx, gy)) = camera::screen_to_plane(cam3d, sxp, syp, 0.0) {
+                    let root = wl::state::window_root(&mut state, &surf);
+                    if let Some((w, h)) = render::geo_size(&windows, &root) {
+                        // A window still settling from a previous resize starts fresh.
+                        if resize_settle.as_ref().map(|s| &s.surface) == Some(&root) {
+                            resize_settle = None;
+                        }
+                        render::clear_scale(&mut windows, &root);
+                        resize = Some(Resize {
+                            surface: root,
+                            grab_x: gx,
+                            grab_y: gy,
+                            from_w: w,
+                            from_h: h,
+                            asked: (w, h),
+                            seen: (w, h),
+                            waited: 0,
+                            least_w: w,
+                            least_h: h,
+                            most_w: w,
+                            most_h: h,
+                            stuck_small: 0,
+                            stuck_large: 0,
+                        });
+                    }
+                }
+            }
+        }
+        if let Some(r) = resize.as_mut() {
+            let alive = r.surface.is_alive();
+            // Canvas units are surface pixels at zoom 1, and projecting the cursor
+            // already divides by the zoom, so the corner tracks the cursor at any zoom.
+            // Where the cursor says the corner is, held back at whatever the client has
+            // shown it cannot pass. Written as min-then-max rather than clamp: bounds
+            // learned at runtime can cross, and clamp panics when they do.
+            let floor_w = if r.stuck_small >= RESIZE_STUCK_COMMITS { r.least_w } else { set.resize_min_px };
+            let floor_h = if r.stuck_small >= RESIZE_STUCK_COMMITS { r.least_h } else { set.resize_min_px };
+            let ceil_w = if r.stuck_large >= RESIZE_STUCK_COMMITS { r.most_w } else { f32::MAX };
+            let ceil_h = if r.stuck_large >= RESIZE_STUCK_COMMITS { r.most_h } else { f32::MAX };
+            let want = camera::screen_to_plane(cam3d, sxp, syp, 0.0).map(|(px, py)| {
+                (
+                    (r.from_w + (px - r.grab_x)).min(ceil_w).max(floor_w.min(ceil_w)),
+                    (r.from_h + (py - r.grab_y)).min(ceil_h).max(floor_h.min(ceil_h)),
+                )
+            });
+            match (ptr.right && alive, want) {
+                (true, Some((w, h))) => {
+                    // The quad shows where the cursor is, scaled against whatever the
+                    // client has committed so far, so its commits change the pixels
+                    // without moving the corner.
+                    // With the stretch off, nothing moves until the client answers, which
+                    // is the conventional behaviour and what trails your hand on a slow
+                    // client. Both are worth being able to feel, so it is a setting.
+                    let (gw, gh) = render::geo_size(&windows, &r.surface).unwrap_or((w, h));
+                    if set.resize_stretch {
+                        render::set_scale(&mut windows, &r.surface, w / gw, h / gh);
+                    }
+
+                    // And keep it rendering. Asking again only when it has answered means
+                    // we never queue a size it will not get to, and the timeout keeps a
+                    // client that ignores configures (weston-editor does) from stalling
+                    // the stream for the rest of the drag.
+                    let answered = (gw, gh) != r.seen;
+                    // Learn from what the client manages. Every commit either makes
+                    // progress in the direction being dragged, which clears the counter,
+                    // or does not, and enough of those in a row mean it has stopped.
+                    if answered {
+                        let smaller = gw + RESIZE_PROGRESS_PX < r.least_w
+                            || gh + RESIZE_PROGRESS_PX < r.least_h;
+                        let larger = gw > r.most_w + RESIZE_PROGRESS_PX
+                            || gh > r.most_h + RESIZE_PROGRESS_PX;
+                        if smaller {
+                            r.stuck_small = 0;
+                        } else if w < r.least_w - RESIZE_PROGRESS_PX {
+                            // We are asking for smaller and it did not get smaller.
+                            r.stuck_small += 1;
+                        }
+                        if larger {
+                            r.stuck_large = 0;
+                        } else if w > r.most_w + RESIZE_PROGRESS_PX {
+                            r.stuck_large += 1;
+                        }
+                        r.least_w = r.least_w.min(gw);
+                        r.least_h = r.least_h.min(gh);
+                        r.most_w = r.most_w.max(gw);
+                        r.most_h = r.most_h.max(gh);
+                    }
+                    let moved = (w - r.asked.0).abs() >= 1.0 || (h - r.asked.1).abs() >= 1.0;
+                    r.waited += 1;
+                    if moved && (answered || r.waited >= set.resize_wait_frames) {
+                        wl::state::resize_toplevel(&state, &r.surface, w as i32, h as i32);
+                        r.asked = (w, h);
+                        r.seen = (gw, gh);
+                        r.waited = 0;
+                    }
+                }
+                _ => {
+                    // Released: ask once, for the size the stretch is showing, and keep
+                    // the stretch until the client answers so the window does not snap
+                    // back to its old size for a frame.
+                    if alive {
+                        if let Some((w, h)) = want {
+                            let was = render::geo_size(&windows, &r.surface)
+                                .unwrap_or((r.from_w, r.from_h));
+                            wl::state::resize_toplevel(&state, &r.surface, w as i32, h as i32);
+                            resize_settle = Some(ResizeSettle {
+                                surface: r.surface.clone(),
+                                was,
+                                frames: 0,
+                            });
+                        }
+                    }
+                    resize = None;
+                }
+            }
+        }
+        // Take the stretch off once the client has committed something new, or give up
+        // waiting. A client that refuses the size (weston-editor does) leaves us
+        // stretching a window that is never going to grow, and snapping back to the
+        // truth is better than lying about it indefinitely.
+        if let Some(st) = resize_settle.as_mut() {
+            let now = render::geo_size(&windows, &st.surface);
+            st.frames += 1;
+            let answered = now.map(|n| n != st.was).unwrap_or(true);
+            if answered || st.frames >= RESIZE_SETTLE_FRAMES {
+                render::clear_scale(&mut windows, &st.surface);
+                resize_settle = None;
+            }
+        }
+
         if pressed && super_down && drag.is_none() {
             if let Some((surf, ox, oy)) =
                 render::window_at(&windows, cam3d, sxp, syp)
@@ -1130,6 +1357,23 @@ fn main() {
         if debug_labels {
             render::draw_debug_labels(&windows, cam3d, cam.zoom, anisotropy);
         }
+        if debug_fps {
+            // Averaged for the rate, worst for the stutter. Skip empty slots so the
+            // first second on screen is not distorted by zeros.
+            let mut sum = 0.0f32;
+            let mut worst = 0.0f32;
+            let mut n = 0.0f32;
+            for &v in dt_ring.iter() {
+                if v > 0.0 {
+                    sum += v;
+                    worst = worst.max(v);
+                    n += 1.0;
+                }
+            }
+            let avg = if n > 0.0 { sum / n } else { 0.0 };
+            let fps = if avg > 0.0 { 1000.0 / avg } else { 0.0 };
+            render::draw_frame_stats(fps, dt_ms as f32, worst);
+        }
         if debug_pad {
             if let Some(tp) = touchpad.as_ref() {
                 render::draw_pad_debug(
@@ -1144,6 +1388,7 @@ fn main() {
             ray::take_screenshot("shot.png");
         }
         ray::end_drawing();
+
 
         frame += 1;
     }
