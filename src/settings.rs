@@ -70,6 +70,15 @@ pub struct Settings {
     pub tap_max_secs: f64,
     pub double_tap_secs: f64,
 
+    // Trackpad: resting fingers. A hand rests on the pad, so a finger that sits in the
+    // bottom of it and stops moving is parked: it does not steer the cursor, does not
+    // count toward a two-finger gesture, and does not decide which button a click is.
+    // The zone is measured from the bottom edge, idleness in seconds, and the movement
+    // that counts as not-idle as a fraction of the pad.
+    pub rest_zone_frac: f32,
+    pub rest_secs: f64,
+    pub rest_move_frac: f32,
+
     // Trackpad: software buttons on a clickpad. The strip is measured from the bottom
     // edge, the split across it, both as fractions.
     pub button_strip: f32,
@@ -127,6 +136,10 @@ pub fn defaults() -> Settings {
 
         tap_max_secs: 0.25,
         double_tap_secs: 0.4,
+
+        rest_zone_frac: 0.4,
+        rest_secs: 0.5,
+        rest_move_frac: 0.004,
 
         button_strip: 1.0 / 3.0,
         button_split: 0.5,
@@ -241,6 +254,9 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
         "pinch_deadzone_frac" => f32_key!(pinch_deadzone_frac),
         "tap_max_secs" => f64_key!(tap_max_secs),
         "double_tap_secs" => f64_key!(double_tap_secs),
+        "rest_zone_frac" => f32_key!(rest_zone_frac),
+        "rest_secs" => f64_key!(rest_secs),
+        "rest_move_frac" => f32_key!(rest_move_frac),
         "button_strip" => f32_key!(button_strip),
         "button_split" => f32_key!(button_split),
         "hwheel_pan" => f32_key!(hwheel_pan),
@@ -283,6 +299,9 @@ fn sanitise(set: &mut Settings) {
     set.zoom_default = set.zoom_default.clamp(set.zoom_min, set.zoom_max);
     set.fov_deg = set.fov_deg.clamp(1.0, 170.0);
     set.button_strip = set.button_strip.clamp(0.0, 1.0);
+    set.rest_zone_frac = set.rest_zone_frac.clamp(0.0, 1.0);
+    set.rest_secs = set.rest_secs.max(0.0);
+    set.rest_move_frac = set.rest_move_frac.max(0.0);
     set.button_split = set.button_split.clamp(0.0, 1.0);
     set.pointer_start_frac = set.pointer_start_frac.max(0.0);
     set.press_freeze_secs = set.press_freeze_secs.max(0.0);

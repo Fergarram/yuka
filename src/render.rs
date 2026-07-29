@@ -525,7 +525,7 @@ pub fn draw_pad_debug(pad: &touch::PadView, screen_w: i32, screen_h: i32) {
     // The pad, at its own aspect ratio so the regions look like they feel.
     let pad_w = WIDTH;
     let pad_h = if pad.aspect > 0.1 { (WIDTH as f32 / pad.aspect) as i32 } else { WIDTH / 2 };
-    let lines = 4;
+    let lines = 5;
     let panel_h = pad_h + LINE * lines + MARGIN;
     let x0 = screen_w - WIDTH - MARGIN;
     let y0 = screen_h - panel_h - MARGIN;
@@ -535,6 +535,12 @@ pub fn draw_pad_debug(pad: &touch::PadView, screen_w: i32, screen_h: i32) {
     let px = x0;
     let py = y0 + LINE * lines;
     ray::draw_rectangle_lines(px, py, pad_w, pad_h, frame);
+
+    // The resting zone: below this line a still finger is treated as parked.
+    if pad.rest_zone > 0.0 {
+        let rest_y = py + (pad_h as f32 * (1.0 - pad.rest_zone)) as i32;
+        ray::draw_line(px, rest_y, px + pad_w, rest_y, ray::Color { r: 45, g: 50, b: 62, a: 255 });
+    }
 
     // Button regions: the strip along the bottom, split in two.
     if pad.software_buttons {
@@ -547,28 +553,55 @@ pub fn draw_pad_debug(pad: &touch::PadView, screen_w: i32, screen_h: i32) {
         ray::draw_text("R", split_x + 6, label_y, TEXT, if pad.right { live } else { region });
     }
 
-    // Fingers. The lowest one is the one that would decide a click, so mark it.
-    let mut lowest = 0usize;
-    for i in 1..pad.count {
-        if pad.fingers[i].1 > pad.fingers[lowest].1 {
-            lowest = i;
+    // Fingers. Parked ones are drawn dim and small, since nothing reads them; of the
+    // rest, the lowest is the one that would decide a click, so mark that one.
+    let mut lowest: Option<usize> = None;
+    for i in 0..pad.count {
+        if pad.resting[i] {
+            continue;
+        }
+        if lowest.map_or(true, |b| pad.fingers[i].1 > pad.fingers[b].1) {
+            lowest = Some(i);
         }
     }
     for i in 0..pad.count {
         let (fx, fy) = pad.fingers[i];
         let cx = px + (fx * pad_w as f32) as i32;
         let cy = py + (fy * pad_h as f32) as i32;
-        let colour = if i == lowest && pad.software_buttons { hot } else { live };
-        ray::draw_circle(cx, cy, 5.0, colour);
+        let deciding = pad.software_buttons && lowest == Some(i);
+        let colour = if pad.resting[i] {
+            dim
+        } else if deciding {
+            hot
+        } else {
+            live
+        };
+        // The contact ellipse, at the scale the pad is drawn: how much of the finger is
+        // actually touching. This hardware reports no per-finger pressure, so the
+        // footprint is the only force-like signal there is, and a resting thumb is
+        // visibly fatter than a pointing fingertip.
+        if pad.has_size {
+            let (major, minor) = pad.size[i];
+            // major and minor are diameters, so halve them. Floored at a couple of
+            // pixels: a fingertip's contact is only a few millimetres, which is smaller
+            // than the dot at this panel size, and an invisible footprint teaches
+            // nothing.
+            let ry = (major * 0.5 * pad_h as f32).max(2.5);
+            let rx = (minor * 0.5 * pad_h as f32).max(2.0);
+            ray::draw_ellipse_lines(cx, cy, rx, ry, colour);
+        }
+        // And the tracked point itself, which is what every decision reads.
+        ray::draw_circle(cx, cy, 1.5, colour);
     }
 
     // What it thinks is going on.
     let armed = |on: bool| if on { "armed" } else { "idle" };
     let text = [
         format!(
-            "trackpad  {} finger{}  max {}",
+            "trackpad  {} finger{}  {} resting  max {}",
             pad.count,
             if pad.count == 1 { "" } else { "s" },
+            pad.count - pad.active,
             pad.contact_max
         ),
         format!(
@@ -582,6 +615,15 @@ pub fn draw_pad_debug(pad: &touch::PadView, screen_w: i32, screen_h: i32) {
             pad.pan.0, pad.pan.1, pad.zoom, armed(pad.ptr_armed)
         ),
         format!(
+            "size{}{}{}{}  load {}/{}",
+            if pad.count > 0 { " " } else { " -" },
+            if pad.count > 0 { format!("{}", pad.major[0]) } else { String::new() },
+            if pad.count > 1 { format!(" {}", pad.major[1]) } else { String::new() },
+            if pad.count > 2 { format!(" {}", pad.major[2]) } else { String::new() },
+            pad.load,
+            pad.load_max
+        ),
+        format!(
             "buttons {}{}{}",
             if pad.software_buttons { "regions" } else { "physical" },
             if pad.left { "  LEFT" } else { "" },
@@ -589,7 +631,7 @@ pub fn draw_pad_debug(pad: &touch::PadView, screen_w: i32, screen_h: i32) {
         ),
     ];
     for (n, line) in text.iter().enumerate() {
-        let colour = if n == 3 && (pad.left || pad.right) { live } else { dim };
+        let colour = if n == 4 && (pad.left || pad.right) { live } else { dim };
         ray::draw_text(line, x0, y0 + LINE * n as i32, TEXT, colour);
     }
 }

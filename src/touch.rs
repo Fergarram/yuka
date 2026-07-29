@@ -27,6 +27,13 @@ const ABS_MT_SLOT: u16 = 0x2F;
 const ABS_MT_POSITION_X: u16 = 0x35;
 const ABS_MT_POSITION_Y: u16 = 0x36;
 const ABS_MT_TRACKING_ID: u16 = 0x39;
+// Contact size per finger: the ellipse the finger presses into the surface. This pad
+// reports no per-finger pressure (no ABS_MT_PRESSURE), and size is the usual stand-in,
+// since a finger flattens as it presses.
+const ABS_MT_TOUCH_MAJOR: u16 = 0x30;
+const ABS_MT_TOUCH_MINOR: u16 = 0x31;
+// Total load on the pad, one value for the whole device rather than per finger.
+const ABS_PRESSURE: u16 = 0x18;
 const BTN_LEFT: u16 = 0x110;
 const BTN_RIGHT: u16 = 0x111;
 // INPUT_PROP_BUTTONPAD is property bit 2: the whole surface is one physical button.
@@ -91,6 +98,22 @@ struct Slot {
     active: bool,
     x: i32,
     y: i32,
+    // When this finger landed, counted rather than timed: the pointer picks the
+    // earliest non-resting finger, and slots are reused, so the slot index says
+    // nothing about order of appearance.
+    seq: u32,
+    // Where the finger was when it last moved meaningfully, and when that was. A
+    // finger that has not moved from here for rest_secs is parked, not pointing.
+    still_x: i32,
+    still_y: i32,
+    still_since: f64,
+    // Contact ellipse, in the same device units as the positions: how much of the finger
+    // is touching. Zero on hardware that does not report it.
+    major: i32,
+    minor: i32,
+    // Parked: in the resting zone and idle. Held across frames because it must not
+    // flicker, and frozen while a gesture is running (see classify_resting).
+    resting: bool,
     // Where this finger landed, for measuring how far a tap drifted. Set on the
     // first full position it reports, not at activation, since the slot still
     // holds the previous finger's coordinates then.
@@ -109,6 +132,8 @@ enum GestureMode {
 
 pub struct Touchpad {
     fd: i32,
+    // Next appearance number to hand a finger that lands.
+    seq_next: u32,
     // Shorter axis of the device's coordinate span, the reference every distance
     // threshold is a fraction of.
     span: f32,
@@ -118,6 +143,13 @@ pub struct Touchpad {
     x_span: f32,
     y_min: f32,
     y_span: f32,
+    // Full extent of the contact size axis, and of the whole-pad load axis. Zero when
+    // the device does not report them, which the overlay has to respect rather than
+    // draw a footprint it does not know.
+    size_max: f32,
+    load_max: f32,
+    // Latest whole-pad load reading.
+    load: i32,
     // True when this device has no buttons of its own and we have to make them out of
     // regions (see button_strip). Read from the kernel at open, not guessed.
     software_buttons: bool,
@@ -181,7 +213,16 @@ pub struct Touchpad {
 // surface, the button regions, and what the gesture code currently believes.
 pub struct PadView {
     pub fingers: [(f32, f32); MAX_SLOTS],
+    // Contact ellipse per finger, as a fraction of the pad's height so it scales with
+    // the drawing, plus the raw major value for reading off numbers.
+    pub size: [(f32, f32); MAX_SLOTS],
+    pub major: [i32; MAX_SLOTS],
+    // Which of those fingers are parked rather than pointing, in the same order.
+    pub resting: [bool; MAX_SLOTS],
     pub count: usize,
+    // How many of them are not parked: what the gesture code is actually working with.
+    pub active: usize,
+    pub rest_zone: f32,
     pub contact_max: usize,
     pub left: bool,
     pub right: bool,
@@ -195,6 +236,10 @@ pub struct PadView {
     pub aspect: f32,
     pub pan: (f32, f32),
     pub zoom: f32,
+    // Whether this device reports contact size at all, and the whole-pad load.
+    pub has_size: bool,
+    pub load: i32,
+    pub load_max: i32,
 }
 
 // Button edges and levels from the pad this frame, shaped like the mouse's so that
@@ -237,6 +282,8 @@ pub fn open(path: &str, set: &Settings) -> Option<Touchpad> {
     // Two questions, both answered by the kernel: does the surface sit under a single
     // button, and is there a right button anywhere on the device. A real right button
     // settles it on its own, whatever the property says.
+    let size_max = abs_range(fd, ABS_MT_TOUCH_MAJOR).map(|(_, span)| span).unwrap_or(0.0);
+    let load_max = abs_range(fd, ABS_PRESSURE).map(|(_, span)| span).unwrap_or(0.0);
     let buttonpad = has_property(fd, INPUT_PROP_BUTTONPAD);
     let has_right = has_key(fd, BTN_RIGHT);
     let software_buttons = buttonpad && !has_right;
@@ -244,6 +291,11 @@ pub fn open(path: &str, set: &Settings) -> Option<Touchpad> {
         "om_wm: touchpad {path} (span {span:.0}: pan/tap {:.0}, pinch {:.0} units)",
         span * set.move_start_frac,
         span * set.pinch_start_frac
+    );
+    println!(
+        "om_wm: touchpad contact size {}, whole-pad load {}",
+        if size_max > 0.0 { "reported" } else { "not reported" },
+        if load_max > 0.0 { "reported" } else { "not reported" }
     );
     println!(
         "om_wm: touchpad buttons: {}",
@@ -263,7 +315,25 @@ pub fn open(path: &str, set: &Settings) -> Option<Touchpad> {
         y_min,
         y_span,
         software_buttons,
-        slots: [Slot { active: false, x: 0, y: 0, start_x: 0, start_y: 0, start_set: false }; MAX_SLOTS],
+        size_max,
+        load_max,
+        load: 0,
+        slots: [Slot {
+            active: false,
+            x: 0,
+            y: 0,
+            seq: 0,
+            still_x: 0,
+            still_y: 0,
+            still_since: 0.0,
+            major: 0,
+            minor: 0,
+            resting: false,
+            start_x: 0,
+            start_y: 0,
+            start_set: false,
+        }; MAX_SLOTS],
+        seq_next: 0,
         cur: 0,
         prev_centroid: None,
         prev_dist: None,
@@ -371,7 +441,21 @@ pub fn close(tp: &mut Touchpad) {
 // another VT does not replay a stale gesture into the camera.
 pub fn reset(tp: &mut Touchpad, set: &Settings) {
     read_events(tp, set);
-    tp.slots = [Slot { active: false, x: 0, y: 0, start_x: 0, start_y: 0, start_set: false }; MAX_SLOTS];
+    tp.slots = [Slot {
+        active: false,
+        x: 0,
+        y: 0,
+        seq: 0,
+        still_x: 0,
+        still_y: 0,
+        still_since: 0.0,
+        major: 0,
+        minor: 0,
+        resting: false,
+        start_x: 0,
+        start_y: 0,
+        start_set: false,
+    }; MAX_SLOTS];
     tp.cur = 0;
     tp.prev_centroid = None;
     tp.prev_dist = None;
@@ -401,19 +485,36 @@ pub fn reset(tp: &mut Touchpad, set: &Settings) {
 // so the drawing code needs to know nothing about this model of trackpad.
 pub fn view(tp: &Touchpad, set: &Settings) -> PadView {
     let mut fingers = [(0.0f32, 0.0f32); MAX_SLOTS];
+    let mut size = [(0.0f32, 0.0f32); MAX_SLOTS];
+    let mut major = [0i32; MAX_SLOTS];
+    let mut resting = [false; MAX_SLOTS];
     let mut count = 0;
+    let mut active = 0;
     for slot in &tp.slots {
         if slot.active {
             fingers[count] = (
                 (slot.x as f32 - tp.x_min) / tp.x_span,
                 (slot.y as f32 - tp.y_min) / tp.y_span,
             );
+            // Same units as the positions, so dividing by the same span puts the
+            // footprint at the same scale as the dot.
+            size[count] = (slot.major as f32 / tp.y_span, slot.minor as f32 / tp.y_span);
+            major[count] = slot.major;
+            resting[count] = slot.resting;
+            if !slot.resting {
+                active += 1;
+            }
             count += 1;
         }
     }
     PadView {
         fingers,
+        size,
+        major,
+        resting,
         count,
+        active,
+        rest_zone: set.rest_zone_frac,
         contact_max: tp.contact_max,
         left: tp.btn_down && !tp.right_click,
         right: tp.btn_down && tp.right_click,
@@ -431,6 +532,9 @@ pub fn view(tp: &Touchpad, set: &Settings) -> PadView {
         aspect: tp.x_span / tp.y_span,
         pan: tp.last_pan,
         zoom: tp.last_zoom,
+        has_size: tp.size_max > 0.0,
+        load: tp.load,
+        load_max: tp.load_max as i32,
     }
 }
 
@@ -516,6 +620,12 @@ fn read_events(tp: &mut Touchpad, set: &Settings) {
                 tp.slots[tp.cur].active = now;
                 if now && !was {
                     tp.slots[tp.cur].start_set = false;
+                    tp.slots[tp.cur].seq = tp.seq_next;
+                    tp.seq_next = tp.seq_next.wrapping_add(1);
+                    tp.slots[tp.cur].still_since = time;
+                    tp.slots[tp.cur].still_x = tp.slots[tp.cur].x;
+                    tp.slots[tp.cur].still_y = tp.slots[tp.cur].y;
+                    tp.slots[tp.cur].resting = false;
                     if tp.down == 0 {
                         tp.contact_start = time;
                         tp.contact_max = 0;
@@ -553,6 +663,29 @@ fn read_events(tp: &mut Touchpad, set: &Settings) {
                     let dy = (slot.y - slot.start_y) as f32;
                     tp.contact_moved = tp.contact_moved.max((dx * dx + dy * dy).sqrt());
                 }
+                // Idle tracking: the clock only restarts when the finger leaves a small
+                // circle, so the noise a still finger reports does not keep it awake.
+                let sx = (slot.x - slot.still_x) as f32;
+                let sy = (slot.y - slot.still_y) as f32;
+                if (sx * sx + sy * sy).sqrt() > tp.span * set.rest_move_frac {
+                    tp.slots[tp.cur].still_x = slot.x;
+                    tp.slots[tp.cur].still_y = slot.y;
+                    tp.slots[tp.cur].still_since = time;
+                    tp.slots[tp.cur].resting = false;
+                }
+            }
+            (EV_ABS, ABS_MT_TOUCH_MAJOR) => {
+                if tp.cur < MAX_SLOTS {
+                    tp.slots[tp.cur].major = value;
+                }
+            }
+            (EV_ABS, ABS_MT_TOUCH_MINOR) => {
+                if tp.cur < MAX_SLOTS {
+                    tp.slots[tp.cur].minor = value;
+                }
+            }
+            (EV_ABS, ABS_PRESSURE) => {
+                tp.load = value;
             }
             (EV_KEY, BTN_LEFT) => {
                 // Park the cursor around the click, at both edges: the finger rolls as
@@ -594,6 +727,65 @@ fn read_events(tp: &mut Touchpad, set: &Settings) {
     }
 }
 
+// Decide which fingers are parked rather than pointing.
+//
+// A hand rests on a trackpad: a thumb sits in the button area waiting to click, or a
+// finger just stays put. Those fingers should not steer the cursor, should not count
+// toward the two-finger gesture test, and should not decide which button a click is.
+// Anything else means a resting thumb turns every one-finger move into a pan and every
+// right click into a left one.
+//
+// Parked means both in the resting zone (the bottom of the pad, where a hand naturally
+// rests, and where the software buttons are) and idle for rest_secs. Both halves matter:
+// the zone alone would park a finger that is pointing slowly down there, and idleness
+// alone would park the pivot finger of a pinch.
+//
+// Frozen while a gesture is running. A pinch can hold one finger still for longer than
+// rest_secs, and reclassifying mid-gesture would drop that finger, take the gesture down
+// to one finger, and hand the cursor a jump.
+fn classify_resting(tp: &mut Touchpad, set: &Settings) {
+    if tp.pan_armed || tp.zoom_armed || tp.mode != GestureMode::None {
+        return;
+    }
+    for i in 0..MAX_SLOTS {
+        if !tp.slots[i].active {
+            tp.slots[i].resting = false;
+            continue;
+        }
+        let fy = (tp.slots[i].y as f32 - tp.y_min) / tp.y_span;
+        let in_zone = fy >= 1.0 - set.rest_zone_frac;
+        let idle = tp.now - tp.slots[i].still_since >= set.rest_secs;
+        tp.slots[i].resting = in_zone && idle;
+    }
+}
+
+// The finger that should drive the cursor: the earliest one that is not parked, so a
+// thumb already resting when you start pointing is skipped rather than followed. If
+// every finger is parked, the earliest one stands, since something has to.
+fn pointer_slot(tp: &Touchpad) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    for i in 0..MAX_SLOTS {
+        if !tp.slots[i].active || tp.slots[i].resting {
+            continue;
+        }
+        if best.map_or(true, |b| tp.slots[i].seq < tp.slots[b].seq) {
+            best = Some(i);
+        }
+    }
+    if best.is_some() {
+        return best;
+    }
+    let mut fallback: Option<usize> = None;
+    for i in 0..MAX_SLOTS {
+        if tp.slots[i].active
+            && fallback.map_or(true, |b| tp.slots[i].seq < tp.slots[b].seq)
+        {
+            fallback = Some(i);
+        }
+    }
+    fallback
+}
+
 // Which button a press on the pad's single button counts as. On hardware with real
 // buttons the question does not arise. On a clickpad, the finger doing the pressing
 // decides: the lowest one on the surface, since with a second finger resting higher up
@@ -603,10 +795,20 @@ fn press_is_right(tp: &Touchpad, set: &Settings) -> bool {
     if !tp.software_buttons {
         return false;
     }
+    // The lowest finger that is actually doing something. A thumb parked in the strip
+    // is not what decides the button, or a right click with the index finger while the
+    // thumb rests on the left would come out left.
     let mut lowest: Option<(i32, i32)> = None;
     for slot in &tp.slots {
-        if slot.active && lowest.map_or(true, |(y, _)| slot.y > y) {
+        if slot.active && !slot.resting && lowest.map_or(true, |(y, _)| slot.y > y) {
             lowest = Some((slot.y, slot.x));
+        }
+    }
+    if lowest.is_none() {
+        for slot in &tp.slots {
+            if slot.active && lowest.map_or(true, |(y, _)| slot.y > y) {
+                lowest = Some((slot.y, slot.x));
+            }
         }
     }
     // No finger reported: nothing can be pressing the pad, so take the safe answer.
@@ -647,10 +849,14 @@ pub fn update(
     let screen_h = ray::screen_height() as f32;
     let zoom_origin = cursor.as_deref().map(cursor::pos);
 
+    // Fingers that are actually doing something. A hand resting on the pad must not
+    // make a one-finger move look like a two-finger gesture, so parked fingers are not
+    // counted and not used as gesture points.
+    classify_resting(tp, set);
     let mut pts: [(f32, f32); 2] = [(0.0, 0.0); 2];
     let mut count = 0usize;
     for s in &tp.slots {
-        if s.active {
+        if s.active && !s.resting {
             if count < 2 {
                 pts[count] = (s.x as f32, s.y as f32);
             }
@@ -676,9 +882,11 @@ pub fn update(
         // Latch onto the original finger's slot and keep it until that finger
         // lifts; extra fingers are ignored. Adopt a new primary only once the
         // current one is up.
+        // Keep the finger that is already steering, unless it lifted or has since
+        // parked. Otherwise take the earliest one that is not parked.
         let primary = match tp.primary_slot {
-            Some(s) if tp.slots[s].active => Some(s),
-            _ => tp.slots.iter().position(|s| s.active),
+            Some(s) if tp.slots[s].active && !tp.slots[s].resting => Some(s),
+            _ => pointer_slot(tp),
         };
         if primary != tp.primary_slot {
             tp.primary_slot = primary;
