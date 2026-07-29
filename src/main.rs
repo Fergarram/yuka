@@ -419,6 +419,7 @@ fn forward_scroll(
 ) {
     let pointer = state.pointer.clone();
     let scroll_sign = settings::client_scroll_sign(set);
+    let hscroll_sign = settings::client_hscroll_sign(set);
     if ptr.wheel != 0.0 || ptr.hwheel != 0.0 {
         let mut frame = AxisFrame::new(time_ms).source(AxisSource::Wheel);
         if ptr.wheel != 0.0 {
@@ -428,7 +429,7 @@ fn forward_scroll(
                 .value(Axis::Vertical, (v * set.wheel_step_px) as f64);
         }
         if ptr.hwheel != 0.0 {
-            let h = ptr.hwheel * scroll_sign;
+            let h = ptr.hwheel * hscroll_sign;
             frame = frame
                 .v120(Axis::Horizontal, (h * 120.0) as i32)
                 .value(Axis::Horizontal, (h * set.wheel_step_px) as f64);
@@ -437,12 +438,15 @@ fn forward_scroll(
         pointer.frame(state);
     }
     if ptr.scroll_x != 0.0 || ptr.scroll_y != 0.0 {
+        // Finger scroll into a window gets its own sensitivity: the same gesture serves
+        // the canvas, where one to one is right, and a page, which usually wants more.
+        let sens = set.window_scroll_sens;
         let mut frame = AxisFrame::new(time_ms).source(AxisSource::Finger);
         if ptr.scroll_y != 0.0 {
-            frame = frame.value(Axis::Vertical, (ptr.scroll_y * scroll_sign) as f64);
+            frame = frame.value(Axis::Vertical, (ptr.scroll_y * scroll_sign * sens) as f64);
         }
         if ptr.scroll_x != 0.0 {
-            frame = frame.value(Axis::Horizontal, (ptr.scroll_x * scroll_sign) as f64);
+            frame = frame.value(Axis::Horizontal, (ptr.scroll_x * hscroll_sign * sens) as f64);
         }
         pointer.axis(state, frame);
         pointer.frame(state);
@@ -931,19 +935,13 @@ fn main() {
         }
 
         let super_down = inp.as_ref().map(input::super_down).unwrap_or(false);
-        let gestures_enabled = focused.is_none();
-        // Suppress trackpad gestures while Super is held (reserved for window
-        // manipulation) so a pinch does not zoom the canvas.
-        let taps = match touchpad.as_mut() {
-            Some(tp) => touch::update(
-                tp,
-                &mut cam,
-                cursor.as_mut(),
-                gestures_enabled && !super_down,
-                &set,
-            ),
-            None => touch::Clicks::default(),
+        // What the fingers did, not what it did to the camera: where a scroll goes is
+        // decided below, alongside the wheel's, so a trackpad can scroll a window.
+        let pad = match touchpad.as_mut() {
+            Some(tp) => touch::update(tp, cursor.as_mut(), super_down, &set),
+            None => touch::Gesture::default(),
         };
+        let taps = pad.clicks;
         let (mut pressed, mut released) = (taps.left_pressed, taps.left_released);
 
         // Pointers, as libinput reports them: motion moves the cursor, clicks add
@@ -958,6 +956,18 @@ fn main() {
         ptr.right_released |= taps.right_released;
         ptr.right |= taps.right;
         ptr.left |= taps.left;
+        // And its scroll joins the mouse's, in the same fields libinput fills when it
+        // drives the trackpad itself. Everything downstream then treats the two modes
+        // identically, including forwarding to whatever the pointer is over.
+        //
+        // Except while Super is held, which is reserved for moving and resizing windows:
+        // a pinch in the middle of that should not also zoom the canvas. The gesture is
+        // still tracked, only discarded, so letting go does not make the next one jump.
+        if !super_down {
+            ptr.scroll_x += pad.scroll_x;
+            ptr.scroll_y += pad.scroll_y;
+            ptr.pinch *= pad.pinch;
+        }
         let pointer_on_client = !super_down && hovered.is_some();
         if let Some(cur) = cursor.as_mut() {
             cursor::move_by(cur, ptr.dx as i32, ptr.dy as i32);
@@ -1022,6 +1032,11 @@ fn main() {
                 last_middle_ms = now_ms;
             }
         }
+        // A two-finger double tap on the trackpad asks for the same reset as Super+0.
+        if pad.reset_zoom && !super_down {
+            camera::reset_zoom(&mut cam, &set);
+        }
+
         // Super+0 scales around the screen center; the middle click has a cursor
         // to anchor on, so it keeps the canvas under the pointer fixed.
         if reset_click {
@@ -1081,7 +1096,10 @@ fn main() {
             }
         }
 
-        if gestures_enabled {
+        // WASD and Super +/- drive the camera only when no window has the keyboard,
+        // since otherwise they are someone's typing. Nothing to do with the trackpad,
+        // whose scroll is routed by where the pointer is.
+        if focused.is_none() {
             camera::camera_update(&mut cam, inp.as_ref(), &set);
         }
 

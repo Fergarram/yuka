@@ -53,6 +53,12 @@ pub struct Settings {
     // Trackpad: two-finger gestures.
     // Canvas units panned per device unit of centroid travel.
     pub pan_sens: f32,
+    // And a multiplier on top of that for scroll that goes into a window instead of the
+    // canvas. Two-finger scroll is one gesture with two destinations, and the right speed
+    // for dragging a canvas around is not the right speed for scrolling a page: the canvas
+    // moves under your fingers one to one, while a page wants to move further than they
+    // do. 1.0 sends a window exactly what the canvas would have panned.
+    pub window_scroll_sens: f32,
     // Travel before a pan or a pinch does anything, as a fraction of the pad. The pan
     // threshold doubles as the drift a tap is allowed.
     pub move_start_frac: f32,
@@ -154,6 +160,7 @@ pub fn defaults() -> Settings {
         press_freeze_secs: 0.12,
 
         pan_sens: 0.12,
+        window_scroll_sens: 1.0,
         move_start_frac: 0.012,
         pinch_start_frac: 0.02,
         mode_bias: 1.6,
@@ -191,15 +198,28 @@ pub fn defaults() -> Settings {
     }
 }
 
-// The sign a client is sent for scroll, derived rather than stored: Wayland counts
-// positive as down and right, and inverted scrolling flips it, so the canvas zoom and
-// the app inside a window agree instead of fighting.
+// The signs a client is sent for scroll, derived rather than stored, and different per
+// axis because the two conventions disagree about what the axes mean.
+//
+// Ours is positive up and right, the direction the fingers or the wheel moved. Wayland's
+// is positive vertical for scrolling down, which moves content up, and positive
+// horizontal for scrolling right, which moves content left. So content-follows-fingers,
+// which is what inverted (Mac-natural) scrolling means, needs a positive vertical for
+// fingers moving up and a negative horizontal for fingers moving right.
+//
+// Hence the horizontal sign is always the opposite of the vertical one. Getting this
+// wrong is invisible until you scroll sideways in a browser and the page goes the wrong
+// way while the canvas underneath it goes the right way.
 pub fn client_scroll_sign(set: &Settings) -> f32 {
     if set.invert_scroll {
         1.0
     } else {
         -1.0
     }
+}
+
+pub fn client_hscroll_sign(set: &Settings) -> f32 {
+    -client_scroll_sign(set)
 }
 
 //
@@ -280,6 +300,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
         "pointer_start_frac" => f32_key!(pointer_start_frac),
         "press_freeze_secs" => f64_key!(press_freeze_secs),
         "pan_sens" => f32_key!(pan_sens),
+        "window_scroll_sens" => f32_key!(window_scroll_sens),
         "move_start_frac" => f32_key!(move_start_frac),
         "pinch_start_frac" => f32_key!(pinch_start_frac),
         "mode_bias" => f32_key!(mode_bias),
@@ -364,6 +385,7 @@ fn sanitise(set: &mut Settings) {
     set.resize_min_px = set.resize_min_px.max(1.0);
     set.button_split = set.button_split.clamp(0.0, 1.0);
     set.pointer_start_frac = set.pointer_start_frac.max(0.0);
+    set.window_scroll_sens = set.window_scroll_sens.max(0.0);
     set.press_freeze_secs = set.press_freeze_secs.max(0.0);
 }
 

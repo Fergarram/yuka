@@ -12,9 +12,7 @@
 
 use std::ffi::{c_void, CString};
 
-use crate::camera::{self, Camera};
 use crate::cursor::{self, Cursor};
-use crate::ray;
 use crate::settings::Settings;
 
 //
@@ -246,6 +244,39 @@ pub struct PadView {
     pub has_size: bool,
     pub load: i32,
     pub load_max: i32,
+}
+
+// Everything the pad did this frame, in the same shape libinput reports for a trackpad
+// it drives itself: scroll in pixels, pinch as a factor, buttons as edges and levels.
+//
+// Reported rather than applied. This module used to pan and zoom the camera directly,
+// which meant a two-finger scroll existed only as a camera mutation that had already
+// happened, and there was no value left for the caller to send to a client instead. The
+// caller now decides where it goes, exactly as it already does for libinput's version, so
+// the same scroll can reach the canvas or the window under the pointer.
+#[derive(Clone, Copy)]
+pub struct Gesture {
+    pub clicks: Clicks,
+    // Two-finger scroll, in canvas pixels. Positive is up and right, matching
+    // input::Pointer, so the caller can add the two together without thinking.
+    pub scroll_x: f32,
+    pub scroll_y: f32,
+    // Pinch factor for this frame, 1.0 for none.
+    pub pinch: f32,
+    // A two-finger double tap asked for the zoom to be reset.
+    pub reset_zoom: bool,
+}
+
+impl Default for Gesture {
+    fn default() -> Self {
+        Gesture {
+            clicks: Clicks::default(),
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            pinch: 1.0,
+            reset_zoom: false,
+        }
+    }
 }
 
 // Button edges and levels from the pad this frame, shaped like the mouse's so that
@@ -793,14 +824,34 @@ fn classify_fingers(tp: &mut Touchpad, set: &Settings) {
 // The finger that should drive the cursor: the earliest one that is not parked, so a
 // thumb already resting when you start pointing is skipped rather than followed. If
 // every finger is parked, the earliest one stands, since something has to.
-fn pointer_slot(tp: &Touchpad) -> Option<usize> {
+//
+// While the pad is being held down, a finger inside the button strip is skipped too. A
+// click-drag on a clickpad is two contacts by construction, a thumb pressing at the
+// bottom and a finger moving above it, and following the thumb means the cursor sits
+// still while you drag. The thumb is often too fresh to have been parked yet, so its
+// position is what identifies it.
+fn pointer_slot(tp: &Touchpad, set: &Settings) -> Option<usize> {
     let mut best: Option<usize> = None;
     for i in 0..MAX_SLOTS {
         if !tp.slots[i].active || tp.slots[i].resting || tp.slots[i].faint {
             continue;
         }
+        if tp.btn_down && in_button_strip(tp, i, set) {
+            continue;
+        }
         if best.map_or(true, |b| tp.slots[i].seq < tp.slots[b].seq) {
             best = Some(i);
+        }
+    }
+    // Nothing above the strip: the pressing finger is also the pointing one.
+    if best.is_none() {
+        for i in 0..MAX_SLOTS {
+            if !tp.slots[i].active || tp.slots[i].resting || tp.slots[i].faint {
+                continue;
+            }
+            if best.map_or(true, |b| tp.slots[i].seq < tp.slots[b].seq) {
+                best = Some(i);
+            }
         }
     }
     if best.is_some() {
@@ -815,6 +866,15 @@ fn pointer_slot(tp: &Touchpad) -> Option<usize> {
         }
     }
     fallback
+}
+
+// Whether a finger is down in the region a clickpad's software buttons occupy.
+fn in_button_strip(tp: &Touchpad, i: usize, set: &Settings) -> bool {
+    if !tp.software_buttons {
+        return false;
+    }
+    let fy = (tp.slots[i].y as f32 - tp.y_min) / tp.y_span;
+    fy >= 1.0 - set.button_strip
 }
 
 // Which button a press on the pad's single button counts as. On hardware with real
@@ -858,27 +918,25 @@ fn press_is_right(tp: &Touchpad, set: &Settings) -> bool {
     right
 }
 
-// Drain trackpad events and apply gestures: one finger moves the pointer, two
-// fingers pan/zoom (only when gestures_enabled, i.e. no window focused).
-// Returns this frame's button edges and levels for the caller to route as clicks.
+// Drain the trackpad and report what the fingers did: one finger moves the cursor, two
+// fingers scroll or pinch. The cursor is still moved here, because it is ours to move and
+// nothing else wants a say; the scroll and the pinch are handed back for the caller to
+// route.
+// pointer_only: treat every finger as a pointing finger rather than a gesture. The caller
+// sets it while Super is held, which is window manipulation and never a scroll, and it is
+// also true whenever the pad's own button is down, since dragging is not scrolling.
 pub fn update(
     tp: &mut Touchpad,
-    cam: &mut Camera,
     cursor: Option<&mut Cursor>,
-    gestures_enabled: bool,
+    pointer_only: bool,
     set: &Settings,
-) -> Clicks {
+) -> Gesture {
     tp.clicks = Clicks::default();
     read_events(tp, set);
     // Levels, after the edges: held down and it is still whichever button it became.
     tp.clicks.left = tp.btn_down && !tp.right_click;
     tp.clicks.right = tp.btn_down && tp.right_click;
-    let clicks = tp.clicks;
-
-    // Cursor position is the pinch-zoom origin (screen space).
-    let screen_w = ray::screen_width() as f32;
-    let screen_h = ray::screen_height() as f32;
-    let zoom_origin = cursor.as_deref().map(cursor::pos);
+    let mut out = Gesture { clicks: tp.clicks, ..Gesture::default() };
 
     // Fingers that are actually doing something. A hand resting on the pad must not
     // make a one-finger move look like a two-finger gesture, so parked fingers are not
@@ -895,31 +953,34 @@ pub fn update(
         }
     }
 
-    // Two-finger double tap resets the zoom. read_events decided that off the
-    // event stream; all that is left is to honour it.
+    // Two-finger double tap asks for the zoom to be reset. read_events decided that off
+    // the event stream; passing it on is all that is left.
     if tp.tap_reset {
         tp.tap_reset = false;
-        if gestures_enabled {
-            camera::reset_zoom(cam, set);
-        }
+        out.reset_zoom = true;
     }
 
-    // Pointer motion. Unfocused: only a single finger drives the cursor (two
-    // fingers are gestures). Focused: the primary (first) finger always drives
-    // the cursor and extra fingers do nothing. The primary is tracked by slot so
-    // lifting a non-primary finger never jumps.
-    let do_pointer = if gestures_enabled { count == 1 } else { count >= 1 };
-    if do_pointer {
+    // Pointer motion is one finger's job: two fingers are a gesture, wherever that gesture
+    // goes, so they do not drag the cursor along with them. Except when the caller says
+    // otherwise or the pad is held down, when every finger is pointing, because a
+    // click-drag needs one contact on the button and another to move with.
+    let pointer_only = pointer_only || tp.btn_down;
+    if count == 1 || (pointer_only && count >= 1) {
         // Latch onto the original finger's slot and keep it until that finger
         // lifts; extra fingers are ignored. Adopt a new primary only once the
         // current one is up.
         // Keep the finger that is already steering, unless it lifted or has since
         // parked. Otherwise take the earliest one that is not parked.
         let primary = match tp.primary_slot {
-            Some(s) if tp.slots[s].active && !tp.slots[s].resting && !tp.slots[s].faint => {
+            Some(s)
+                if tp.slots[s].active
+                    && !tp.slots[s].resting
+                    && !tp.slots[s].faint
+                    && !(tp.btn_down && in_button_strip(tp, s, set)) =>
+            {
                 Some(s)
             }
-            _ => pointer_slot(tp),
+            _ => pointer_slot(tp, set),
         };
         if primary != tp.primary_slot {
             tp.primary_slot = primary;
@@ -964,10 +1025,24 @@ pub fn update(
         tp.prev_centroid = None;
         tp.prev_dist = None;
         tp.mode = GestureMode::None;
-        return clicks;
+        return out;
     }
     tp.prev_single = None;
     tp.primary_slot = None;
+
+    // Holding the pad, or Super: this is a drag, so nothing here becomes a scroll. The
+    // baselines are still kept current so that letting go does not start the next gesture
+    // with a jump.
+    if pointer_only {
+        tp.prev_centroid = None;
+        tp.prev_dist = None;
+        tp.mode = GestureMode::None;
+        tp.pan_ref = None;
+        tp.pan_armed = false;
+        tp.zoom_ref = None;
+        tp.zoom_armed = false;
+        return out;
+    }
 
     // Not a two-finger gesture: nothing to pan or zoom. Panning stops dead when
     // the fingers lift, no glide.
@@ -979,22 +1054,13 @@ pub fn update(
         tp.pan_armed = false;
         tp.zoom_ref = None;
         tp.zoom_armed = false;
-        return clicks;
+        return out;
     }
 
     let centroid = ((pts[0].0 + pts[1].0) * 0.5, (pts[0].1 + pts[1].1) * 0.5);
     let dx = pts[0].0 - pts[1].0;
     let dy = pts[0].1 - pts[1].1;
     let dist = (dx * dx + dy * dy).sqrt();
-
-    // Focused window: pan/zoom disabled. Keep baselines fresh so re-enabling
-    // (after unfocus) does not jump.
-    if !gestures_enabled {
-        tp.prev_centroid = Some(centroid);
-        tp.prev_dist = Some(dist);
-        tp.mode = GestureMode::None;
-        return clicks;
-    }
 
     // Pan and zoom each have to travel a minimum distance from where the gesture
     // began before they do anything: a two-finger tap, a resting hand or a hand
@@ -1065,13 +1131,12 @@ pub fn update(
 
             match tp.mode {
                 GestureMode::Pan => {
-                    // Content follows the fingers, so the view shifts opposite.
-                    let move_x = -(centroid.0 - pc.0) * set.pan_sens / cam.zoom;
-                    let move_y = -(centroid.1 - pc.1) * set.pan_sens / cam.zoom;
-                    tp.last_pan = (move_x, move_y);
+                    // In the scroll convention: positive up and right. Content follows the
+                    // fingers, which is why a finger moving down scrolls up.
+                    out.scroll_x = (centroid.0 - pc.0) * set.pan_sens;
+                    out.scroll_y = -(centroid.1 - pc.1) * set.pan_sens;
+                    tp.last_pan = (out.scroll_x, out.scroll_y);
                     tp.last_zoom = 1.0;
-                    cam.cx += move_x;
-                    cam.cy += move_y;
                 }
                 GestureMode::Zoom => {
                     let deadzone = tp.span * set.pinch_deadzone_frac;
@@ -1079,10 +1144,7 @@ pub fn update(
                     if ddist.abs() > deadzone {
                         let beyond = ddist - ddist.signum() * deadzone;
                         let ratio = (pd + beyond) / pd;
-                        let (ox, oy) = zoom_origin
-                            .map(|(x, y)| (x as f32, y as f32))
-                            .unwrap_or((screen_w * 0.5, screen_h * 0.5));
-                        camera::zoom_at(cam, ratio, ox, oy, screen_w, screen_h, set);
+                        out.pinch = ratio;
                         tp.last_zoom = ratio;
                         tp.last_pan = (0.0, 0.0);
                     }
@@ -1101,5 +1163,5 @@ pub fn update(
 
     tp.prev_centroid = Some(centroid);
     tp.prev_dist = Some(dist);
-    clicks
+    out
 }
