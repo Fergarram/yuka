@@ -6,6 +6,20 @@ TODO:
     fall back to raylib opening the card. OM_WM_CARD=raylib forces the fallback.
     Still direct: the input devices, which could go through libseat too.
 
+[ ] Add multimonitor support.
+    Needs the KMS loop to be ours: raylib's DRM platform is one connector, one
+    CRTC, one blocking modeset per frame, so two screens means owning the flips
+    (atomic commit per CRTC, page flip events, a wl_output each, hotplug on udev
+    change events). Then a decision the canvas has to answer: are two monitors two
+    viewports into one canvas, so a window crosses the bezel, or two independent
+    cameras.
+    The flip work exists in git stash (see commit d0e6ae4): it measured a 12ms
+    latency cut and felt worse three times, but item 2 alone was never tested on
+    its own. Worth checking whether the old per-frame modeset was presenting
+    immediately, i.e. tearing, since that would explain the feel and would make
+    vsync versus async flips a deliberate per-output switch rather than a
+    regression.
+
 EVENTUALLY:
 
 [x] Have a window mode for quicker development (not all devs will start in tty)
