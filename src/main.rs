@@ -13,6 +13,7 @@ mod egl;
 mod input;
 mod ray;
 mod render;
+mod settings;
 mod seat;
 mod touch;
 mod wl;
@@ -42,19 +43,9 @@ const SHOT_FRAME: u32 = 200;
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
 const BTN_MIDDLE: u32 = 0x112;
-// Invert mouse-wheel direction (Mac-natural). Config toggle for now.
-const INVERT_SCROLL: bool = true;
-// Canvas pixels panned per horizontal wheel notch, at zoom 1.0.
-const HWHEEL_PAN: f32 = 60.0;
-// Gap within which a second middle click counts as a double click.
-const DOUBLE_CLICK_MS: u32 = 400;
-// Pixels a client should scroll per wheel notch, alongside the discrete step.
-const WHEEL_STEP_PX: f32 = 15.0;
-// Sign that turns our positive-up, positive-right scroll into what a client
-// expects on the wire. Wayland counts positive as down and right, which is
-// classic scrolling; INVERT_SCROLL means Mac-natural, so it flips, and clients
-// then agree with the canvas zoom and the trackpad instead of fighting them.
-const CLIENT_SCROLL_SIGN: f32 = if INVERT_SCROLL { 1.0 } else { -1.0 };
+// How often to stat the settings file. Once a second is instant to a human hitting
+// save, and 60 stats a minute is nothing next to a frame.
+const SETTINGS_POLL_FRAMES: u32 = 60;
 // How long to sleep per iteration while another VT owns the display.
 const VT_IDLE_MS: u64 = 30;
 // Size of the window in the nested build. On DRM we take the whole screen instead.
@@ -352,21 +343,27 @@ fn release_held_keys(
 // pixel value clients expect, finger scroll sends pixels. Our sign convention is
 // positive up and right, Wayland's is positive down and right, so the vertical
 // axes flip back here.
-fn forward_scroll(state: &mut State, ptr: &input::Pointer, time_ms: u32) {
+fn forward_scroll(
+    state: &mut State,
+    ptr: &input::Pointer,
+    time_ms: u32,
+    set: &settings::Settings,
+) {
     let pointer = state.pointer.clone();
+    let scroll_sign = settings::client_scroll_sign(set);
     if ptr.wheel != 0.0 || ptr.hwheel != 0.0 {
         let mut frame = AxisFrame::new(time_ms).source(AxisSource::Wheel);
         if ptr.wheel != 0.0 {
-            let v = ptr.wheel * CLIENT_SCROLL_SIGN;
+            let v = ptr.wheel * scroll_sign;
             frame = frame
                 .v120(Axis::Vertical, (v * 120.0) as i32)
-                .value(Axis::Vertical, (v * WHEEL_STEP_PX) as f64);
+                .value(Axis::Vertical, (v * set.wheel_step_px) as f64);
         }
         if ptr.hwheel != 0.0 {
-            let h = ptr.hwheel * CLIENT_SCROLL_SIGN;
+            let h = ptr.hwheel * scroll_sign;
             frame = frame
                 .v120(Axis::Horizontal, (h * 120.0) as i32)
-                .value(Axis::Horizontal, (h * WHEEL_STEP_PX) as f64);
+                .value(Axis::Horizontal, (h * set.wheel_step_px) as f64);
         }
         pointer.axis(state, frame);
         pointer.frame(state);
@@ -374,10 +371,10 @@ fn forward_scroll(state: &mut State, ptr: &input::Pointer, time_ms: u32) {
     if ptr.scroll_x != 0.0 || ptr.scroll_y != 0.0 {
         let mut frame = AxisFrame::new(time_ms).source(AxisSource::Finger);
         if ptr.scroll_y != 0.0 {
-            frame = frame.value(Axis::Vertical, (ptr.scroll_y * CLIENT_SCROLL_SIGN) as f64);
+            frame = frame.value(Axis::Vertical, (ptr.scroll_y * scroll_sign) as f64);
         }
         if ptr.scroll_x != 0.0 {
-            frame = frame.value(Axis::Horizontal, (ptr.scroll_x * CLIENT_SCROLL_SIGN) as f64);
+            frame = frame.value(Axis::Horizontal, (ptr.scroll_x * scroll_sign) as f64);
         }
         pointer.axis(state, frame);
         pointer.frame(state);
@@ -433,6 +430,14 @@ fn main() {
         .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
         .with_writer(std::io::stderr)
         .init();
+
+    // The feel of the thing lives in a file, not in the binary: sensitivities, gesture
+    // thresholds, camera rates. Re-read while running (see SETTINGS_POLL_FRAMES), so
+    // tuning is a save from another tty rather than a rebuild.
+    let conf_path =
+        std::env::var("OM_WM_CONF").unwrap_or_else(|_| settings::DEFAULT_PATH.to_string());
+    let mut set = settings::init(&conf_path);
+    let mut conf_watch = settings::watch_new(&conf_path);
 
     // Nested build: om_wm is a client of another compositor, which owns the display
     // and the input devices. Everything that reaches for hardware stays out of it, so
@@ -583,7 +588,7 @@ fn main() {
 
     let mut windows = render::windows_new();
     let mut dmabuf_cache = render::dmabuf_cache_new();
-    let mut cam = camera::camera_new();
+    let mut cam = camera::camera_new(&set);
     // The hardware cursor plane is a DRM thing; nested, the host draws the pointer.
     let mut cursor = if windowed {
         None
@@ -598,9 +603,9 @@ fn main() {
     // libinput would read the real devices even nested, so the host and om_wm would
     // both react to every key. Host input comes through raylib instead.
     let mut inp = if windowed {
-        Some(input::init_host())
+        Some(input::init_host(&set))
     } else {
-        input::init(seat.is_none())
+        input::init(seat.is_none(), &set)
     };
 
     // Nothing to drive us: no device opened, or no libinput at all. Carrying on from
@@ -708,7 +713,7 @@ fn main() {
                         input::resume(i);
                     }
                     if let Some(tp) = touchpad.as_mut() {
-                        touch::reset(tp);
+                        touch::reset(tp, &set);
                     }
                     last = Instant::now();
                     println!("om_wm: back on vt{}", seat::our_vt(s));
@@ -786,6 +791,22 @@ fn main() {
             input::poll(i);
         }
 
+        // Pick up an edited settings file. Every value is read where it is used, per
+        // event or per frame, so a save lands on the next frame with no further work.
+        // Super+R reloads on demand, for when you want to know that it took.
+        let forced = inp
+            .as_ref()
+            .map(|i| {
+                input::super_down(i)
+                    && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_R)
+            })
+            .unwrap_or(false);
+        if forced {
+            settings::reload(&mut conf_watch, &mut set);
+        } else if frame % SETTINGS_POLL_FRAMES == 0 {
+            settings::reload_if_changed(&mut conf_watch, &mut set);
+        }
+
         // Quit chord (ctrl+alt+backspace, the traditional one). While we hold the
         // keyboard grab, ctrl+c in the shell that launched us cannot reach it, so
         // without this there is no way to stop om_wm from the keyboard at all.
@@ -821,7 +842,10 @@ fn main() {
             if let Some(tp) = touchpad.as_mut() {
                 touch::close(tp);
             }
-            touchpad = inp.as_ref().and_then(input::trackpad_node).and_then(touch::open);
+            touchpad = inp
+                .as_ref()
+                .and_then(input::trackpad_node)
+                .and_then(|node| touch::open(&node, &set));
         }
 
         let super_down = inp.as_ref().map(input::super_down).unwrap_or(false);
@@ -834,6 +858,7 @@ fn main() {
                 &mut cam,
                 cursor.as_mut(),
                 gestures_enabled && !super_down,
+                &set,
             ),
             None => touch::Clicks::default(),
         };
@@ -901,7 +926,7 @@ fn main() {
         let mut reset_click = false;
         if ptr.middle_pressed {
             let now_ms = start.elapsed().as_millis() as u32;
-            if super_down && now_ms.saturating_sub(last_middle_ms) <= DOUBLE_CLICK_MS {
+            if super_down && now_ms.saturating_sub(last_middle_ms) <= set.double_click_ms {
                 reset_click = true;
                 // Consumed, so a third click does not reset again.
                 last_middle_ms = 0;
@@ -919,9 +944,10 @@ fn main() {
                 cyp as f32,
                 ray::screen_width() as f32,
                 ray::screen_height() as f32,
+                &set,
             );
         } else if reset_key {
-            camera::reset_zoom(&mut cam);
+            camera::reset_zoom(&mut cam, &set);
         }
 
         // Wheel and middle-drag belong either to a client or to the canvas, never
@@ -932,7 +958,7 @@ fn main() {
         if !pointer_on_client {
             let (cxp, cyp) = pointer_xy.unwrap_or((0, 0));
             if ptr.wheel != 0.0 {
-                let wheel = if INVERT_SCROLL { -ptr.wheel } else { ptr.wheel };
+                let wheel = if set.invert_scroll { -ptr.wheel } else { ptr.wheel };
                 camera::zoom_at(
                     &mut cam,
                     1.15_f32.powf(wheel),
@@ -940,11 +966,12 @@ fn main() {
                     cyp as f32,
                     ray::screen_width() as f32,
                     ray::screen_height() as f32,
+                    &set,
                 );
             }
             if ptr.hwheel != 0.0 {
-                let hwheel = if INVERT_SCROLL { -ptr.hwheel } else { ptr.hwheel };
-                cam.cx += hwheel * HWHEEL_PAN / cam.zoom;
+                let hwheel = if set.invert_scroll { -ptr.hwheel } else { ptr.hwheel };
+                cam.cx += hwheel * set.hwheel_pan / cam.zoom;
             }
             // Finger scroll pans, pinch zooms at the cursor. The camera moves
             // against the fingers so the canvas travels with them, matching
@@ -961,12 +988,13 @@ fn main() {
                     cyp as f32,
                     ray::screen_width() as f32,
                     ray::screen_height() as f32,
+                    &set,
                 );
             }
         }
 
         if gestures_enabled {
-            camera::camera_update(&mut cam, inp.as_ref());
+            camera::camera_update(&mut cam, inp.as_ref(), &set);
         }
 
         // The view lands on whole pixels every frame, whatever moved it: keys, wheel,
@@ -980,7 +1008,7 @@ fn main() {
 
         render::prune_dead(&mut windows);
         render::animate(&mut windows, ray::frame_time());
-        let cam3d = camera::camera_3d(&cam, ray::screen_height());
+        let cam3d = camera::camera_3d(&cam, ray::screen_height(), &set);
         // Menus and subsurfaces are anchored to their parent, so they are placed
         // before anything is hit tested or drawn.
         render::sync_children(&mut windows);
@@ -1090,7 +1118,7 @@ fn main() {
         );
         let time_ms = start.elapsed().as_millis() as u32;
         if pointer_on_client {
-            forward_scroll(&mut state, &ptr, time_ms);
+            forward_scroll(&mut state, &ptr, time_ms, &set);
         }
         if let Some(i) = inp.as_ref() {
             forward_keys(&mut state, i, time_ms);
@@ -1105,7 +1133,7 @@ fn main() {
         if debug_pad {
             if let Some(tp) = touchpad.as_ref() {
                 render::draw_pad_debug(
-                    &touch::view(tp),
+                    &touch::view(tp, &set),
                     ray::screen_width(),
                     ray::screen_height(),
                 );

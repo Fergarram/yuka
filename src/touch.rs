@@ -15,6 +15,7 @@ use std::ffi::{c_void, CString};
 use crate::camera::{self, Camera};
 use crate::cursor::{self, Cursor};
 use crate::ray;
+use crate::settings::Settings;
 
 //
 // Constants (evdev)
@@ -40,12 +41,10 @@ const MAX_SLOTS: usize = 16;
 // Feel (these are the natural home for future config settings):
 // canvas pixels panned per trackpad device unit at zoom 1.0. Divided by zoom so
 // panning feels the same at any scale.
-const PAN_SENS: f32 = 0.12;
 // A two-finger gesture is pan OR zoom at any instant, never both. The active
 // mode is sticky and switches only when the other motion dominates by this
 // factor (hysteresis), so pan and zoom stay clean but interchange fluidly
 // without lifting.
-const MODE_BIAS: f32 = 1.6;
 
 // Distance thresholds are fractions of the shorter axis of the device's
 // coordinate span, since trackpads report no physical resolution and their units
@@ -58,41 +57,30 @@ const MODE_BIAS: f32 = 1.6;
 // How far the fingers must travel before a two-finger gesture pans at all. It
 // doubles as the drift a contact may have and still count as a tap, so a contact
 // either pans or stays eligible as a tap, never both.
-const MOVE_START_FRAC: f32 = 0.012; // ~81 units, ~0.9 mm
 // How much the finger distance must change, in total from where the gesture
 // began, before a pinch zooms at all. Below this the gesture is a tap, a resting
 // hand or a pan, none of which should nudge the zoom.
-const PINCH_START_FRAC: f32 = 0.02; // ~135 units, ~1.5 mm
 // Minimum per-frame motion before pan-versus-zoom dominance is judged.
-const MODE_EPS_FRAC: f32 = 0.0015; // ~10 units
 // Per-frame pinch jitter ignored once armed.
-const PINCH_DEADZONE_FRAC: f32 = 0.0005; // ~3 units
 // Used when a device does not report its axis ranges at all.
 const SPAN_FALLBACK: f32 = 6750.0;
 // Two-finger tap: how long the fingers may stay down for a contact to count as a
-// tap (how far they may travel is MOVE_START_FRAC), and how long after one tap a
+// tap (how far they may travel is move_start_frac), and how long after one tap a
 // second one still makes a double tap. Timed off the device's own event clock, so
 // frame rate does not enter into it.
-const TAP_MAX_SECS: f64 = 0.25;
-const DOUBLE_TAP_SECS: f64 = 0.4;
 // Far enough in the past that no tap chains off it.
 const TAP_NEVER: f64 = -1000.0;
 // One-finger pointer motion: screen pixels moved per trackpad device unit.
-const POINTER_SENS: f32 = 0.25;
 
 // How far a finger has to travel before it moves the cursor at all, as a fraction of
 // the pad. A finger landing rolls and spreads, and pressing the pad down slides it, so
 // without this the cursor drifts off target in the moment before a click lands.
-const POINTER_START_FRAC: f32 = 0.008; // ~54 units, ~0.6 mm
 // And how long after a press the cursor stays parked regardless, for the roll as the
 // finger takes the pad's travel. Longer than this and a click-drag would feel stuck.
-const PRESS_FREEZE_SECS: f64 = 0.12;
 
 // Software button strip on a clickpad: the bottom third of the surface, split in half.
 // A click with a finger in the right half of that strip is a right click, everything
 // else is a left click. Only used on hardware that has no buttons of its own.
-const BUTTON_STRIP: f32 = 1.0 / 3.0;
-const BUTTON_SPLIT: f32 = 0.5;
 
 //
 // Types
@@ -131,7 +119,7 @@ pub struct Touchpad {
     y_min: f32,
     y_span: f32,
     // True when this device has no buttons of its own and we have to make them out of
-    // regions (see BUTTON_STRIP). Read from the kernel at open, not guessed.
+    // regions (see button_strip). Read from the kernel at open, not guessed.
     software_buttons: bool,
     slots: [Slot; MAX_SLOTS],
     cur: usize,
@@ -227,7 +215,7 @@ pub struct Clicks {
 
 // The node comes from libinput, which already knows which device is a touchpad,
 // so there is no discovery here to get wrong.
-pub fn open(path: &str) -> Option<Touchpad> {
+pub fn open(path: &str, set: &Settings) -> Option<Touchpad> {
     let c = CString::new(path).ok()?;
     let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
     if fd < 0 {
@@ -254,8 +242,8 @@ pub fn open(path: &str) -> Option<Touchpad> {
     let software_buttons = buttonpad && !has_right;
     println!(
         "om_wm: touchpad {path} (span {span:.0}: pan/tap {:.0}, pinch {:.0} units)",
-        span * MOVE_START_FRAC,
-        span * PINCH_START_FRAC
+        span * set.move_start_frac,
+        span * set.pinch_start_frac
     );
     println!(
         "om_wm: touchpad buttons: {}",
@@ -381,8 +369,8 @@ pub fn close(tp: &mut Touchpad) {
 
 // Drain queued events and forget all finger/gesture state, so returning from
 // another VT does not replay a stale gesture into the camera.
-pub fn reset(tp: &mut Touchpad) {
-    read_events(tp);
+pub fn reset(tp: &mut Touchpad, set: &Settings) {
+    read_events(tp, set);
     tp.slots = [Slot { active: false, x: 0, y: 0, start_x: 0, start_y: 0, start_set: false }; MAX_SLOTS];
     tp.cur = 0;
     tp.prev_centroid = None;
@@ -411,7 +399,7 @@ pub fn reset(tp: &mut Touchpad) {
 
 // A snapshot for the debug overlay. Fractions of the surface rather than device units,
 // so the drawing code needs to know nothing about this model of trackpad.
-pub fn view(tp: &Touchpad) -> PadView {
+pub fn view(tp: &Touchpad, set: &Settings) -> PadView {
     let mut fingers = [(0.0f32, 0.0f32); MAX_SLOTS];
     let mut count = 0;
     for slot in &tp.slots {
@@ -438,8 +426,8 @@ pub fn view(tp: &Touchpad) -> PadView {
         zoom_armed: tp.zoom_armed,
         ptr_armed: tp.ptr_armed,
         software_buttons: tp.software_buttons,
-        strip: BUTTON_STRIP,
-        split: BUTTON_SPLIT,
+        strip: set.button_strip,
+        split: set.button_split,
         aspect: tp.x_span / tp.y_span,
         pan: tp.last_pan,
         zoom: tp.last_zoom,
@@ -457,10 +445,10 @@ pub fn view(tp: &Touchpad) -> PadView {
 // read_events drains the whole queue at once: a tap that starts and finishes
 // between two frames leaves no frame where two fingers look down, so a snapshot
 // never sees it at all.
-fn end_contact(tp: &mut Touchpad, time: f64) {
+fn end_contact(tp: &mut Touchpad, time: f64, set: &Settings) {
     let held = time - tp.contact_start;
-    let quick = held <= TAP_MAX_SECS;
-    let still = tp.contact_moved <= tp.span * MOVE_START_FRAC;
+    let quick = held <= set.tap_max_secs;
+    let still = tp.contact_moved <= tp.span * set.move_start_frac;
     let tap = tp.contact_max == 2 && quick && still;
     if tp.debug_taps {
         eprintln!(
@@ -468,15 +456,15 @@ fn end_contact(tp: &mut Touchpad, time: f64) {
             tp.contact_max,
             held * 1000.0,
             tp.contact_moved,
-            TAP_MAX_SECS * 1000.0,
-            tp.span * MOVE_START_FRAC,
+            set.tap_max_secs * 1000.0,
+            tp.span * set.move_start_frac,
             (time - tp.last_tap) * 1000.0
         );
     }
     if !tap {
         return;
     }
-    if time - tp.last_tap <= DOUBLE_TAP_SECS {
+    if time - tp.last_tap <= set.double_tap_secs {
         tp.tap_reset = true;
         // Consumed, so a third tap does not reset again.
         tp.last_tap = TAP_NEVER;
@@ -489,7 +477,7 @@ fn end_contact(tp: &mut Touchpad, time: f64) {
 // Update
 //
 
-fn read_events(tp: &mut Touchpad) {
+fn read_events(tp: &mut Touchpad, set: &Settings) {
     let mut buf = [0u8; EVENT_SIZE];
     loop {
         let n = unsafe {
@@ -539,7 +527,7 @@ fn read_events(tp: &mut Touchpad) {
                 if was && !now {
                     tp.down = tp.down.saturating_sub(1);
                     if tp.down == 0 {
-                        end_contact(tp, time);
+                        end_contact(tp, time, set);
                     }
                 }
             }
@@ -575,7 +563,7 @@ fn read_events(tp: &mut Touchpad) {
                 tp.ptr_armed = false;
                 if value == 1 {
                     tp.btn_down = true;
-                    tp.right_click = press_is_right(tp);
+                    tp.right_click = press_is_right(tp, set);
                     if tp.right_click {
                         tp.clicks.right_pressed = true;
                     } else {
@@ -611,7 +599,7 @@ fn read_events(tp: &mut Touchpad) {
 // decides: the lowest one on the surface, since with a second finger resting higher up
 // it is the low one that is on the button. In the right half of the bottom strip it is a
 // right click, anywhere else a left one.
-fn press_is_right(tp: &Touchpad) -> bool {
+fn press_is_right(tp: &Touchpad, set: &Settings) -> bool {
     if !tp.software_buttons {
         return false;
     }
@@ -627,7 +615,7 @@ fn press_is_right(tp: &Touchpad) -> bool {
     };
     let fy = (y as f32 - tp.y_min) / tp.y_span;
     let fx = (x as f32 - tp.x_min) / tp.x_span;
-    let right = fy >= 1.0 - BUTTON_STRIP && fx >= BUTTON_SPLIT;
+    let right = fy >= 1.0 - set.button_strip && fx >= set.button_split;
     if tp.debug_taps {
         eprintln!(
             "om_wm: touchpad click at {fx:.2},{fy:.2} of the surface -> {}",
@@ -645,9 +633,10 @@ pub fn update(
     cam: &mut Camera,
     cursor: Option<&mut Cursor>,
     gestures_enabled: bool,
+    set: &Settings,
 ) -> Clicks {
     tp.clicks = Clicks::default();
-    read_events(tp);
+    read_events(tp, set);
     // Levels, after the edges: held down and it is still whichever button it became.
     tp.clicks.left = tp.btn_down && !tp.right_click;
     tp.clicks.right = tp.btn_down && tp.right_click;
@@ -674,7 +663,7 @@ pub fn update(
     if tp.tap_reset {
         tp.tap_reset = false;
         if gestures_enabled {
-            camera::reset_zoom(cam);
+            camera::reset_zoom(cam, set);
         }
     }
 
@@ -708,10 +697,10 @@ pub fn update(
             // a finger settling or pushing the pad down. The freeze covers the press
             // itself, where the travel can be larger than any sane threshold.
             if !tp.ptr_armed {
-                let frozen = tp.now - tp.press_time < PRESS_FREEZE_SECS;
+                let frozen = tp.now - tp.press_time < set.press_freeze_secs;
                 if let Some((rx, ry)) = tp.ptr_ref {
                     let moved = ((fx - rx).powi(2) + (fy - ry).powi(2)).sqrt();
-                    if !frozen && moved >= tp.span * POINTER_START_FRAC {
+                    if !frozen && moved >= tp.span * set.pointer_start_frac {
                         tp.ptr_armed = true;
                         // Start from here, so arming does not jump by the threshold.
                         tp.prev_single = Some((fx, fy));
@@ -720,8 +709,8 @@ pub fn update(
             }
             if tp.ptr_armed {
                 if let (Some((px, py)), Some(cur)) = (tp.prev_single, cursor) {
-                    tp.ptr_accum_x += (fx - px) * POINTER_SENS;
-                    tp.ptr_accum_y += (fy - py) * POINTER_SENS;
+                    tp.ptr_accum_x += (fx - px) * set.pointer_sens;
+                    tp.ptr_accum_y += (fy - py) * set.pointer_sens;
                     let idx = tp.ptr_accum_x.trunc();
                     let idy = tp.ptr_accum_y.trunc();
                     tp.ptr_accum_x -= idx;
@@ -772,8 +761,8 @@ pub fn update(
     // starts from there rather than jumping by the whole threshold. The pan
     // threshold is also the drift a tap is allowed, so a contact either pans or
     // stays eligible as a tap.
-    let move_start = tp.span * MOVE_START_FRAC;
-    let pinch_start = tp.span * PINCH_START_FRAC;
+    let move_start = tp.span * set.move_start_frac;
+    let pinch_start = tp.span * set.pinch_start_frac;
     match tp.pan_ref {
         None => {
             tp.pan_ref = Some(centroid);
@@ -808,13 +797,13 @@ pub fn update(
 
             // Pick the dominant intent, with hysteresis: only switch out of the
             // current mode when the other motion clearly leads.
-            let mode_eps = tp.span * MODE_EPS_FRAC;
+            let mode_eps = tp.span * set.mode_eps_frac;
             let want_zoom = tp.zoom_armed
                 && zoom_delta > mode_eps
-                && zoom_delta > pan_delta * MODE_BIAS;
+                && zoom_delta > pan_delta * set.mode_bias;
             let want_pan = tp.pan_armed
                 && pan_delta > mode_eps
-                && pan_delta > zoom_delta * MODE_BIAS;
+                && pan_delta > zoom_delta * set.mode_bias;
             tp.mode = match tp.mode {
                 GestureMode::Pan => {
                     if want_zoom { GestureMode::Zoom } else { GestureMode::Pan }
@@ -836,15 +825,15 @@ pub fn update(
             match tp.mode {
                 GestureMode::Pan => {
                     // Content follows the fingers, so the view shifts opposite.
-                    let move_x = -(centroid.0 - pc.0) * PAN_SENS / cam.zoom;
-                    let move_y = -(centroid.1 - pc.1) * PAN_SENS / cam.zoom;
+                    let move_x = -(centroid.0 - pc.0) * set.pan_sens / cam.zoom;
+                    let move_y = -(centroid.1 - pc.1) * set.pan_sens / cam.zoom;
                     tp.last_pan = (move_x, move_y);
                     tp.last_zoom = 1.0;
                     cam.cx += move_x;
                     cam.cy += move_y;
                 }
                 GestureMode::Zoom => {
-                    let deadzone = tp.span * PINCH_DEADZONE_FRAC;
+                    let deadzone = tp.span * set.pinch_deadzone_frac;
                     let ddist = dist - pd;
                     if ddist.abs() > deadzone {
                         let beyond = ddist - ddist.signum() * deadzone;
@@ -852,7 +841,7 @@ pub fn update(
                         let (ox, oy) = zoom_origin
                             .map(|(x, y)| (x as f32, y as f32))
                             .unwrap_or((screen_w * 0.5, screen_h * 0.5));
-                        camera::zoom_at(cam, ratio, ox, oy, screen_w, screen_h);
+                        camera::zoom_at(cam, ratio, ox, oy, screen_w, screen_h, set);
                         tp.last_zoom = ratio;
                         tp.last_pan = (0.0, 0.0);
                     }

@@ -9,18 +9,13 @@
 
 use crate::input::{self, Input};
 use crate::ray;
+use crate::settings::Settings;
 
 //
 // Constants
 //
 
-const PAN_PX_PER_SEC: f32 = 900.0;
-const ZOOM_RATE_PER_SEC: f32 = 2.0;
-const ZOOM_DEFAULT: f32 = 1.0;
-const ZOOM_MIN: f32 = 0.1;
-const ZOOM_MAX: f32 = 8.0;
 // Perspective field of view (degrees). Larger = more depth/parallax on lift.
-const FOV_DEG: f32 = 40.0;
 
 //
 // Types
@@ -38,32 +33,32 @@ pub struct Camera {
 // Functions
 //
 
-pub fn camera_new() -> Camera {
+pub fn camera_new(set: &Settings) -> Camera {
     // Start at native scale, framed on the first window's row.
-    Camera { cx: 400.0, cy: 220.0, zoom: ZOOM_DEFAULT }
+    Camera { cx: 400.0, cy: 220.0, zoom: set.zoom_default }
 }
 
 // Back to 1:1. The canvas point at the screen center stays put, so the view
 // scales around whatever you were looking at.
-pub fn reset_zoom(cam: &mut Camera) {
-    cam.zoom = ZOOM_DEFAULT;
+pub fn reset_zoom(cam: &mut Camera, set: &Settings) {
+    cam.zoom = set.zoom_default;
 }
 
 // Back to 1:1 around a screen point, so the canvas under that point stays put.
-pub fn reset_zoom_at(cam: &mut Camera, sx: f32, sy: f32, sw: f32, sh: f32) {
-    zoom_at(cam, ZOOM_DEFAULT / cam.zoom, sx, sy, sw, sh);
+pub fn reset_zoom_at(cam: &mut Camera, sx: f32, sy: f32, sw: f32, sh: f32, set: &Settings) {
+    zoom_at(cam, set.zoom_default / cam.zoom, sx, sy, sw, sh, set);
 }
 
 // Advance the camera from held keys. Pan speed is constant in screen pixels, so
 // it feels the same at any zoom; zoom is exponential and keeps the screen center
 // fixed.
-pub fn camera_update(cam: &mut Camera, kb: Option<&Input>) {
+pub fn camera_update(cam: &mut Camera, kb: Option<&Input>, set: &Settings) {
     let Some(kb) = kb else {
         return;
     };
     let dt = ray::frame_time();
 
-    let pan = PAN_PX_PER_SEC * dt / cam.zoom;
+    let pan = set.pan_px_per_sec * dt / cam.zoom;
     if input::down(kb, input::KEY_W) {
         cam.cy -= pan;
     }
@@ -82,24 +77,24 @@ pub fn camera_update(cam: &mut Camera, kb: Option<&Input>) {
             input::down(kb, input::KEY_EQUAL) || input::down(kb, input::KEY_KPPLUS);
         let zoom_out =
             input::down(kb, input::KEY_MINUS) || input::down(kb, input::KEY_KPMINUS);
-        let step = 1.0 + ZOOM_RATE_PER_SEC * dt;
+        let step = 1.0 + set.zoom_rate_per_sec * dt;
         if zoom_in {
             cam.zoom *= step;
         }
         if zoom_out {
             cam.zoom /= step;
         }
-        cam.zoom = cam.zoom.clamp(ZOOM_MIN, ZOOM_MAX);
+        cam.zoom = cam.zoom.clamp(set.zoom_min, set.zoom_max);
     }
 }
 
 // Zoom by `factor` while keeping the canvas point currently under the screen
 // pixel (sx, sy) fixed there. Used for cursor-anchored pinch zoom.
-pub fn zoom_at(cam: &mut Camera, factor: f32, sx: f32, sy: f32, sw: f32, sh: f32) {
+pub fn zoom_at(cam: &mut Camera, factor: f32, sx: f32, sy: f32, sw: f32, sh: f32, set: &Settings) {
     // Canvas point under (sx, sy) at the current zoom.
     let px = cam.cx + (sx - sw * 0.5) / cam.zoom;
     let py = cam.cy + (sy - sh * 0.5) / cam.zoom;
-    cam.zoom = (cam.zoom * factor).clamp(ZOOM_MIN, ZOOM_MAX);
+    cam.zoom = (cam.zoom * factor).clamp(set.zoom_min, set.zoom_max);
     // Re-center so that point stays under (sx, sy).
     cam.cx = px - (sx - sw * 0.5) / cam.zoom;
     cam.cy = py - (sy - sh * 0.5) / cam.zoom;
@@ -137,14 +132,14 @@ pub fn snap_pan(cam: &mut Camera, sw: f32, sh: f32) {
 // Viewing from -z with up = -y makes world x run rightward and y downward on
 // screen, matching canvas coordinates directly (no mirror). Windows lift toward
 // the viewer along -z.
-pub fn camera_3d(cam: &Camera, screen_h: i32) -> ray::Camera3D {
-    let half = (FOV_DEG * 0.5).to_radians();
+pub fn camera_3d(cam: &Camera, screen_h: i32, set: &Settings) -> ray::Camera3D {
+    let half = (set.fov_deg * 0.5).to_radians();
     let dist = screen_h as f32 / (2.0 * cam.zoom * half.tan());
     ray::Camera3D {
         position: ray::Vector3 { x: cam.cx, y: cam.cy, z: -dist },
         target: ray::Vector3 { x: cam.cx, y: cam.cy, z: 0.0 },
         up: ray::Vector3 { x: 0.0, y: -1.0, z: 0.0 },
-        fovy: FOV_DEG,
+        fovy: set.fov_deg,
         projection: ray::CAMERA_PERSPECTIVE,
     }
 }

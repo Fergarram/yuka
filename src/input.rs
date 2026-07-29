@@ -11,7 +11,7 @@
 // libinput deliberately hides touchpad slots behind pointer motion, scroll and
 // discrete pinch/swipe gestures, so the canvas feel (continuous simultaneous pan
 // and zoom, with hysteresis and momentum) cannot be rebuilt from it faithfully.
-// TRACKPAD_MODE picks which side drives it. In Custom mode we mute the trackpad
+// trackpad_mode in the settings file picks which side drives it. In Custom mode we mute the trackpad
 // inside libinput with config_send_events_set_mode(DISABLED) and read the raw
 // device ourselves in touch.rs, which works because we no longer grab anything:
 // libinput holds the node open, we read the same node, and only libinput's
@@ -43,15 +43,7 @@ use input::event::{EventTrait, GestureEvent};
 use input::{Device, DeviceCapability, Event, Libinput, LibinputInterface, SendEventsMode};
 
 use crate::ray;
-
-//
-// Settings
-//
-
-// Which code drives the trackpad. Custom is our raw evdev gesture path
-// (touch.rs); Libinput takes its pointer, scroll and pinch events instead.
-// Runtime switching later only has to write Input::mode.
-const TRACKPAD_MODE: TrackpadMode = TrackpadMode::Custom;
+use crate::settings::Settings;
 
 //
 // Constants
@@ -72,6 +64,7 @@ pub const KEY_BACKSPACE: u16 = 14;
 pub const KEY_W: u16 = 17;
 pub const KEY_I: u16 = 23;
 pub const KEY_P: u16 = 25;
+pub const KEY_R: u16 = 19;
 pub const KEY_LEFTCTRL: u16 = 29;
 pub const KEY_A: u16 = 30;
 pub const KEY_S: u16 = 31;
@@ -99,8 +92,9 @@ const BTN_MIDDLE: u32 = 0x112;
 // Types
 //
 
-// A settings value: the arm that is not selected by TRACKPAD_MODE is unused by
-// construction, which is not dead code.
+// Which code drives the trackpad, from the settings file. Custom is our raw evdev
+// gesture path (touch.rs); Libinput takes its pointer, scroll and pinch events instead.
+// The arm that is not selected is unused by construction, which is not dead code.
 #[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq)]
 pub enum TrackpadMode {
@@ -262,7 +256,7 @@ fn byte_bit(bits: &[u8], bit: u16) -> bool {
 // Open
 //
 
-pub fn init(grab: bool) -> Option<Input> {
+pub fn init(grab: bool, set: &Settings) -> Option<Input> {
     let seat = std::env::var("XDG_SEAT").unwrap_or_else(|_| "seat0".to_string());
     let mut li = Libinput::new_with_udev(Interface { grab_keyboards: grab });
     if li.udev_assign_seat(&seat).is_err() {
@@ -272,7 +266,7 @@ pub fn init(grab: bool) -> Option<Input> {
     let mut inp = Input {
         li: Some(li),
         host_keys: Vec::new(),
-        mode: TRACKPAD_MODE,
+        mode: set.trackpad_mode,
         keys: vec![false; KEY_ARRAY],
         events: Vec::new(),
         pointer: Pointer::default(),
@@ -310,7 +304,7 @@ pub fn init(grab: bool) -> Option<Input> {
 // The nested build's input: no devices of our own, just what the host reports
 // through raylib. GLFW's scancodes give us the evdev code for every key it knows, so
 // nothing downstream needs a translation table.
-pub fn init_host() -> Input {
+pub fn init_host(set: &Settings) -> Input {
     let mut host_keys: Vec<(i32, u16)> = Vec::new();
     // GLFW key codes run from space (32) to the last modifier (348).
     for key in 32..=348 {
@@ -324,7 +318,7 @@ pub fn init_host() -> Input {
     Input {
         li: None,
         host_keys,
-        mode: TrackpadMode::Libinput,
+        mode: set.trackpad_mode,
         keys: vec![false; KEY_ARRAY],
         events: Vec::new(),
         pointer: Pointer::default(),
