@@ -311,10 +311,13 @@ pub fn window_at(
         let local_x = cx - windows.canvas_x[i];
         let local_y = cy - windows.canvas_y[i];
         if state::input_region_contains(&windows.surface[i], local_x, local_y) {
+            // Same keys as the draw pass, in the same order, or the thing you click is
+            // not the thing on top: stack order first, then z within that stack entry,
+            // then the later slot, which is what a stable sort draws last.
             let nearer = |b: usize| {
-                windows.z[i] < windows.z[b]
-                    || (windows.z[i] == windows.z[b]
-                        && windows.order[i] >= windows.order[b])
+                windows.order[i] > windows.order[b]
+                    || (windows.order[i] == windows.order[b]
+                        && windows.z[i] <= windows.z[b])
             };
             if best.map_or(true, nearer) {
                 best = Some(i);
@@ -349,6 +352,26 @@ pub fn set_window_center(windows: &mut Windows, surface: &WlSurface, cx: f32, cy
     if let Some(i) = index_of(windows, surface) {
         windows.canvas_x[i] = cx - windows.geo_w[i] * 0.5 - windows.geo_x[i];
         windows.canvas_y[i] = cy - windows.geo_h[i] * 0.5 - windows.geo_y[i];
+    }
+}
+
+// Where a window's visible top-left sits on the canvas, geometry offset included: what a
+// resize that drags a near edge has to hold still, and what a move has to offset from.
+pub fn window_origin(windows: &Windows, surface: &WlSurface) -> Option<(f32, f32)> {
+    index_of(windows, surface).map(|i| {
+        (
+            windows.canvas_x[i] + windows.geo_x[i],
+            windows.canvas_y[i] + windows.geo_y[i],
+        )
+    })
+}
+
+// Put that visible top-left at a canvas position, which is not the same as setting the
+// surface position: a client's geometry offset sits between the two.
+pub fn set_window_origin(windows: &mut Windows, surface: &WlSurface, x: f32, y: f32) {
+    if let Some(i) = index_of(windows, surface) {
+        windows.canvas_x[i] = x - windows.geo_x[i];
+        windows.canvas_y[i] = y - windows.geo_y[i];
     }
 }
 
@@ -543,6 +566,24 @@ pub fn draw_debug_labels(windows: &Windows, cam3d: ray::Camera3D, zoom: f32, ani
             ray::draw_text(line, anchor.x as i32, top + line_h * n as i32, size, fg);
         }
     }
+}
+
+// Which mode is in force, top centre, always drawn. A modal design has to say which mode
+// it is in: the two differ in who gets your clicks, and finding that out by clicking is
+// the wrong way round. Colour carries it as much as the word, for reading at a glance.
+pub fn draw_mode_badge(label: &str, canvas: bool, screen_w: i32) {
+    const TEXT: i32 = 14;
+    const PAD: i32 = 6;
+    let bg = ray::Color { r: 12, g: 12, b: 16, a: 190 };
+    let fg = if canvas {
+        ray::Color { r: 140, g: 200, b: 250, a: 255 }
+    } else {
+        ray::Color { r: 250, g: 200, b: 130, a: 255 }
+    };
+    let w = ray::measure_text(label, TEXT);
+    let x = (screen_w - w) / 2;
+    ray::draw_rectangle(x - PAD, 0, w + PAD * 2, TEXT + PAD * 2, bg);
+    ray::draw_text(label, x, PAD, TEXT, fg);
 }
 
 // Frame timing, top left. Three numbers because one is not enough to see lag: the rate,
@@ -847,9 +888,18 @@ pub fn settle(windows: &mut Windows, surface: &WlSurface) {
 
 // Animate every window's lift toward its target.
 pub fn animate(windows: &mut Windows, dt: f32) {
+    // Snapped once it is within a hair of the target, because an asymptote never arrives.
+    // A window that had been lifted once used to keep a sliver of negative z forever,
+    // which is a sliver of "nearer the camera" that no amount of raising could undo.
+    const SETTLED: f32 = 0.01;
     let t = (LIFT_RATE * dt).min(1.0);
     for i in 0..windows.z.len() {
-        windows.z[i] += (windows.target_z[i] - windows.z[i]) * t;
+        let target = windows.target_z[i];
+        if (target - windows.z[i]).abs() < SETTLED {
+            windows.z[i] = target;
+            continue;
+        }
+        windows.z[i] += (target - windows.z[i]) * t;
     }
 }
 
@@ -1134,17 +1184,25 @@ pub fn draw_windows(
     alpha_loc: i32,
     swizzle_loc: i32,
 ) {
-    // Painter's order: the camera is on the -z side, so draw far (high z) first,
-    // near (low z) last; ties broken by stack order. Depth test is off so later
-    // draws win among equal z.
+    // Painter's order: stack order first, then z within a stack entry. Depth test is off,
+    // so what is drawn last wins.
+    //
+    // Order is the primary key because it is what identifies a window and everything
+    // hanging off it: a popup and every subsurface inherit their root's order, and z only
+    // says where they sit relative to that root, a twentieth of a unit apart. Sorting by z
+    // first meant any window that had ever been lifted floated above windows that had not,
+    // permanently, since the lift animation approaches zero without reaching it; raising
+    // another window could not help, because z decided everything and raising only changes
+    // order. Which also made a freshly mapped window appear underneath.
     let mut idx: Vec<usize> = (0..windows.surface.len())
         .filter(|&i| drawable(windows, i))
         .collect();
     idx.sort_by(|&a, &b| {
-        windows.z[b]
-            .partial_cmp(&windows.z[a])
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(windows.order[a].cmp(&windows.order[b]))
+        windows.order[a].cmp(&windows.order[b]).then(
+            windows.z[b]
+                .partial_cmp(&windows.z[a])
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
     });
 
     ray::begin_mode_3d(cam3d);

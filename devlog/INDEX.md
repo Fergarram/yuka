@@ -30,3 +30,4 @@ fabricated trackpad contacts) that is not in the tree. Those are noted.
 | 21-resize-via-configure | Super+right-drag resize: a client re-rendered at the size we asked for through xdg_toplevel.configure. Forced configure, no drag |
 | 22-fps-counter | the frame counter: rate, this frame, and the worst of the last second, coloured against the 60Hz budget |
 | 23-late-latching-fps | an experiment that was reverted: presenting by page flip instead of a modeset per frame, and composing just before the vblank. `latch 4.1 ms` is the frame being composed 4ms ahead of scanout instead of 16ms. It measured what it promised and felt worse, so it lives in a git stash rather than in the tree |
+| 24-desk-mode-badge | the mode badge, top centre: blue for desk mode where the canvas owns the pointer, amber for work mode where the client does |

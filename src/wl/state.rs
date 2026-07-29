@@ -27,7 +27,7 @@ use smithay::input::keyboard::{KeyboardHandle, XkbConfig};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::wayland_server::backend::GlobalId;
 use smithay::wayland::output::{OutputHandler, OutputManagerState};
-use smithay::input::pointer::{CursorImageStatus, PointerHandle};
+use smithay::input::pointer::{CursorImageStatus, CursorImageSurfaceData, PointerHandle};
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::utils::{Logical, Point, Serial};
 use smithay::wayland::buffer::BufferHandler;
@@ -41,6 +41,7 @@ use smithay::wayland::selection::data_device::{
 };
 use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::shm::with_buffer_contents;
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge;
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface,
     XdgShellHandler, XdgShellState,
@@ -108,6 +109,14 @@ pub struct State {
     // wl_buffers destroyed by clients; the render side evicts their cached
     // EGLImages. Drained each frame.
     pub dead_dmabufs: Vec<ObjectId>,
+    // The cursor a client asked for, from wl_pointer.set_cursor. Read each frame by the
+    // cursor plane code, which decides whether to honour it.
+    pub cursor_image: CursorImageStatus,
+    // Clients asking to be moved or resized, from dragging their own titlebar or edge.
+    // Drained each frame by the canvas code, which is where a drag actually lives. The
+    // resize entries carry which edges are moving, as a direction per axis.
+    pub move_requests: Vec<WlSurface>,
+    pub resize_requests: Vec<(WlSurface, i32, i32)>,
     // The dmabuf we are currently displaying per surface, kept alive (not
     // released) so the client cannot overwrite it while we re-sample it each
     // frame. Released only when a newer buffer replaces it. shm buffers are not
@@ -233,6 +242,9 @@ pub fn init(
         popups: PopupManager::default(),
         committed: Vec::new(),
         dead_dmabufs: Vec::new(),
+        cursor_image: CursorImageStatus::default_named(),
+        move_requests: Vec::new(),
+        resize_requests: Vec::new(),
         held_dmabufs: Vec::new(),
     };
 
@@ -505,6 +517,43 @@ pub fn surface_under(
 // dimensions, stride and a pointer to the pixel data (valid only for the call),
 // then release the buffer and clear the pending assignment. Returns true when a
 // shm buffer was handled.
+// Read a cursor surface's pixels without consuming them. A cursor surface is committed
+// like any other, but it is not a window: nothing else in om_wm will take its buffer, and
+// the buffer has to stay put because a cursor is uploaded again every time it moves shape
+// rather than every frame. So this borrows the current buffer and leaves it attached.
+pub fn with_cursor_pixels<F>(surface: &WlSurface, mut f: F) -> bool
+where
+    F: FnMut(i32, i32, i32, *const u8),
+{
+    with_states(surface, |data| {
+        let mut guard = data.cached_state.get::<SurfaceAttributes>();
+        let attrs = guard.current();
+        let buffer = match &attrs.buffer {
+            Some(BufferAssignment::NewBuffer(b)) => b.clone(),
+            _ => return false,
+        };
+        with_buffer_contents(&buffer, |ptr, _len, spec| {
+            let base = unsafe { ptr.offset(spec.offset as isize) };
+            f(spec.width, spec.height, spec.stride, base);
+        })
+        .is_ok()
+    })
+}
+
+// Where in that surface the pointer actually is, as the client declared when it set the
+// cursor. Getting this wrong puts the click somewhere other than the tip of the arrow.
+pub fn cursor_hotspot(surface: &WlSurface) -> (i32, i32) {
+    with_states(surface, |data| {
+        data.data_map
+            .get::<CursorImageSurfaceData>()
+            .map(|attrs| {
+                let hotspot = attrs.lock().unwrap().hotspot;
+                (hotspot.x, hotspot.y)
+            })
+            .unwrap_or((0, 0))
+    })
+}
+
 pub fn take_shm_buffer<F>(surface: &WlSurface, mut f: F) -> bool
 where
     F: FnMut(i32, i32, i32, *const u8),
@@ -712,7 +761,12 @@ impl SeatHandler for State {
     }
 
     fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
-    fn cursor_image(&mut self, _seat: &Seat<Self>, _image: CursorImageStatus) {}
+    // What the client under the pointer wants the cursor to look like: its own surface
+    // with a hotspot, a named shape, or nothing at all. Recorded rather than acted on,
+    // because drawing it belongs to the cursor plane and this is the protocol boundary.
+    fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
+        self.cursor_image = image;
+    }
 }
 
 impl DmabufHandler for State {
@@ -738,6 +792,41 @@ impl XdgShellHandler for State {
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         surface.send_configure();
+    }
+
+    // A client asking to be moved or resized, which is what dragging its own titlebar or
+    // its own edge means: the chrome belongs to the client, the window does not, so it has
+    // to ask. Queued rather than acted on, because the drag lives in the canvas code and
+    // this is the protocol boundary; main drains these the way it drains commits.
+    fn move_request(&mut self, surface: ToplevelSurface, _seat: WlSeat, _serial: Serial) {
+        self.move_requests.push(surface.wl_surface().clone());
+    }
+
+    fn resize_request(
+        &mut self,
+        surface: ToplevelSurface,
+        _seat: WlSeat,
+        _serial: Serial,
+        edges: ResizeEdge,
+    ) {
+        // Which edges the client is dragging, as a direction per axis: 1 for the far edge
+        // (right, bottom), -1 for the near one, 0 for an axis it is not resizing. The near
+        // edges are the interesting case, since moving one has to move the window's origin
+        // as well as change its size.
+        let (ex, ey) = match edges {
+            ResizeEdge::Right => (1, 0),
+            ResizeEdge::Left => (-1, 0),
+            ResizeEdge::Bottom => (0, 1),
+            ResizeEdge::Top => (0, -1),
+            ResizeEdge::BottomRight => (1, 1),
+            ResizeEdge::BottomLeft => (-1, 1),
+            ResizeEdge::TopRight => (1, -1),
+            ResizeEdge::TopLeft => (-1, -1),
+            // None, or something added to the protocol later: treat it as the corner a
+            // Super+drag would use rather than ignoring the request.
+            _ => (1, 1),
+        };
+        self.resize_requests.push((surface.wl_surface().clone(), ex, ey));
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {

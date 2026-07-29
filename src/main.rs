@@ -25,6 +25,7 @@ use std::time::Instant;
 
 use smithay::backend::input::{Axis, AxisSource, ButtonState, KeyState};
 use smithay::input::keyboard::{FilterResult, Keycode};
+use smithay::input::pointer::CursorImageStatus;
 use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
@@ -62,6 +63,46 @@ const WINDOWED_H: i32 = 800;
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
+// Which of the two ways of working is in force. They differ in who owns the pointer,
+// which is the one decision everything else follows from.
+//
+// Desk: the canvas owns it. Pan, zoom and gestures are live, a drag moves a window and a
+// right drag resizes it, no modifier needed, and clients receive nothing at all, not
+// pointer events and not the keyboard. Windows are objects on a desk.
+//
+// Work: the client owns it. The camera is frozen, so a scroll always goes to the window
+// under the pointer, and clicks, drags, selections and typing all land in it. Windows
+// move and resize the way their own toolkit expects, through xdg_toplevel move and resize
+// requests, with Super+drag still there as the compositor-side way.
+//
+// Modal design needs to be visible, hence the badge on screen: a mode you cannot see is a
+// mode that will surprise you.
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Desk,
+    Work,
+}
+
+// A window being dragged: which one, the offset from the cursor to its origin, and whether
+// the client started it.
+//
+// Who started it decides what happens to the button release. Ours consumes it, since the
+// client never saw the press that began the drag and a release without a press is a click
+// out of nowhere. A client's own titlebar drag is the opposite: it pressed, it asked us to
+// move it through xdg_toplevel.move, and it is waiting for the release to end its own drag
+// state. Swallowing that left it stuck in the drag, with hover and cursor behaving oddly
+// until the next click gave it a fresh press and release.
+struct Drag {
+    surface: WlSurface,
+    off_x: f32,
+    off_y: f32,
+    from_client: bool,
+    // Where the cursor and the window were when the drag began, for the debug trace: the
+    // question is whether the window travels exactly as far as the cursor does.
+    start_cursor: (f32, f32),
+    start_pos: (f32, f32),
+}
+
 // An in-progress Super+right-drag resize.
 //
 // Two things happen at once, because a resize on Wayland cannot be immediate: the
@@ -80,11 +121,25 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 // committed, so a commit mid-drag changes the pixels without moving the corner.
 struct Resize {
     surface: WlSurface,
-    // Canvas point where the drag started, and the window's real size then.
+    // Canvas point where the drag started, and the window's real origin and size then.
     grab_x: f32,
     grab_y: f32,
+    from_x: f32,
+    from_y: f32,
     from_w: f32,
     from_h: f32,
+    // Which edges are moving, per axis: 1 for the far edge (right, bottom), -1 for the
+    // near one, 0 for an axis that is not being resized. A near edge moves the window's
+    // origin as well as its size, which is why the origin is remembered above. Our own
+    // Super+drag always uses the far corner; a client dragging its own edge can ask for
+    // any of them.
+    edge_x: f32,
+    edge_y: f32,
+    // Which button has to stay down for this drag to continue. Ours is the right one,
+    // since Super+right-drag is how the compositor resizes; a client dragging its own edge
+    // is holding the left one, and watching the wrong button ended those resizes on the
+    // frame after they started.
+    right_button: bool,
     // The last size we asked for, what the client was drawing when we asked, and how many
     // frames ago. Asking again is gated on the client having answered, because a
     // configure it has not caught up with yet is a re-render it will throw away.
@@ -455,14 +510,15 @@ fn forward_scroll(
 
 // Forward keyboard press/release edges to the focused window. Super+Escape is a
 // compositor shortcut (unfocus, handled in route_input) so it is not forwarded.
+// Every key edge goes to Smithay's keyboard, focus or no focus.
+//
+// It tracks the xkb state, and that state has to see the same keys the keyboard did or it
+// drifts. Skipping this while nothing was focused meant a key pressed with a window focused
+// and released after focus went away delivered its press and dropped its release, so xkb
+// went on believing the key was held. A stuck Ctrl turns typing "a" into select-all, which
+// is how this was found. Delivery is Smithay's business: with no focus it updates state and
+// sends nothing, which is exactly what desk mode wants.
 fn forward_keys(state: &mut State, kb: &input::Input, time_ms: u32) {
-    // Ask Smithay where the keyboard is pointed rather than trusting our own
-    // window focus: a popup grab moves keyboard focus to the menu, and a menu
-    // opened by right click on a window nobody clicked first would otherwise get
-    // no keys at all, so no arrows and no Escape.
-    if state.keyboard.current_focus().is_none() {
-        return;
-    }
     let keyboard = state.keyboard.clone();
     for &(code, pressed) in input::events(kb) {
         let chord = input::super_down(kb)
@@ -714,8 +770,11 @@ fn main() {
     let mut touchpad: Option<touch::Touchpad> = None;
     // The window we are interacting with; while Some, pan/zoom is disabled.
     let mut focused: Option<WlSurface> = None;
-    // Active Super+drag: (window, offset from cursor to the window's origin).
-    let mut drag: Option<(WlSurface, f32, f32)> = None;
+    // Desk to start with: the canvas is the point of the thing, and arranging comes before
+    // working in it.
+    let mut mode = Mode::Desk;
+    // A window being moved, if any.
+    let mut drag: Option<Drag> = None;
     // Active Super+right-drag resize, if any, and one released and waiting to be answered.
     let mut resize: Option<Resize> = None;
     let mut resize_settle: Option<ResizeSettle> = None;
@@ -761,6 +820,10 @@ fn main() {
     let mut slow_frames: u32 = 0;
     // Last session state we acted on, to catch activation edges from libseat.
     let mut session_active = true;
+    // What the cursor should be showing, as of the last frame, for the debug trace only.
+    let mut last_cursor_want = "crosshair";
+    // The dragged window's geometry as last seen, to notice the client changing it.
+    let mut drag_geo: Option<(f32, f32, f32, f32)> = None;
     // When the last middle button press landed, for the double click chord.
     let mut last_middle_ms: u32 = 0;
     // Surface the pointer is currently over, so crossing into another one can
@@ -843,6 +906,32 @@ fn main() {
         wl::state::prune_held(&mut state);
 
         let committed: Vec<_> = state.committed.drain(..).collect();
+        // A cursor surface commits like any other, and the window path releases the buffer
+        // of anything that is not a window so the client is not left waiting on it. That
+        // includes cursors, which is why reading the pixels later found nothing: they have
+        // to be taken here, while the buffer is still attached, and kept.
+        let cursor_surface = match &state.cursor_image {
+            CursorImageStatus::Surface(surf) => Some(surf.clone()),
+            _ => None,
+        };
+        if let (Some(surf), Some(cur)) = (cursor_surface.as_ref(), cursor.as_mut()) {
+            if committed.iter().any(|s| s == surf) {
+                let (hx, hy) = wl::state::cursor_hotspot(surf);
+                wl::state::with_cursor_pixels(surf, |w, h, stride, ptr| {
+                    if debug_input {
+                        println!(
+                            "om_wm: cursor image {w}x{h} hotspot {hx},{hy}{}",
+                            if w > 64 || h > 64 {
+                                " (larger than the 64x64 plane, cropped)"
+                            } else {
+                                ""
+                            }
+                        );
+                    }
+                    cursor::store_client_image(cur, w, h, stride, ptr, hx, hy);
+                });
+            }
+        }
         for surface in &committed {
             render::upload_committed(
                 &mut windows,
@@ -968,7 +1057,9 @@ fn main() {
             ptr.scroll_y += pad.scroll_y;
             ptr.pinch *= pad.pinch;
         }
-        let pointer_on_client = !super_down && hovered.is_some();
+        // Desk mode never hands the pointer to a client, so the canvas keeps the wheel and
+        // the scroll wherever the cursor happens to be.
+        let pointer_on_client = mode == Mode::Work && !super_down && hovered.is_some();
         if let Some(cur) = cursor.as_mut() {
             cursor::move_by(cur, ptr.dx as i32, ptr.dy as i32);
         }
@@ -982,12 +1073,42 @@ fn main() {
         };
         // Wheel-click drag also pans; moving the cursor by the same delta keeps
         // the grabbed canvas point exactly under the cursor.
-        if ptr.middle && !pointer_on_client {
+        if mode == Mode::Desk && ptr.middle && !pointer_on_client {
             cam.cx -= ptr.dx / cam.zoom;
             cam.cy -= ptr.dy / cam.zoom;
         }
         pressed |= ptr.left_pressed;
         released |= ptr.left_released;
+
+        // Super+Escape switches mode. It used to drop keyboard focus, which desk mode makes
+        // pointless (nothing is focused there) and work mode gets from clicking empty
+        // canvas, so the chord is better spent on the thing you need to reach constantly.
+        if let Some(i) = inp.as_ref() {
+            let toggle_mode = input::super_down(i)
+                && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_ESC);
+            if toggle_mode {
+                mode = match mode {
+                    Mode::Desk => Mode::Work,
+                    Mode::Work => Mode::Desk,
+                };
+                // Leaving work mode takes the keyboard and the pointer back off the
+                // clients, so nothing is left believing it still has either.
+                if mode == Mode::Desk {
+                    if focused.is_some() {
+                        let serial = SERIAL_COUNTER.next_serial();
+                        state.keyboard.clone().set_focus(&mut state, None, serial);
+                        focused = None;
+                    }
+                    hovered = None;
+                    grabbed = None;
+                    last_motion = None;
+                }
+                println!(
+                    "om_wm: {} mode",
+                    if mode == Mode::Desk { "desk" } else { "work" }
+                );
+            }
+        }
 
         // Debug labels on and off, so a run that started plain can answer a question
         // about sampling without being restarted.
@@ -1033,13 +1154,13 @@ fn main() {
             }
         }
         // A two-finger double tap on the trackpad asks for the same reset as Super+0.
-        if pad.reset_zoom && !super_down {
+        if mode == Mode::Desk && pad.reset_zoom && !super_down {
             camera::reset_zoom(&mut cam, &set);
         }
 
         // Super+0 scales around the screen center; the middle click has a cursor
         // to anchor on, so it keeps the canvas under the pointer fixed.
-        if reset_click {
+        if reset_click && mode == Mode::Desk {
             let (cxp, cyp) = pointer_xy.unwrap_or((0, 0));
             camera::reset_zoom_at(
                 &mut cam,
@@ -1049,7 +1170,7 @@ fn main() {
                 ray::screen_height() as f32,
                 &set,
             );
-        } else if reset_key {
+        } else if reset_key && mode == Mode::Desk {
             camera::reset_zoom(&mut cam, &set);
         }
 
@@ -1058,7 +1179,7 @@ fn main() {
         // before on purpose: route_input updates it later in the frame, and using
         // one value for both branches is what stops them both firing on the frame
         // the pointer crosses a window edge.
-        if !pointer_on_client {
+        if mode == Mode::Desk && !pointer_on_client {
             let (cxp, cyp) = pointer_xy.unwrap_or((0, 0));
             if ptr.wheel != 0.0 {
                 let wheel = if set.invert_scroll { -ptr.wheel } else { ptr.wheel };
@@ -1096,10 +1217,9 @@ fn main() {
             }
         }
 
-        // WASD and Super +/- drive the camera only when no window has the keyboard,
-        // since otherwise they are someone's typing. Nothing to do with the trackpad,
-        // whose scroll is routed by where the pointer is.
-        if focused.is_none() {
+        // WASD and Super +/- drive the camera only in desk mode, and only when no window
+        // has the keyboard, since otherwise they are someone's typing.
+        if mode == Mode::Desk && focused.is_none() {
             camera::camera_update(&mut cam, inp.as_ref(), &set);
         }
 
@@ -1136,7 +1256,11 @@ fn main() {
         //
         // The window's top-left stays put and the far corner follows the cursor, which
         // is the one mapping that needs no handle to grab.
-        if ptr.right_pressed && super_down && resize.is_none() {
+        // Desk mode needs no modifier: a window is an object, so dragging it moves it and
+        // right dragging it resizes it. Work mode keeps both behind Super, where they are
+        // the compositor's way rather than the client's.
+        let grab_windows = mode == Mode::Desk || super_down;
+        if ptr.right_pressed && grab_windows && resize.is_none() {
             if let Some((surf, ..)) = render::window_at(&windows, cam3d, sxp, syp) {
                 if let Some((gx, gy)) = camera::screen_to_plane(cam3d, sxp, syp, 0.0) {
                     let root = wl::state::window_root(&mut state, &surf);
@@ -1146,12 +1270,18 @@ fn main() {
                             resize_settle = None;
                         }
                         render::clear_scale(&mut windows, &root);
+                        let (ox, oy) = render::window_origin(&windows, &root).unwrap_or((0.0, 0.0));
                         resize = Some(Resize {
                             surface: root,
                             grab_x: gx,
                             grab_y: gy,
+                            from_x: ox,
+                            from_y: oy,
                             from_w: w,
                             from_h: h,
+                            edge_x: 1.0,
+                            edge_y: 1.0,
+                            right_button: true,
                             asked: (w, h),
                             seen: (w, h),
                             waited: 0,
@@ -1178,12 +1308,17 @@ fn main() {
             let ceil_w = if r.stuck_large >= RESIZE_STUCK_COMMITS { r.most_w } else { f32::MAX };
             let ceil_h = if r.stuck_large >= RESIZE_STUCK_COMMITS { r.most_h } else { f32::MAX };
             let want = camera::screen_to_plane(cam3d, sxp, syp, 0.0).map(|(px, py)| {
+                // An edge direction of zero pins that axis; -1 means the near edge is the
+                // one under the cursor, so moving it left or up makes the window bigger.
+                let dw = r.edge_x * (px - r.grab_x);
+                let dh = r.edge_y * (py - r.grab_y);
                 (
-                    (r.from_w + (px - r.grab_x)).min(ceil_w).max(floor_w.min(ceil_w)),
-                    (r.from_h + (py - r.grab_y)).min(ceil_h).max(floor_h.min(ceil_h)),
+                    (r.from_w + dw).min(ceil_w).max(floor_w.min(ceil_w)),
+                    (r.from_h + dh).min(ceil_h).max(floor_h.min(ceil_h)),
                 )
             });
-            match (ptr.right && alive, want) {
+            let held = if r.right_button { ptr.right } else { ptr.left };
+            match (held && alive, want) {
                 (true, Some((w, h))) => {
                     // The quad shows where the cursor is, scaled against whatever the
                     // client has committed so far, so its commits change the pixels
@@ -1194,6 +1329,15 @@ fn main() {
                     let (gw, gh) = render::geo_size(&windows, &r.surface).unwrap_or((w, h));
                     if set.resize_stretch {
                         render::set_scale(&mut windows, &r.surface, w / gw, h / gh);
+                    }
+                    // Dragging a near edge keeps the far one still, which means the window
+                    // has to travel as it grows. Derived from the size actually in force
+                    // rather than accumulated, so a client that clamps cannot make the
+                    // still edge drift.
+                    if r.edge_x < 0.0 || r.edge_y < 0.0 {
+                        let x = if r.edge_x < 0.0 { r.from_x + r.from_w - w } else { r.from_x };
+                        let y = if r.edge_y < 0.0 { r.from_y + r.from_h - h } else { r.from_y };
+                        render::set_window_origin(&mut windows, &r.surface, x, y);
                     }
 
                     // And keep it rendering. Asking again only when it has answered means
@@ -1268,7 +1412,7 @@ fn main() {
             }
         }
 
-        if pressed && super_down && drag.is_none() {
+        if pressed && grab_windows && drag.is_none() {
             if let Some((surf, ox, oy)) =
                 render::window_at(&windows, cam3d, sxp, syp)
             {
@@ -1278,12 +1422,40 @@ fn main() {
                 // on the z=0 plane (constant in world units, independent of z).
                 let (gx, gy) = camera::screen_to_plane(cam3d, sxp, syp, 0.0)
                     .unwrap_or((ox, oy));
-                render::raise(&mut windows, &surf);
-                drag = Some((surf, ox - gx, oy - gy));
+                // Desk mode lifts a window toward the camera, which is the canvas idiom
+                // for picking something up. Work mode is a normal compositor: raise it in
+                // the stack and leave it on the plane, so nothing about the geometry
+                // changes while you drag it.
+                if mode == Mode::Desk {
+                    render::raise(&mut windows, &surf);
+                } else {
+                    render::front(&mut windows, &surf);
+                }
+                drag = Some(Drag {
+                    surface: surf,
+                    off_x: ox - gx,
+                    off_y: oy - gy,
+                    from_client: false,
+                    start_cursor: (sxp, syp),
+                    start_pos: (ox, oy),
+                });
                 pressed = false;
             }
         }
-        if let Some((surf, offx, offy)) = drag.clone() {
+        if let Some(d) = drag.as_ref() {
+            let surf = d.surface.clone();
+            let (offx, offy, from_client) = (d.off_x, d.off_y, d.from_client);
+            let (d_start_cursor, d_start_pos) = (d.start_cursor, d.start_pos);
+            if debug_input {
+                // The client changing its own geometry mid-drag would move the window
+                // without anything here moving it, since our position is the surface's and
+                // the visible top-left is that plus the geometry offset.
+                let geo = wl::state::geometry_of(&surf);
+                if geo != drag_geo {
+                    println!("om_wm: drag geometry now {geo:?} (was {drag_geo:?})");
+                    drag_geo = geo;
+                }
+            }
             let z = render::window_z(&windows, &surf).unwrap_or(0.0);
             if let Some((px, py)) = camera::screen_to_plane(cam3d, sxp, syp, z) {
                 render::set_window_pos(&mut windows, &surf, px + offx, py + offy);
@@ -1295,12 +1467,36 @@ fn main() {
                         render::window_center(&windows, &surf),
                         render::window_z(&windows, &surf),
                     ) {
-                        settling.push((surf.clone(), cx, cy, z));
+                        // Only a lifted window has anything to come down from.
+                        if z.abs() > 0.5 {
+                            settling.push((surf.clone(), cx, cy, z));
+                        }
                     }
                 }
                 render::settle(&mut windows, &surf);
+                if debug_input {
+                    // Did the window travel as far as the cursor? On screen it should, at
+                    // any zoom: the cursor delta in canvas units is the screen delta over
+                    // the zoom, and the window moves in canvas units.
+                    let (cx0, cy0) = d_start_cursor;
+                    let (px0, py0) = d_start_pos;
+                    let now = render::surface_origin(&windows, &surf).unwrap_or((0.0, 0.0));
+                    let cursor_d = (sxp - cx0, syp - cy0);
+                    let win_d = ((now.0 - px0) * cam.zoom, (now.1 - py0) * cam.zoom);
+                    println!(
+                        "om_wm: drag end from_client={from_client} zoom {:.3} cursor moved {:.1},{:.1} window moved {:.1},{:.1} (screen px) drift {:.1},{:.1}",
+                        cam.zoom,
+                        cursor_d.0, cursor_d.1,
+                        win_d.0, win_d.1,
+                        win_d.0 - cursor_d.0, win_d.1 - cursor_d.1
+                    );
+                    drag_geo = None;
+                }
                 drag = None;
-                released = false;
+                // The client's own drag needs its release; ours must not become a click.
+                if !from_client {
+                    released = false;
+                }
             }
         }
 
@@ -1329,6 +1525,109 @@ fn main() {
             });
         }
 
+        // What clients asked for themselves: a titlebar drag is a move request, an edge
+        // drag is a resize request. Only in work mode, where the client owns the pointer;
+        // in desk mode it never saw the press that would have started one.
+        let asked_move: Vec<WlSurface> = state.move_requests.drain(..).collect();
+        let asked_resize: Vec<(WlSurface, i32, i32)> = state.resize_requests.drain(..).collect();
+        if mode == Mode::Work {
+            if let Some(surf) = asked_move.into_iter().last() {
+                if let Some((gx, gy)) = camera::screen_to_plane(cam3d, sxp, syp, 0.0) {
+                    // The surface position, not the visible top-left: the drag applies its
+                    // offset with set_window_pos, which is in surface coordinates, and a
+                    // client's geometry offset sits between the two. Mixing them moved the
+                    // window by the client's shadow padding on the first frame.
+                    if let Some((ox, oy)) = render::surface_origin(&windows, &surf) {
+                        settling.retain(|(s, ..)| s != &surf);
+                        if resize_settle.as_ref().map(|st| &st.surface) == Some(&surf) {
+                            resize_settle = None;
+                        }
+                        render::clear_scale(&mut windows, &surf);
+                        // A client-initiated move is always work mode, so no lift: just
+                        // bring it to the front the way any compositor would.
+                        render::front(&mut windows, &surf);
+                        drag = Some(Drag {
+                            surface: surf,
+                            off_x: ox - gx,
+                            off_y: oy - gy,
+                            from_client: true,
+                            start_cursor: (sxp, syp),
+                            start_pos: (ox, oy),
+                        });
+                    }
+                }
+            }
+            if let Some((surf, ex, ey)) = asked_resize.into_iter().last() {
+                if let (Some((gx, gy)), Some((w, h)), Some((ox, oy))) = (
+                    camera::screen_to_plane(cam3d, sxp, syp, 0.0),
+                    render::geo_size(&windows, &surf),
+                    render::window_origin(&windows, &surf),
+                ) {
+                    // Same housekeeping the Super path does: a window still settling from
+                    // the last resize is carrying a stretch, and measuring a new drag
+                    // against a stretched window makes it jump.
+                    if resize_settle.as_ref().map(|st| &st.surface) == Some(&surf) {
+                        resize_settle = None;
+                    }
+                    render::clear_scale(&mut windows, &surf);
+                    resize = Some(Resize {
+                        surface: surf,
+                        grab_x: gx,
+                        grab_y: gy,
+                        from_x: ox,
+                        from_y: oy,
+                        from_w: w,
+                        from_h: h,
+                        edge_x: ex as f32,
+                        edge_y: ey as f32,
+                        right_button: false,
+                        asked: (w, h),
+                        seen: (w, h),
+                        waited: 0,
+                        least_w: w,
+                        least_h: h,
+                        most_w: w,
+                        most_h: h,
+                        stuck_small: 0,
+                        stuck_large: 0,
+                    });
+                }
+            }
+        }
+
+        // The cursor image. Desk mode is ours: the crosshair says the canvas has the
+        // pointer, which is exactly what is true there. Work mode is the client's, because
+        // a text field wants an I-beam and a resize edge wants an arrow, and the client is
+        // the only one that knows which. A client asking for no cursor gets none.
+        //
+        // The hotspot comes with it, which is the part that was wrong before: a cursor
+        // image says where in itself the pointer actually is, and without honouring that
+        // the click lands somewhere other than the tip.
+        if let Some(cur) = cursor.as_mut() {
+            let client_cursor = mode == Mode::Work && hovered.is_some();
+            if debug_input {
+                let want = match (client_cursor, &state.cursor_image) {
+                    (true, CursorImageStatus::Surface(_)) => "client",
+                    (true, CursorImageStatus::Hidden) => "hidden",
+                    (true, CursorImageStatus::Named(_)) => "named",
+                    _ => "crosshair",
+                };
+                if want != last_cursor_want {
+                    println!("om_wm: cursor want {want} (was {last_cursor_want})");
+                    last_cursor_want = want;
+                }
+            }
+            match (client_cursor, &state.cursor_image) {
+                (true, CursorImageStatus::Surface(_)) if cursor::has_client_image(cur) => {
+                    cursor::apply_client(cur);
+                }
+                (true, CursorImageStatus::Hidden) => cursor::set_hidden(cur),
+                // A named shape, which needs a cursor theme we do not load yet; a surface
+                // whose pixels we have not seen yet; and anything at all in desk mode.
+                _ => cursor::set_crosshair(cur),
+            }
+        }
+
         // Everything that could move a window has run: the drag, the settle, and the
         // child placement above. Put them all on the pixel grid, then decide how each
         // one is sampled from where it actually ended up.
@@ -1343,28 +1642,36 @@ fn main() {
             render::log_rects(&windows);
         }
 
-        route_input(
-            &mut state,
-            &mut windows,
-            cam3d,
-            cursor_pos,
-            &mut focused,
-            &mut hovered,
-            &mut grabbed,
-            &mut last_motion,
-            ptr.left || ptr.right || ptr.middle,
-            inp.as_ref(),
-            debug_input,
-            super_down,
-            &ptr,
-            pressed,
-            released,
-            start.elapsed().as_millis() as u32,
-        );
+        // Clients hear from us only in work mode. In desk mode they get no pointer events
+        // and no keys at all: a click there means "grab this window", and there is nothing
+        // focused to type into.
         let time_ms = start.elapsed().as_millis() as u32;
-        if pointer_on_client {
-            forward_scroll(&mut state, &ptr, time_ms, &set);
+        if mode == Mode::Work {
+            route_input(
+                &mut state,
+                &mut windows,
+                cam3d,
+                cursor_pos,
+                &mut focused,
+                &mut hovered,
+                &mut grabbed,
+                &mut last_motion,
+                ptr.left || ptr.right || ptr.middle,
+                inp.as_ref(),
+                debug_input,
+                super_down,
+                &ptr,
+                pressed,
+                released,
+                time_ms,
+            );
+            if pointer_on_client {
+                forward_scroll(&mut state, &ptr, time_ms, &set);
+            }
         }
+        // Outside the mode gate on purpose: xkb state has to follow the keyboard even when
+        // no client is listening, or the next client to get focus inherits modifiers that
+        // nobody is holding.
         if let Some(i) = inp.as_ref() {
             forward_keys(&mut state, i, time_ms);
         }
@@ -1372,6 +1679,11 @@ fn main() {
         ray::begin_drawing();
         ray::clear_background(clear);
         render::draw_windows(&windows, cam3d, shader, alpha_loc, swizzle_loc);
+        render::draw_mode_badge(
+            if mode == Mode::Desk { "desk" } else { "work" },
+            mode == Mode::Desk,
+            ray::screen_width(),
+        );
         if debug_labels {
             render::draw_debug_labels(&windows, cam3d, cam.zoom, anisotropy);
         }
