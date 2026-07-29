@@ -70,6 +70,15 @@ pub struct Settings {
     pub tap_max_secs: f64,
     pub double_tap_secs: f64,
 
+    // Trackpad: how much contact counts as a touch at all, in the raw units the overlay
+    // shows (this pad reports 0..2048). Below the first threshold a contact is ignored
+    // entirely; once counted it is only dropped below the second, which stops a contact
+    // hovering at the boundary from flickering in and out. Zero for either disables it,
+    // which is the default: the right number is a property of the hardware and the hand,
+    // and has to be read off the overlay rather than guessed.
+    pub touch_min_size: f32,
+    pub touch_drop_size: f32,
+
     // Trackpad: resting fingers. A hand rests on the pad, so a finger that sits in the
     // bottom of it and stops moving is parked: it does not steer the cursor, does not
     // count toward a two-finger gesture, and does not decide which button a click is.
@@ -136,6 +145,9 @@ pub fn defaults() -> Settings {
 
         tap_max_secs: 0.25,
         double_tap_secs: 0.4,
+
+        touch_min_size: 0.0,
+        touch_drop_size: 0.0,
 
         rest_zone_frac: 0.4,
         rest_secs: 0.5,
@@ -254,6 +266,8 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
         "pinch_deadzone_frac" => f32_key!(pinch_deadzone_frac),
         "tap_max_secs" => f64_key!(tap_max_secs),
         "double_tap_secs" => f64_key!(double_tap_secs),
+        "touch_min_size" => f32_key!(touch_min_size),
+        "touch_drop_size" => f32_key!(touch_drop_size),
         "rest_zone_frac" => f32_key!(rest_zone_frac),
         "rest_secs" => f64_key!(rest_secs),
         "rest_move_frac" => f32_key!(rest_move_frac),
@@ -299,6 +313,14 @@ fn sanitise(set: &mut Settings) {
     set.zoom_default = set.zoom_default.clamp(set.zoom_min, set.zoom_max);
     set.fov_deg = set.fov_deg.clamp(1.0, 170.0);
     set.button_strip = set.button_strip.clamp(0.0, 1.0);
+    set.touch_min_size = set.touch_min_size.max(0.0);
+    // A drop threshold at or above the entry one would defeat the hysteresis, so fall
+    // back to a fraction of it rather than pretending to honour a bad pair.
+    set.touch_drop_size = if set.touch_drop_size > 0.0 && set.touch_drop_size < set.touch_min_size {
+        set.touch_drop_size
+    } else {
+        set.touch_min_size * 0.7
+    };
     set.rest_zone_frac = set.rest_zone_frac.clamp(0.0, 1.0);
     set.rest_secs = set.rest_secs.max(0.0);
     set.rest_move_frac = set.rest_move_frac.max(0.0);

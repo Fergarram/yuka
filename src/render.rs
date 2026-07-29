@@ -557,7 +557,7 @@ pub fn draw_pad_debug(pad: &touch::PadView, screen_w: i32, screen_h: i32) {
     // rest, the lowest is the one that would decide a click, so mark that one.
     let mut lowest: Option<usize> = None;
     for i in 0..pad.count {
-        if pad.resting[i] {
+        if pad.resting[i] || pad.faint[i] {
             continue;
         }
         if lowest.map_or(true, |b| pad.fingers[i].1 > pad.fingers[b].1) {
@@ -569,7 +569,11 @@ pub fn draw_pad_debug(pad: &touch::PadView, screen_w: i32, screen_h: i32) {
         let cx = px + (fx * pad_w as f32) as i32;
         let cy = py + (fy * pad_h as f32) as i32;
         let deciding = pad.software_buttons && lowest == Some(i);
-        let colour = if pad.resting[i] {
+        let colour = if pad.faint[i] {
+            // Below the size threshold: drawn, because you need to see that it is there
+            // and being ignored, but in the frame colour to say nothing reads it.
+            frame
+        } else if pad.resting[i] {
             dim
         } else if deciding {
             hot
@@ -598,10 +602,10 @@ pub fn draw_pad_debug(pad: &touch::PadView, screen_w: i32, screen_h: i32) {
     let armed = |on: bool| if on { "armed" } else { "idle" };
     let text = [
         format!(
-            "trackpad  {} finger{}  {} resting  max {}",
+            "trackpad  {} finger{}  {} counted  max {}",
             pad.count,
             if pad.count == 1 { "" } else { "s" },
-            pad.count - pad.active,
+            pad.active,
             pad.contact_max
         ),
         format!(

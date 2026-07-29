@@ -111,6 +111,10 @@ struct Slot {
     // is touching. Zero on hardware that does not report it.
     major: i32,
     minor: i32,
+    // Too little contact to count as a touch at all: a finger grazing the surface, or
+    // the edge of one that is mostly off it. Sticky in both directions, see
+    // classify_fingers.
+    faint: bool,
     // Parked: in the resting zone and idle. Held across frames because it must not
     // flicker, and frozen while a gesture is running (see classify_resting).
     resting: bool,
@@ -219,6 +223,8 @@ pub struct PadView {
     pub major: [i32; MAX_SLOTS],
     // Which of those fingers are parked rather than pointing, in the same order.
     pub resting: [bool; MAX_SLOTS],
+    // Contacts too small to count at all, in the same order.
+    pub faint: [bool; MAX_SLOTS],
     pub count: usize,
     // How many of them are not parked: what the gesture code is actually working with.
     pub active: usize,
@@ -328,6 +334,7 @@ pub fn open(path: &str, set: &Settings) -> Option<Touchpad> {
             still_since: 0.0,
             major: 0,
             minor: 0,
+            faint: false,
             resting: false,
             start_x: 0,
             start_y: 0,
@@ -451,6 +458,7 @@ pub fn reset(tp: &mut Touchpad, set: &Settings) {
         still_since: 0.0,
         major: 0,
         minor: 0,
+        faint: false,
         resting: false,
         start_x: 0,
         start_y: 0,
@@ -488,6 +496,7 @@ pub fn view(tp: &Touchpad, set: &Settings) -> PadView {
     let mut size = [(0.0f32, 0.0f32); MAX_SLOTS];
     let mut major = [0i32; MAX_SLOTS];
     let mut resting = [false; MAX_SLOTS];
+    let mut faint = [false; MAX_SLOTS];
     let mut count = 0;
     let mut active = 0;
     for slot in &tp.slots {
@@ -501,7 +510,8 @@ pub fn view(tp: &Touchpad, set: &Settings) -> PadView {
             size[count] = (slot.major as f32 / tp.y_span, slot.minor as f32 / tp.y_span);
             major[count] = slot.major;
             resting[count] = slot.resting;
-            if !slot.resting {
+            faint[count] = slot.faint;
+            if !slot.resting && !slot.faint {
                 active += 1;
             }
             count += 1;
@@ -512,6 +522,7 @@ pub fn view(tp: &Touchpad, set: &Settings) -> PadView {
         size,
         major,
         resting,
+        faint,
         count,
         active,
         rest_zone: set.rest_zone_frac,
@@ -743,7 +754,27 @@ fn read_events(tp: &mut Touchpad, set: &Settings) {
 // Frozen while a gesture is running. A pinch can hold one finger still for longer than
 // rest_secs, and reclassifying mid-gesture would drop that finger, take the gesture down
 // to one finger, and hand the cursor a jump.
-fn classify_resting(tp: &mut Touchpad, set: &Settings) {
+fn classify_fingers(tp: &mut Touchpad, set: &Settings) {
+    // Faintness first, and every frame: it is about whether a finger is there at all,
+    // not what it means, and a finger that is genuinely lifting should end a gesture
+    // rather than be held onto. The two thresholds are what keep a contact resting on
+    // the boundary from flickering: it has to reach touch_min_size to start counting and
+    // fall below touch_drop_size to stop.
+    if set.touch_min_size > 0.0 && tp.size_max > 0.0 {
+        for i in 0..MAX_SLOTS {
+            if !tp.slots[i].active {
+                tp.slots[i].faint = false;
+                continue;
+            }
+            let major = tp.slots[i].major as f32;
+            tp.slots[i].faint = if tp.slots[i].faint {
+                major < set.touch_min_size
+            } else {
+                major < set.touch_drop_size
+            };
+        }
+    }
+
     if tp.pan_armed || tp.zoom_armed || tp.mode != GestureMode::None {
         return;
     }
@@ -765,7 +796,7 @@ fn classify_resting(tp: &mut Touchpad, set: &Settings) {
 fn pointer_slot(tp: &Touchpad) -> Option<usize> {
     let mut best: Option<usize> = None;
     for i in 0..MAX_SLOTS {
-        if !tp.slots[i].active || tp.slots[i].resting {
+        if !tp.slots[i].active || tp.slots[i].resting || tp.slots[i].faint {
             continue;
         }
         if best.map_or(true, |b| tp.slots[i].seq < tp.slots[b].seq) {
@@ -800,7 +831,7 @@ fn press_is_right(tp: &Touchpad, set: &Settings) -> bool {
     // thumb rests on the left would come out left.
     let mut lowest: Option<(i32, i32)> = None;
     for slot in &tp.slots {
-        if slot.active && !slot.resting && lowest.map_or(true, |(y, _)| slot.y > y) {
+        if slot.active && !slot.resting && !slot.faint && lowest.map_or(true, |(y, _)| slot.y > y) {
             lowest = Some((slot.y, slot.x));
         }
     }
@@ -852,11 +883,11 @@ pub fn update(
     // Fingers that are actually doing something. A hand resting on the pad must not
     // make a one-finger move look like a two-finger gesture, so parked fingers are not
     // counted and not used as gesture points.
-    classify_resting(tp, set);
+    classify_fingers(tp, set);
     let mut pts: [(f32, f32); 2] = [(0.0, 0.0); 2];
     let mut count = 0usize;
     for s in &tp.slots {
-        if s.active && !s.resting {
+        if s.active && !s.resting && !s.faint {
             if count < 2 {
                 pts[count] = (s.x as f32, s.y as f32);
             }
@@ -885,7 +916,9 @@ pub fn update(
         // Keep the finger that is already steering, unless it lifted or has since
         // parked. Otherwise take the earliest one that is not parked.
         let primary = match tp.primary_slot {
-            Some(s) if tp.slots[s].active && !tp.slots[s].resting => Some(s),
+            Some(s) if tp.slots[s].active && !tp.slots[s].resting && !tp.slots[s].faint => {
+                Some(s)
+            }
             _ => pointer_slot(tp),
         };
         if primary != tp.primary_slot {
