@@ -27,3 +27,6 @@ fabricated trackpad contacts) that is not in the tree. Those are noted.
 | 18-trackpad-overlay-resting-zone (+18b) | same, with the resting zone line and the `N resting` counter |
 | 19-trackpad-overlay-contact-size-line (+19b) | same, with the `size ... load n/256` line |
 | 20-contact-footprints-fingertip-vs-thumb (+20b) | contact ellipses drawn at true scale: a pointing fingertip (major 300) against a resting thumb (major 900). Fabricated contacts, since a screenshot cannot include my fingers |
+| 21-resize-via-configure | Super+right-drag resize: a client re-rendered at the size we asked for through xdg_toplevel.configure. Forced configure, no drag |
+| 22-fps-counter | the frame counter: rate, this frame, and the worst of the last second, coloured against the 60Hz budget |
+| 23-late-latching-fps | an experiment that was reverted: presenting by page flip instead of a modeset per frame, and composing just before the vblank. `latch 4.1 ms` is the frame being composed 4ms ahead of scanout instead of 16ms. It measured what it promised and felt worse, so it lives in a git stash rather than in the tree |
