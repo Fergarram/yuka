@@ -9,12 +9,16 @@
 // and reused as they cycle (no per-frame create/destroy churn). Each toplevel
 // is drawn as a shader-processed quad, centered at native size.
 //
+// Zero copy is the default and not the only option: see DmabufMode, whose Blit arm copies an
+// imported buffer into a texture of ours so it can be released at once and can carry a mip
+// chain. What that is for, and what it measured, is in the settings comment.
+//
 
 use crate::camera;
 use crate::touch;
 use crate::egl::{self, Egl, EglImage};
 use crate::ray::{self, Shader, Vector3};
-use crate::wl::state::{self, State};
+use crate::wl::state::{self, Keep, State};
 use smithay::reexports::wayland_server::backend::ObjectId;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
@@ -24,9 +28,12 @@ use smithay::reexports::wayland_server::Resource;
 //
 
 // Whether a minified window gets a mip chain and trilinear + anisotropic sampling.
-// Off for now: plain bilinear when zoomed out, nearest at 1:1 and above. Only shm
-// textures can have a chain at all, so this is uneven across windows until dmabuf
-// minification is solved another way (see prepare_textures).
+// Off for now: plain bilinear when zoomed out, nearest at 1:1 and above. Only a texture we
+// own can have a chain at all, so this is uneven across windows (see prepare_textures).
+//
+// DmabufMode::Blit is the other way out of that: it copies an imported buffer into a texture
+// of ours, which can then carry a chain like an shm one. Measured at roughly three times the
+// slow frame rate, so it is a zoom quality decision rather than a free one.
 const MIPS_WHEN_MINIFIED: bool = false;
 
 //
@@ -191,6 +198,40 @@ pub fn visible(windows: &Windows, i: usize) -> (f32, f32, f32, f32) {
         windows.geo_w[i] * windows.scale_x[i],
         windows.geo_h[i] * windows.scale_y[i],
     )
+}
+
+// What we do with a client's dmabuf once it is imported. Hold is the shipping answer, Blit
+// is the one that costs a GPU side copy and buys back everything holding gives up, and
+// Release is neither: it tears, and exists so the cost of holding can be measured against
+// something. The arms not selected at runtime are unused by construction.
+#[allow(dead_code)]
+#[derive(Clone, Copy, PartialEq)]
+pub enum DmabufMode {
+    // Sample the client's buffer in place and keep it until a newer one replaces it. No
+    // copy, and the client cannot draw into that buffer while we have it.
+    Hold,
+    // Sample in place but hand the buffer straight back. The client draws into what we are
+    // reading, so the window tears. A measurement, not a mode to ship.
+    Release,
+    // Copy the imported image into a texture of our own, then hand the buffer back at once.
+    // One GPU side copy per commit, and in exchange the client never waits on us, nothing
+    // tears, and the texture is ours so it can carry a mip chain.
+    Blit,
+}
+
+// What a window's pixels came from, for the debug traces: a texture we uploaded out of an
+// shm buffer, or a client dmabuf we imported. Which one it is decides whether the client is
+// ever waiting on us for a buffer, so a trace about client latency has to say.
+// A copied dmabuf is owned like an shm texture, so ownership alone no longer names the path.
+// The swizzle does: shm is BGRA in memory and wants it, an imported image and a copy of one
+// are both already RGBA.
+pub fn source(windows: &Windows, surface: &WlSurface) -> &'static str {
+    match index_of(windows, surface) {
+        Some(i) if !windows.owns[i] => "dmabuf",
+        Some(i) if windows.swizzle[i] > 0.5 => "shm",
+        Some(_) => "blit",
+        None => "gone",
+    }
 }
 
 // The window's real size, with no stretch applied: what the client last committed, and
@@ -1053,6 +1094,7 @@ pub fn upload_committed(
     egl: &Egl,
     state: &mut State,
     surface: &WlSurface,
+    mode: DmabufMode,
 ) {
     // Windows, their popups and their subsurfaces all become quads. Anything else
     // that commits a buffer (a cursor surface, say) is dropped, releasing shm so the
@@ -1079,17 +1121,80 @@ pub fn upload_committed(
     }
 
     state::take_dmabuf_and_retain(state, surface, |key, info| {
-        match cache.get_or_import(egl, key, info) {
-            Some((tex, w, h)) => {
-                store_entry(windows, surface, tex, w, h, 0.0, false, popup, sub);
-            }
-            None => eprintln!(
+        let Some((tex, w, h)) = cache.get_or_import(egl, key, info) else {
+            eprintln!(
                 "om_wm: dmabuf import failed {}x{} fourcc={:#x} mod={:#x}",
                 info.width, info.height, info.fourcc, info.modifier
-            ),
+            );
+            // This buffer is no use to us, but the window still draws from the one before it,
+            // which therefore has to stay held.
+            return Keep::Skip;
+        };
+        match mode {
+            DmabufMode::Blit if copy_dmabuf(windows, egl, surface, tex, w, h, popup, sub) => {
+                // The pixels are ours now, so the client can have its buffer straight back.
+                Keep::Release
+            }
+            // Either we were told to sample in place, or the copy failed and sampling in
+            // place is the only way left to draw it. Both mean the client's buffer is what
+            // we read all frame, so both have to hold it.
+            DmabufMode::Blit | DmabufMode::Hold => {
+                store_entry(windows, surface, tex, w, h, 0.0, false, popup, sub);
+                Keep::Hold
+            }
+            DmabufMode::Release => {
+                store_entry(windows, surface, tex, w, h, 0.0, false, popup, sub);
+                Keep::Release
+            }
         }
     });
     set_geometry(windows, surface, state::geometry_of(surface));
+}
+
+// Copy an imported client buffer into a texture we own and store that instead. Reuses the
+// texture in place while the size holds, the way the shm path does, so a client redrawing at
+// a steady size allocates nothing per frame.
+//
+// False when the driver will not render from the imported image, which leaves the caller to
+// sample it in place.
+fn copy_dmabuf(
+    windows: &mut Windows,
+    egl: &Egl,
+    surface: &WlSurface,
+    src: u32,
+    w: i32,
+    h: i32,
+    popup: bool,
+    sub: bool,
+) -> bool {
+    if let Some(i) = index_of(windows, surface) {
+        if windows.owns[i] && windows.tex_w[i] == w && windows.tex_h[i] == h {
+            if !egl.copy_into(src, windows.tex_id[i], w, h) {
+                return false;
+            }
+            windows.swizzle[i] = 0.0;
+            // Same texture, new pixels: any chain it carries describes the old ones. A
+            // refusal stays, being a property of the texture rather than of the content.
+            if windows.mip[i] != MIP_REFUSED {
+                windows.mip[i] = MIP_NONE;
+            }
+            return true;
+        }
+    }
+
+    let dst = ray::load_texture_rgba(std::ptr::null(), w, h);
+    if dst == 0 {
+        return false;
+    }
+    if !egl.copy_into(src, dst, w, h) {
+        ray::unload_texture(dst);
+        return false;
+    }
+    egl::set_filter_linear(dst);
+    // Imported images sample as correct RGBA, and a copy of them is still correct RGBA, so
+    // this owns its texture like an shm window without wanting shm's swizzle.
+    store_entry(windows, surface, dst, w, h, 0.0, true, popup, sub);
+    true
 }
 
 fn upload_shm(

@@ -1011,6 +1011,7 @@ fn main() {
                 &egl,
                 &mut state,
                 surface,
+                set.dmabuf_mode,
             );
         }
 
@@ -1026,10 +1027,13 @@ fn main() {
         // one before submitting a surface's next frame (Chromium does) otherwise
         // stalls on its first menu frame: the menu never appears and its
         // compositor complains the frame was held too long.
+        // Whole trees, not just the roots: a client that renders into a subsurface asks for
+        // its frame callback on that subsurface, and answering only the root leaves it
+        // waiting for something that never arrives.
         for surface in wl::state::toplevel_surfaces(&state) {
-            wl::state::send_frame_callbacks(&surface, time_ms);
+            wl::state::send_frame_callbacks_tree(&surface, time_ms);
             for (popup, _, _) in wl::state::popups_of(&surface) {
-                wl::state::send_frame_callbacks(&popup, time_ms);
+                wl::state::send_frame_callbacks_tree(&popup, time_ms);
             }
         }
         wl::state::flush(&mut server);
@@ -1348,8 +1352,12 @@ fn main() {
                 // from a point you never grabbed. Falls back to now if the serial is stale.
                 let (ax, ay, af) = press_at(&press_log, serial, sxp, syp, frame);
                 if debug_input {
+                    let (w, h) = render::geo_size(&windows, &surf).unwrap_or((0.0, 0.0));
                     println!(
-                        "om_wm: move request serial {serial} on frame {frame}, press was frame {af} ({} frames), pointer has travelled {:.0},{:.0} since",
+                        "om_wm: move request {}x{} {} took {} frames (press frame {af}, now {frame}), pointer travelled {:.0},{:.0} since",
+                        w as i32,
+                        h as i32,
+                        render::source(&windows, &surf),
                         frame.saturating_sub(af),
                         sxp - ax,
                         syp - ay
@@ -1383,8 +1391,12 @@ fn main() {
             if let Some((surf, ex, ey, serial)) = asked_resize.into_iter().last() {
                 let (ax, ay, af) = press_at(&press_log, serial, sxp, syp, frame);
                 if debug_input {
+                    let (w, h) = render::geo_size(&windows, &surf).unwrap_or((0.0, 0.0));
                     println!(
-                        "om_wm: resize request serial {serial} on frame {frame}, press was frame {af} ({} frames), pointer has travelled {:.0},{:.0} since",
+                        "om_wm: resize request {}x{} {} took {} frames (press frame {af}, now {frame}), pointer travelled {:.0},{:.0} since",
+                        w as i32,
+                        h as i32,
+                        render::source(&windows, &surf),
                         frame.saturating_sub(af),
                         sxp - ax,
                         syp - ay

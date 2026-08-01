@@ -599,15 +599,33 @@ where
 // then release the buffer and clear the pending assignment. Returns true when a
 // dmabuf was handled. eglCreateImageKHR dups the plane fds, so releasing right
 // after the call is safe.
+// What happens to the buffer is f's to decide, because only f knows what it managed to do
+// with it.
+pub enum Keep {
+    // Ours until a newer one arrives: we sample this buffer in place every frame we draw it,
+    // so handing it back would let the client draw into what we are reading.
+    Hold,
+    // Done with it, and with whatever was held before it. Either we copied the pixels out or
+    // we are deliberately not keeping them, and either way what we draw no longer points at
+    // the client's memory.
+    Release,
+    // Of no use to us, and the previous hold has to stay. An import that failed leaves the
+    // window drawing from the buffer before it, which is therefore still being sampled.
+    Skip,
+}
+
 pub fn take_dmabuf_and_retain<F>(
     state: &mut State,
     surface: &WlSurface,
     mut f: F,
 ) -> bool
 where
-    F: FnMut(ObjectId, &DmabufInfo),
+    F: FnMut(ObjectId, &DmabufInfo) -> Keep,
 {
     let mut new_buffer: Option<WlBuffer> = None;
+    // Skip until f says otherwise, which is also the right answer for a commit that carried
+    // no dmabuf at all: it leaves any existing hold exactly where it is.
+    let mut keep = Keep::Skip;
 
     let handled = with_states(surface, |data| {
         let mut guard = data.cached_state.get::<SurfaceAttributes>();
@@ -646,18 +664,25 @@ where
             planes,
         };
 
-        f(key, &info);
-
-        // Retain instead of release: we keep sampling this buffer every frame
-        // it is displayed, so it must not be released until a newer buffer
+        // Retain instead of release when f asks for it: we go on sampling that buffer every
+        // frame it is displayed, so it must not go back to the client until a newer one
         // replaces it (see retain_replace).
-        new_buffer = Some(buffer);
+        keep = f(key, &info);
+        if matches!(keep, Keep::Hold) {
+            new_buffer = Some(buffer);
+        } else {
+            buffer.release();
+        }
         attrs.buffer = None;
         true
     });
 
-    if let Some(buf) = new_buffer {
-        retain_replace(&mut state.held_dmabufs, surface, buf);
+    match (new_buffer, keep) {
+        (Some(buf), _) => retain_replace(&mut state.held_dmabufs, surface, buf),
+        // Nothing of ours points at the client's memory any more, so neither should the hold.
+        (None, Keep::Release) => release_held_dmabuf(state, surface),
+        // Skip, or no dmabuf at all: whatever was held is still what we are drawing.
+        (None, _) => {}
     }
     handled
 }
@@ -692,15 +717,28 @@ pub fn prune_held(state: &mut State) {
     state.held_dmabufs.retain(|(s, _)| s.is_alive());
 }
 
-// Signal the surface it may render its next frame.
-pub fn send_frame_callbacks(surface: &WlSurface, time_ms: u32) {
-    with_states(surface, |data| {
-        let mut guard = data.cached_state.get::<SurfaceAttributes>();
-        let attrs = guard.current();
-        for cb in attrs.frame_callbacks.drain(..) {
-            cb.done(time_ms);
-        }
-    });
+// Signal every surface in a window's tree, subsurfaces included, that it may render its
+// next frame.
+//
+// A frame callback is requested on the surface that is going to be drawn into, and a client
+// that puts its content on a subsurface asks on that subsurface. Answering only the root
+// leaves such a client waiting for a callback that never comes, which throttles it down to
+// whatever timeout its own toolkit falls back on, or stops it dead. Walked in place rather
+// than through surface_tree, which would allocate a Vec per window per frame.
+pub fn send_frame_callbacks_tree(root: &WlSurface, time_ms: u32) {
+    with_surface_tree_downward(
+        root,
+        (),
+        |_, _, _| TraversalAction::DoChildren(()),
+        |_, states, _| {
+            let mut guard = states.cached_state.get::<SurfaceAttributes>();
+            let attrs = guard.current();
+            for cb in attrs.frame_callbacks.drain(..) {
+                cb.done(time_ms);
+            }
+        },
+        |_, _, _| true,
+    );
 }
 
 //

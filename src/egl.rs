@@ -45,6 +45,9 @@ const GL_LINEAR_MIPMAP_LINEAR: i32 = 0x2703;
 const GL_CLAMP_TO_EDGE: i32 = 0x812F;
 const GL_EXTENSIONS: u32 = 0x1F03;
 const GL_NO_ERROR: u32 = 0;
+const GL_FRAMEBUFFER: u32 = 0x8D40;
+const GL_COLOR_ATTACHMENT0: u32 = 0x8CE0;
+const GL_FRAMEBUFFER_COMPLETE: u32 = 0x8CD5;
 // EXT_texture_filter_anisotropic.
 const GL_TEXTURE_MAX_ANISOTROPY: u32 = 0x84FE;
 const GL_MAX_TEXTURE_MAX_ANISOTROPY: u32 = 0x84FF;
@@ -91,6 +94,10 @@ pub struct Egl {
     image_target_texture: ImageTargetTextureFn,
     query_formats: QueryFormatsFn,
     query_modifiers: QueryModifiersFn,
+    // Reused for copy_into: one framebuffer, re-pointed at whichever imported image is being
+    // copied out of. Created once, because generating one per commit is a driver allocation
+    // in the middle of a frame.
+    blit_fbo: u32,
 }
 
 //
@@ -107,6 +114,26 @@ extern "C" {
     fn glGetError() -> u32;
     fn glGetString(name: u32) -> *const c_char;
     fn glGetFloatv(name: u32, data: *mut f32);
+    fn glGenFramebuffers(n: i32, ids: *mut u32);
+    fn glBindFramebuffer(target: u32, framebuffer: u32);
+    fn glFramebufferTexture2D(
+        target: u32,
+        attachment: u32,
+        textarget: u32,
+        texture: u32,
+        level: i32,
+    );
+    fn glCheckFramebufferStatus(target: u32) -> u32;
+    fn glCopyTexSubImage2D(
+        target: u32,
+        level: i32,
+        xoffset: i32,
+        yoffset: i32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    );
 }
 
 //
@@ -233,6 +260,9 @@ pub fn init() -> Option<Egl> {
         return None;
     }
 
+    let mut blit_fbo: u32 = 0;
+    unsafe { glGenFramebuffers(1, &mut blit_fbo) };
+
     Some(Egl {
         display,
         create_image: load("eglCreateImageKHR")?,
@@ -240,6 +270,7 @@ pub fn init() -> Option<Egl> {
         image_target_texture: load("glEGLImageTargetTexture2DOES")?,
         query_formats: load("eglQueryDmaBufFormatsEXT")?,
         query_modifiers: load("eglQueryDmaBufModifiersEXT")?,
+        blit_fbo,
     })
 }
 
@@ -403,6 +434,45 @@ impl Egl {
             st.st_rdev
         );
         Some(st.st_rdev as u64)
+    }
+
+    // Copy an imported client buffer into a texture of our own, so the client can have its
+    // buffer back at once and we spend the frame sampling memory nobody else can write.
+    //
+    // The imported image goes on a framebuffer as a colour attachment and glCopyTexSubImage2D
+    // reads it into our texture: one copy, GPU side, no CPU and no readback. Nothing like the
+    // shm path, where the client reads its own pixels back to system memory and we upload
+    // them again.
+    //
+    // False when the driver will not render from this image. A format can be importable and
+    // still not be colour renderable, and the caller has to keep holding the client's buffer
+    // in that case, because sampling in place is then the only way to draw it.
+    pub fn copy_into(&self, src_tex: u32, dst_tex: u32, w: i32, h: i32) -> bool {
+        if self.blit_fbo == 0 || src_tex == 0 || dst_tex == 0 || w <= 0 || h <= 0 {
+            return false;
+        }
+        unsafe {
+            glBindFramebuffer(GL_FRAMEBUFFER, self.blit_fbo);
+            glFramebufferTexture2D(
+                GL_FRAMEBUFFER,
+                GL_COLOR_ATTACHMENT0,
+                GL_TEXTURE_2D,
+                src_tex,
+                0,
+            );
+            let ok = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+            if ok {
+                glBindTexture(GL_TEXTURE_2D, dst_tex);
+                glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, w, h);
+                glBindTexture(GL_TEXTURE_2D, 0);
+            }
+            // Detach before leaving, so the framebuffer is not left holding a reference to a
+            // client image we are about to hand back, and put the default target back for the
+            // draw pass that follows.
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            ok
+        }
     }
 
     pub fn destroy(&self, image: EglImage, tex: u32) {

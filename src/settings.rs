@@ -23,6 +23,7 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use crate::input::TrackpadMode;
+use crate::render::DmabufMode;
 
 //
 // Constants
@@ -126,6 +127,10 @@ pub struct Settings {
     // means fresher content from a client that ignores configures, at the cost of asking
     // one that is merely slow to redraw work it will throw away.
     pub resize_wait_frames: u32,
+    // What happens to a client's dmabuf once we have imported it: hold it and sample it in
+    // place, hand it straight back and tear, or copy it into a texture of our own and hand it
+    // back. See DmabufMode.
+    pub dmabuf_mode: DmabufMode,
 
     // Camera.
     // Keyboard pan speed in screen pixels per second, and keyboard zoom rate.
@@ -188,6 +193,7 @@ pub fn defaults() -> Settings {
         resize_min_px: 120.0,
         resize_stretch: true,
         resize_wait_frames: 8,
+        dmabuf_mode: DmabufMode::Hold,
 
         pan_px_per_sec: 900.0,
         zoom_rate_per_sec: 2.0,
@@ -330,6 +336,17 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
             Ok(v) => set.resize_wait_frames = v.max(1),
             Err(_) => {
                 eprintln!("om_wm: settings: {path}:{line}: resize_wait_frames wants a whole number");
+                return false;
+            }
+        },
+        "dmabuf_mode" => match value {
+            "hold" => set.dmabuf_mode = DmabufMode::Hold,
+            "release" => set.dmabuf_mode = DmabufMode::Release,
+            "blit" => set.dmabuf_mode = DmabufMode::Blit,
+            _ => {
+                eprintln!(
+                    "om_wm: settings: {path}:{line}: dmabuf_mode wants hold, release or blit"
+                );
                 return false;
             }
         },
