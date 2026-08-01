@@ -936,6 +936,10 @@ fn main() {
     let mut drag_geo: Option<(f32, f32, f32, f32)> = None;
     // When the last middle button press landed, for the double click chord.
     let mut last_middle_ms: u32 = 0;
+    // Whether Super+S was pressed this frame, and how many shots this run has taken. The
+    // number goes in the filename so a second one does not quietly replace the first.
+    let mut shot_now = false;
+    let mut shots: u32 = 0;
     // Where a released pinch is springing back to 1:1 around, in screen pixels, or None when
     // nothing is settling. The anchor is kept rather than re-read so the point under the
     // fingers stays put for the whole return, even if the cursor moves meanwhile.
@@ -1272,6 +1276,11 @@ fn main() {
                 debug_pad = !debug_pad;
                 println!("om_wm: trackpad overlay {}", if debug_pad { "on" } else { "off" });
             }
+            // Super+S grabs the frame. Taken at the end of the draw, so what lands in the
+            // file is the frame that was on screen, cursor plane aside: that is a hardware
+            // overlay the GPU never composites, so it cannot be in a readback.
+            shot_now = input::super_down(i)
+                && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_S);
         }
 
         // Zoom reset: Super+0 from the keyboard, Super + double middle click from
@@ -2131,6 +2140,16 @@ fn main() {
         if screenshot && frame == shot_frame {
             ray::flush_batch();
             ray::take_screenshot("shot.png");
+        }
+        if shot_now {
+            shot_now = false;
+            shots += 1;
+            let path = format!("shot-{shots}.png");
+            // Everything queued has to be in the framebuffer before it is read back, or the
+            // file is missing whatever the batch was still holding.
+            ray::flush_batch();
+            ray::take_screenshot(&path);
+            println!("om_wm: wrote {path}");
         }
         // Just before the present, so the plane and the frame land together.
         if let Some(cur) = cursor.as_mut() {

@@ -58,7 +58,10 @@ pub fn camera_update(cam: &mut Camera, kb: Option<&Input>, set: &Settings) {
     };
     let dt = ray::frame_time();
 
-    let pan = set.pan_px_per_sec * dt / cam.zoom;
+    // Not while Super is held: that is the compositor's modifier, and the chords hanging off
+    // it (Super+S for a screenshot, among others) would otherwise pan the view as a side
+    // effect of being pressed.
+    let pan = if input::super_down(kb) { 0.0 } else { set.pan_px_per_sec * dt / cam.zoom };
     if input::down(kb, input::KEY_W) {
         cam.cy -= pan;
     }
@@ -116,31 +119,22 @@ pub fn snaps_to_pixels(zoom: f32) -> bool {
     zoom <= 1.0 + NATIVE_ZOOM_EPS
 }
 
-// Land the view on whole pixels. Called every frame, so no code path can leave a fractional
-// offset behind. Doing this on gesture end instead left the zoom resets blurry, because they
-// change the zoom without touching the pan, and the alignment depends on both.
+// The view's centre, landed on whole pixels. Derived every frame and never written back, so
+// cx and cy stay exactly where panning and zooming put them.
 //
-// At the z=0 plane a canvas point maps to screen as x * zoom - cx * zoom + sw/2, so what
-// has to be an integer is (cx * zoom - sw/2): then every canvas coordinate that is
-// itself an integer lands on a pixel boundary, and a window at rest is sampled 1:1
-// instead of being resampled across two columns.
+// At the z=0 plane a canvas point maps to screen as x * zoom - cx * zoom + sw/2, so what has
+// to be an integer is (cx * zoom - sw/2): then every canvas coordinate that is itself an
+// integer lands on a pixel boundary, and a window at rest is sampled 1:1 instead of being
+// resampled across two columns. Carrying the screen half-size through is what makes that
+// right on an odd sized screen, where the centre itself sits on a half pixel.
 //
-// Rounding every frame quantises panning to whole screen pixels, which is exactly the
-// resolution the screen has: the positions being discarded could not have been shown.
-// The correction is never more than half a pixel.
+// Only the pan. A fractional zoom cannot put every canvas unit on a pixel, and rounding the
+// zoom itself would fight the gesture that set it.
 //
-// Carrying the screen half-size through is what makes it right on an odd sized screen,
-// where the center itself sits on a half pixel.
-//
-// Only the pan is snapped. A fractional zoom cannot put every canvas unit on a pixel,
-// and rounding the zoom itself would fight the gesture that set it.
-// Derived, never written back. cx and cy stay exactly where panning and zooming put them,
-// and this is what the view is built from.
-//
-// It used to assign to cam.cx, which was a ratchet: the grid is 1/zoom wide, a pinch changes
+// This used to assign to cam.cx, which was a ratchet: the grid is 1/zoom wide, a pinch changes
 // zoom every frame, and each frame re-rounded the previous frame's rounded value against a
-// grid that had moved. One pinch out to 0.3 and back walked the view 22 canvas units, and
-// the windows were doing the same thing to themselves alongside it (see Windows::draw_x).
+// grid that had moved. One pinch out to 0.3 and back walked the view 22 canvas units, and the
+// windows were doing the same thing to themselves alongside it (see Windows::draw_x).
 pub fn snapped_center(cam: &Camera, sw: f32, sh: f32) -> (f32, f32) {
     if !snaps_to_pixels(cam.zoom) {
         return (cam.cx, cam.cy);

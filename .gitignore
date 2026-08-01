@@ -85,8 +85,10 @@ $RECYCLE.BIN/
 # NOTE: Cargo.lock is intentionally committed (om_wm is a binary application).
 
 ### om_wm ###
-# Framebuffer screenshots captured during testing (OM_WM_SHOT=1)
+# Framebuffer screenshots. OM_WM_SHOT=<frame> writes the first, Super+S writes the numbered
+# ones on demand.
 /shot.png
+/shot-*.png
 
 # Local scratch / logs
 *.log
