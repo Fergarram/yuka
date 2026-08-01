@@ -347,12 +347,33 @@ fn route_input(
     let loc = Point::<f64, Logical>::from((ccx as f64, ccy as f64));
     let pointer = state.pointer.clone();
 
-    // Super+Escape drops keyboard focus.
+    // Super+Escape lets go of everything.
+    //
+    // The keyboard, which also takes the clipboard offer and the window's Activated state with
+    // it. The pointer, so nothing is left believing the cursor is inside it. And the implicit
+    // grab, which is the one that used to survive: a button held when you pressed the chord
+    // kept every later event pointed at whatever it started on, so releasing Super handed the
+    // client back events it should never have seen.
+    //
+    // On the press edge rather than while held, because it is one action rather than a state
+    // you sit in. Nothing else this frame: you asked for everything to be let go of.
     let super_escape = kb
-        .map(|kb| input::super_down(kb) && input::down(kb, input::KEY_ESC))
+        .map(|kb| {
+            input::super_down(kb)
+                && input::events(kb).iter().any(|&(c, p)| p && c == input::KEY_ESC)
+        })
         .unwrap_or(false);
-    if super_escape && focused.is_some() {
+    if super_escape {
         focus_window(state, focused, None);
+        *grabbed = None;
+        if hovered.is_some() {
+            let serial = SERIAL_COUNTER.next_serial();
+            pointer.motion(state, None, &MotionEvent { location: loc, serial, time: time_ms });
+            pointer.frame(state);
+            *hovered = None;
+            *last_motion = None;
+        }
+        return;
     }
 
     // Super claims the pointer for the canvas: no hover, no buttons, no scroll for
