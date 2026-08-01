@@ -64,25 +64,17 @@ const WINDOWED_H: i32 = 800;
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
-// Which of the two ways of working is in force. They differ in who owns the pointer,
-// which is the one decision everything else follows from.
+// The pointer belongs to the client, and Super borrows it for the canvas.
 //
-// Desk: the canvas owns it. Pan, zoom and gestures are live, a drag moves a window and a
-// right drag resizes it, no modifier needed, and clients receive nothing at all, not
-// pointer events and not the keyboard. Windows are objects on a desk.
+// There were two modes before this, desk and work, differing in who owned the pointer, and a
+// badge on screen because a mode you cannot see will surprise you. The badge was the tell:
+// nearly all the time was spent in work mode, and desk mode was a place you visited to pan
+// and then left. So the canvas moved behind Super instead, which is where moving and resizing
+// a window already lived, and the mode went away with the thing it was for.
 //
-// Work: the client owns it. The camera is frozen, so a scroll always goes to the window
-// under the pointer, and clicks, drags, selections and typing all land in it. Windows
-// move and resize the way their own toolkit expects, through xdg_toplevel move and resize
-// requests, with Super+drag still there as the compositor-side way.
-//
-// Modal design needs to be visible, hence the badge on screen: a mode you cannot see is a
-// mode that will surprise you.
-#[derive(Clone, Copy, PartialEq)]
-enum Mode {
-    Desk,
-    Work,
-}
+// Held, Super means the canvas: two fingers pan and pinch it, the wheel zooms it, a drag moves
+// a window and a right drag resizes it. Released, everything belongs to whatever is under the
+// pointer, which is what a compositor is supposed to do.
 
 // A window being dragged: which one, the offset from the cursor to its origin, and whether
 // the client started it.
@@ -226,7 +218,7 @@ fn same_client(a: &WlSurface, b: &WlSurface) -> bool {
 // actually was. Activated is the only way a client can know, and nothing was setting it.
 //
 // One place for all of it, because the focus changes in four (a press on a window, a press on
-// empty canvas, Super+Escape, and leaving work mode) and three of them would have forgotten.
+// empty canvas, and Super+Escape) and two of them would have forgotten.
 fn focus_window(state: &mut State, focused: &mut Option<WlSurface>, next: Option<WlSurface>) {
     // Against what the seat actually holds, not only against what we last asked for. A grab
     // is allowed to refuse a focus change and a popup grab does exactly that, so our idea of
@@ -628,7 +620,7 @@ fn forward_scroll(
 // and released after focus went away delivered its press and dropped its release, so xkb
 // went on believing the key was held. A stuck Ctrl turns typing "a" into select-all, which
 // is how this was found. Delivery is Smithay's business: with no focus it updates state and
-// sends nothing, which is exactly what desk mode wants.
+// sends nothing, which is exactly what an empty canvas wants.
 fn forward_keys(state: &mut State, kb: &input::Input, time_ms: u32) {
     let keyboard = state.keyboard.clone();
     for &(code, pressed) in input::events(kb) {
@@ -883,7 +875,6 @@ fn main() {
     let mut focused: Option<WlSurface> = None;
     // Desk to start with: the canvas is the point of the thing, and arranging comes before
     // working in it.
-    let mut mode = Mode::Desk;
     // A window being moved, if any.
     let mut drag: Option<Drag> = None;
     // Active Super+right-drag resize, if any, and one released and waiting to be answered.
@@ -1105,9 +1096,7 @@ fn main() {
         }
 
         // A window that has just drawn its first frame takes the keyboard, so that something
-        // you launched is something you can type into without hunting for it. Work mode only:
-        // desk mode hands no client the keyboard at all, and a window arriving on the canvas
-        // there is an object appearing on a desk, not a prompt.
+        // you launched is something you can type into without hunting for it.
         //
         // Only from the client that already had focus, or when nothing had it. That is the
         // difference between a dialog opening in front of you, which you want, and an
@@ -1117,9 +1106,6 @@ fn main() {
         // app doing the launching hands over a token proving a user asked for it; we do not
         // implement it, so anything that is not the focused client waits to be clicked.
         for surface in windows.mapped.drain(..).collect::<Vec<_>>() {
-            if mode != Mode::Work {
-                continue;
-            }
             let welcome = match focused.as_ref() {
                 Some(current) => same_client(current, &surface),
                 None => true,
@@ -1154,17 +1140,14 @@ fn main() {
         // was decided at the protocol boundary; by the time it arrives here it is a window the
         // user asked for.
         //
-        // Raised in either mode, focused only in work mode, for the same reason a newly mapped
-        // window is: desk mode hands no client the keyboard. Bringing it to the front of the
-        // stack is still the useful half of "the user wants to see this".
+        // Raised as well as focused, since the point of an activation is that the user wants
+        // to see the thing.
         for surface in state.activation_requests.drain(..).collect::<Vec<_>>() {
             if !surface.is_alive() {
                 continue;
             }
             render::front(&mut windows, &surface);
-            if mode == Mode::Work {
-                focus_window(&mut state, &mut focused, Some(surface));
-            }
+            focus_window(&mut state, &mut focused, Some(surface));
         }
 
         // New windows open where the view is.
@@ -1267,7 +1250,7 @@ fn main() {
         // What the fingers did, not what it did to the camera: where a scroll goes is
         // decided below, alongside the wheel's, so a trackpad can scroll a window.
         let pad = match touchpad.as_mut() {
-            Some(tp) => touch::update(tp, cursor.as_mut(), super_down, &set),
+            Some(tp) => touch::update(tp, cursor.as_mut(), &set),
             None => touch::Gesture::default(),
         };
         let taps = pad.clicks;
@@ -1289,17 +1272,14 @@ fn main() {
         // drives the trackpad itself. Everything downstream then treats the two modes
         // identically, including forwarding to whatever the pointer is over.
         //
-        // Except while Super is held, which is reserved for moving and resizing windows:
-        // a pinch in the middle of that should not also zoom the canvas. The gesture is
-        // still tracked, only discarded, so letting go does not make the next one jump.
-        if !super_down {
-            ptr.scroll_x += pad.scroll_x;
-            ptr.scroll_y += pad.scroll_y;
-            ptr.pinch *= pad.pinch;
-        }
-        // Desk mode never hands the pointer to a client, so the canvas keeps the wheel and
-        // the scroll wherever the cursor happens to be.
-        let pointer_on_client = mode == Mode::Work && !super_down && hovered.is_some();
+        // Whether that reaches the canvas or the window under the pointer is decided below,
+        // by whether Super is held. The pad reports the same thing either way.
+        ptr.scroll_x += pad.scroll_x;
+        ptr.scroll_y += pad.scroll_y;
+        ptr.pinch *= pad.pinch;
+        // Whether the wheel and the fingers belong to the canvas or to the window under the
+        // pointer. Super takes them for the canvas; otherwise they go to whatever is hovered.
+        let pointer_on_client = !super_down && hovered.is_some();
         if let Some(cur) = cursor.as_mut() {
             cursor::move_by(cur, ptr.dx as i32, ptr.dy as i32);
         }
@@ -1313,38 +1293,12 @@ fn main() {
         };
         // Wheel-click drag also pans; moving the cursor by the same delta keeps
         // the grabbed canvas point exactly under the cursor.
-        if mode == Mode::Desk && ptr.middle && !pointer_on_client {
+        if super_down && ptr.middle {
             cam.cx -= ptr.dx / cam.zoom;
             cam.cy -= ptr.dy / cam.zoom;
         }
         pressed |= ptr.left_pressed;
         released |= ptr.left_released;
-
-        // Super+Escape switches mode. It used to drop keyboard focus, which desk mode makes
-        // pointless (nothing is focused there) and work mode gets from clicking empty
-        // canvas, so the chord is better spent on the thing you need to reach constantly.
-        if let Some(i) = inp.as_ref() {
-            let toggle_mode = input::super_down(i)
-                && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_ESC);
-            if toggle_mode {
-                mode = match mode {
-                    Mode::Desk => Mode::Work,
-                    Mode::Work => Mode::Desk,
-                };
-                // Leaving work mode takes the keyboard and the pointer back off the
-                // clients, so nothing is left believing it still has either.
-                if mode == Mode::Desk {
-                    focus_window(&mut state, &mut focused, None);
-                    hovered = None;
-                    grabbed = None;
-                    last_motion = None;
-                }
-                println!(
-                    "om_wm: {} mode",
-                    if mode == Mode::Desk { "desk" } else { "work" }
-                );
-            }
-        }
 
         // Debug labels on and off, so a run that started plain can answer a question
         // about sampling without being restarted.
@@ -1395,19 +1349,17 @@ fn main() {
             }
         }
         // A two-finger double tap on the trackpad asks for the same reset as Super+0.
-        if mode == Mode::Desk && pad.reset_zoom && !super_down {
+        if super_down && pad.reset_zoom {
             camera::reset_zoom(&mut cam, &set);
         }
 
         // Super+0 scales around the screen center; the middle click has a cursor
         // to anchor on, so it keeps the canvas under the pointer fixed.
         // A reset says where the zoom should be, so nothing may be on its way somewhere else.
-        if (reset_click || reset_key || (mode == Mode::Desk && pad.reset_zoom && !super_down))
-            && mode == Mode::Desk
-        {
+        if reset_click || reset_key || (super_down && pad.reset_zoom) {
             zoom_spring = None;
         }
-        if reset_click && mode == Mode::Desk {
+        if reset_click {
             let (cxp, cyp) = pointer_xy.unwrap_or((0, 0));
             camera::reset_zoom_at(
                 &mut cam,
@@ -1417,7 +1369,7 @@ fn main() {
                 ray::screen_height() as f32,
                 &set,
             );
-        } else if reset_key && mode == Mode::Desk {
+        } else if reset_key {
             camera::reset_zoom(&mut cam, &set);
         }
 
@@ -1426,7 +1378,7 @@ fn main() {
         // before on purpose: route_input updates it later in the frame, and using
         // one value for both branches is what stops them both firing on the frame
         // the pointer crosses a window edge.
-        if mode == Mode::Desk && !pointer_on_client {
+        if super_down {
             let (cxp, cyp) = pointer_xy.unwrap_or((0, 0));
             if ptr.wheel != 0.0 {
                 // The wheel is a zoom of its own; whatever a pinch was settling toward is
@@ -1480,7 +1432,7 @@ fn main() {
         // from, and springing after each one would make the wheel unable to stop anywhere
         // between the floor and 1:1.
         let zoom_gesture_ended = pad.zoom_ended || ptr.pinch_ended;
-        if zoom_gesture_ended && mode == Mode::Desk && set.zoom_spring_rate > 0.0 {
+        if zoom_gesture_ended && set.zoom_spring_rate > 0.0 {
             let springs = cam.zoom < 1.0 && cam.zoom > set.zoom_spring_floor;
             // Anchored where the fingers were, so the canvas point under them is the one
             // that holds still on the way back, exactly as it did during the pinch.
@@ -1511,11 +1463,9 @@ fn main() {
             }
         }
 
-        // WASD and Super +/- drive the camera only in desk mode, and only when no window
-        // has the keyboard, since otherwise they are someone's typing.
-        if mode == Mode::Desk && focused.is_none() {
-            camera::camera_update(&mut cam, inp.as_ref(), &set);
-        }
+        // Super with plus or minus. Gated on Super inside, like everything else the canvas
+        // answers to, so it does not need to care whether a window has the keyboard.
+        camera::camera_update(&mut cam, inp.as_ref(), &set);
 
         render::prune_dead(&mut windows);
         render::animate(&mut windows, ray::frame_time());
@@ -1547,8 +1497,7 @@ fn main() {
         wl::state::accept_and_dispatch(&mut server, &mut state);
 
         // What clients asked for themselves: a titlebar drag is a move request, an edge
-        // drag is a resize request. Only in work mode, where the client owns the pointer;
-        // in desk mode it never saw the press that would have started one.
+        // drag is a resize request.
         //
         // Drained here, ahead of the two blocks that act on it, because a request that
         // arrives at the top of this frame and is only picked up below them does not reach
@@ -1557,7 +1506,7 @@ fn main() {
         // avoid: the press has to reach the client and its request has to come back.
         let asked_move: Vec<(WlSurface, u32)> = state.move_requests.drain(..).collect();
         let asked_resize: Vec<(WlSurface, i32, i32, u32)> = state.resize_requests.drain(..).collect();
-        if mode == Mode::Work {
+        {
             if let Some((surf, serial)) = asked_move.into_iter().last() {
                 // Anchor to the press the client is quoting. Between that press and this
                 // request sits the client's own latency, and a pointer that kept moving
@@ -1587,8 +1536,8 @@ fn main() {
                             resize_settle = None;
                         }
                         render::clear_scale(&mut windows, &surf);
-                        // A client-initiated move is always work mode, so no lift: just
-                        // bring it to the front the way any compositor would.
+                        // No lift for a client's own titlebar drag: it asked to be moved,
+                        // not picked up, so bring it to the front and leave it on the plane.
                         render::front(&mut windows, &surf);
                         drag = Some(Drag {
                             surface: surf,
@@ -1665,10 +1614,9 @@ fn main() {
         // The window's top-left stays put and the far corner follows the cursor, which
         // is the one mapping that needs no handle to grab.
         //
-        // Desk mode needs no modifier: a window is an object, so dragging it moves it and
-        // right dragging it resizes it. Work mode keeps both behind Super, where they are
-        // the compositor's way rather than the client's.
-        let grab_windows = mode == Mode::Desk || super_down;
+        // Behind Super, which is the compositor's way of moving and resizing a window as
+        // opposed to the client's own titlebar and edges.
+        let grab_windows = super_down;
         if ptr.right_pressed && grab_windows && resize.is_none() {
             if let Some((surf, ..)) = render::window_at(&windows, cam3d, sxp, syp) {
                 if let Some((gx, gy)) = camera::screen_to_plane(cam3d, sxp, syp, 0.0) {
@@ -1952,11 +1900,13 @@ fn main() {
                 // on the z=0 plane (constant in world units, independent of z).
                 let (gx, gy) = camera::screen_to_plane(cam3d, sxp, syp, 0.0)
                     .unwrap_or((ox, oy));
-                // Desk mode lifts a window toward the camera, which is the canvas idiom
-                // for picking something up. Work mode is a normal compositor: raise it in
-                // the stack and leave it on the plane, so nothing about the geometry
-                // changes while you drag it.
-                if mode == Mode::Desk {
+                // Zoomed out, picking a window up lifts it toward the camera, which is the
+                // canvas idiom for having it in your hand and reads well when you can see the
+                // whole desk. At 1:1 and above it only comes to the front and stays on the
+                // plane: a lift there is perspective applied to something already filling the
+                // screen, so it swims rather than rises, and it takes the window off the pixel
+                // grid while you are close enough to see that happen.
+                if cam.zoom < 1.0 {
                     render::raise(&mut windows, &surf);
                 } else {
                     render::front(&mut windows, &surf);
@@ -2055,10 +2005,9 @@ fn main() {
             });
         }
 
-        // The cursor image. Desk mode is ours: the crosshair says the canvas has the
-        // pointer, which is exactly what is true there. Work mode is the client's, because
-        // a text field wants an I-beam and a resize edge wants an arrow, and the client is
-        // the only one that knows which. A client asking for no cursor gets none.
+        // The cursor image belongs to whatever is under the pointer: a text field wants an
+        // I-beam and a resize edge wants an arrow, and only the client knows which. A client
+        // asking for no cursor gets none. Over empty canvas it is ours, and a crosshair.
         //
         // The hotspot comes with it, which is the part that was wrong before: a cursor
         // image says where in itself the pointer actually is, and without honouring that
@@ -2090,7 +2039,7 @@ fn main() {
         }
 
         if let Some(cur) = cursor.as_mut() {
-            let client_cursor = mode == Mode::Work && hovered.is_some();
+            let client_cursor = hovered.is_some();
             if debug_input {
                 let want = match (client_cursor, &state.cursor_image) {
                     (true, CursorImageStatus::Surface(_)) => "client",
@@ -2109,7 +2058,7 @@ fn main() {
                 }
                 (true, CursorImageStatus::Hidden) => cursor::set_hidden(cur),
                 // A named shape, which needs a cursor theme we do not load yet; a surface
-                // whose pixels we have not seen yet; and anything at all in desk mode.
+                // whose pixels we have not seen yet; and empty canvas.
                 _ => cursor::set_crosshair(cur),
             }
         }
@@ -2136,11 +2085,8 @@ fn main() {
             render::log_rects(&windows);
         }
 
-        // Clients hear from us only in work mode. In desk mode they get no pointer events
-        // and no keys at all: a click there means "grab this window", and there is nothing
-        // focused to type into.
         let time_ms = start.elapsed().as_millis() as u32;
-        if mode == Mode::Work {
+        {
             route_input(
                 &mut state,
                 &mut windows,
@@ -2194,11 +2140,6 @@ fn main() {
         ray::begin_drawing();
         ray::clear_background(clear);
         render::draw_windows(&windows, cam3d, shader, alpha_loc, swizzle_loc);
-        render::draw_mode_badge(
-            if mode == Mode::Desk { "desk" } else { "work" },
-            mode == Mode::Desk,
-            ray::screen_width(),
-        );
         if debug_labels {
             render::draw_debug_labels(&windows, cam3d, cam.zoom, anisotropy);
         }

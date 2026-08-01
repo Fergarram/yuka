@@ -137,8 +137,7 @@ pub struct Settings {
     pub dmabuf_mode: DmabufMode,
 
     // Camera.
-    // Keyboard pan speed in screen pixels per second, and keyboard zoom rate.
-    pub pan_px_per_sec: f32,
+    // Keyboard zoom rate, for Super with plus or minus.
     pub zoom_rate_per_sec: f32,
     // Zoom limits, and the scale the resets return to.
     pub zoom_min: f32,
@@ -217,7 +216,6 @@ pub fn defaults() -> Settings {
         resize_wait_frames: 8,
         dmabuf_mode: DmabufMode::Hold,
 
-        pan_px_per_sec: 900.0,
         zoom_rate_per_sec: 2.0,
         zoom_min: 0.1,
         zoom_max: 8.0,
@@ -374,7 +372,6 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
                 return false;
             }
         },
-        "pan_px_per_sec" => f32_key!(pan_px_per_sec),
         "zoom_rate_per_sec" => f32_key!(zoom_rate_per_sec),
         "zoom_min" => f32_key!(zoom_min),
         "zoom_max" => f32_key!(zoom_max),

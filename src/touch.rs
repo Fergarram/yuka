@@ -933,20 +933,20 @@ fn press_is_right(tp: &Touchpad, set: &Settings) -> bool {
 // fingers scroll or pinch. The cursor is still moved here, because it is ours to move and
 // nothing else wants a say; the scroll and the pinch are handed back for the caller to
 // route.
-// pointer_only: treat every finger as a pointing finger rather than a gesture. The caller
+// A finger is a pointing finger rather than part of a gesture whenever the pad is held down,
+// which is what stops a click-drag turning into a scroll. It used to also be true while Super
+// was held, back when Super meant the canvas was not listening. Super now means the opposite,
+// so the pad reports what the fingers did and the caller decides where it goes.
+//
+// The old text, kept because the caller still has to make that decision: the caller
 // sets it while Super is held, which is window manipulation and never a scroll, and it is
 // also true whenever the pad's own button is down, since dragging is not scrolling.
 // The gesture this frame, plus the edge for a pinch that has just finished. The edge is
 // computed out here rather than inside, because the body leaves by half a dozen different
 // paths (fingers lifted, a hand rested, the pad held for a drag) and every one of them ends
 // a gesture. Reading the mode once, after whichever path was taken, cannot miss one.
-pub fn update(
-    tp: &mut Touchpad,
-    cursor: Option<&mut Cursor>,
-    pointer_only: bool,
-    set: &Settings,
-) -> Gesture {
-    let mut out = update_gesture(tp, cursor, pointer_only, set);
+pub fn update(tp: &mut Touchpad, cursor: Option<&mut Cursor>, set: &Settings) -> Gesture {
+    let mut out = update_gesture(tp, cursor, set);
     if tp.mode == GestureMode::Zoom {
         tp.zoomed_gesture = true;
     }
@@ -960,12 +960,7 @@ pub fn update(
     out
 }
 
-fn update_gesture(
-    tp: &mut Touchpad,
-    cursor: Option<&mut Cursor>,
-    pointer_only: bool,
-    set: &Settings,
-) -> Gesture {
+fn update_gesture(tp: &mut Touchpad, cursor: Option<&mut Cursor>, set: &Settings) -> Gesture {
     tp.clicks = Clicks::default();
     read_events(tp, set);
     // Levels, after the edges: held down and it is still whichever button it became.
@@ -999,7 +994,7 @@ fn update_gesture(
     // goes, so they do not drag the cursor along with them. Except when the caller says
     // otherwise or the pad is held down, when every finger is pointing, because a
     // click-drag needs one contact on the button and another to move with.
-    let pointer_only = pointer_only || tp.btn_down;
+    let pointer_only = tp.btn_down;
     if count == 1 || (pointer_only && count >= 1) {
         // Latch onto the original finger's slot and keep it until that finger
         // lifts; extra fingers are ignored. Adopt a new primary only once the

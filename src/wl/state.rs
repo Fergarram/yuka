@@ -421,9 +421,9 @@ fn clamp_dim(v: i32, min: i32, max: i32) -> i32 {
 // Take the clipboard away from whoever had it.
 //
 // The other half of focus_changed, which Smithay does not call when focus is unset: it sends
-// the leave and stops there. Without this, dropping focus entirely (clicking empty canvas,
-// Super+Escape, leaving work mode) left the last window still holding the selection offer and
-// able to go on reading it.
+// the leave and stops there. Without this, dropping focus entirely (clicking empty canvas, or
+// Super+Escape) left the last window still holding the selection offer and able to go on
+// reading it.
 pub fn clear_clipboard_focus(state: &State) {
     set_data_device_focus(&state.display_handle, &state.seat, None);
 }

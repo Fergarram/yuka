@@ -3,8 +3,8 @@
 //
 // The infinite canvas view. Windows live in canvas coordinates; the camera maps
 // canvas -> screen with a pan (canvas point shown at screen center) and a zoom
-// (screen pixels per canvas unit). Keyboard: WASD pan, Super +/- zoom. Trackpad
-// gestures live in the touch module.
+// (screen pixels per canvas unit). Keyboard: Super +/- zoom. Panning is the trackpad's,
+// in the touch module, or Super with the middle button.
 //
 
 use crate::input::{self, Input};
@@ -49,46 +49,31 @@ pub fn reset_zoom_at(cam: &mut Camera, sx: f32, sy: f32, sw: f32, sh: f32, set: 
     zoom_at(cam, set.zoom_default / cam.zoom, sx, sy, sw, sh, set);
 }
 
-// Advance the camera from held keys. Pan speed is constant in screen pixels, so
-// it feels the same at any zoom; zoom is exponential and keeps the screen center
-// fixed.
+// Advance the camera from held keys, which is now only the zoom: Super with plus or minus.
+// Exponential, so a step feels the same at any scale, and around the screen centre because
+// the keyboard has no cursor to anchor to.
+//
+// WASD panned the canvas until the modes went away. It only ever ran while no window held the
+// keyboard, which once focus started following windows was almost never, and the letters
+// belong to whatever you are typing into.
 pub fn camera_update(cam: &mut Camera, kb: Option<&Input>, set: &Settings) {
     let Some(kb) = kb else {
         return;
     };
+    if !input::super_down(kb) {
+        return;
+    }
     let dt = ray::frame_time();
-
-    // Not while Super is held: that is the compositor's modifier, and the chords hanging off
-    // it (Super+S for a screenshot, among others) would otherwise pan the view as a side
-    // effect of being pressed.
-    let pan = if input::super_down(kb) { 0.0 } else { set.pan_px_per_sec * dt / cam.zoom };
-    if input::down(kb, input::KEY_W) {
-        cam.cy -= pan;
+    let zoom_in = input::down(kb, input::KEY_EQUAL) || input::down(kb, input::KEY_KPPLUS);
+    let zoom_out = input::down(kb, input::KEY_MINUS) || input::down(kb, input::KEY_KPMINUS);
+    let step = 1.0 + set.zoom_rate_per_sec * dt;
+    if zoom_in {
+        cam.zoom *= step;
     }
-    if input::down(kb, input::KEY_S) {
-        cam.cy += pan;
+    if zoom_out {
+        cam.zoom /= step;
     }
-    if input::down(kb, input::KEY_A) {
-        cam.cx -= pan;
-    }
-    if input::down(kb, input::KEY_D) {
-        cam.cx += pan;
-    }
-
-    if input::super_down(kb) {
-        let zoom_in =
-            input::down(kb, input::KEY_EQUAL) || input::down(kb, input::KEY_KPPLUS);
-        let zoom_out =
-            input::down(kb, input::KEY_MINUS) || input::down(kb, input::KEY_KPMINUS);
-        let step = 1.0 + set.zoom_rate_per_sec * dt;
-        if zoom_in {
-            cam.zoom *= step;
-        }
-        if zoom_out {
-            cam.zoom /= step;
-        }
-        cam.zoom = cam.zoom.clamp(set.zoom_min, set.zoom_max);
-    }
+    cam.zoom = cam.zoom.clamp(set.zoom_min, set.zoom_max);
 }
 
 // Zoom by `factor` while keeping the canvas point currently under the screen

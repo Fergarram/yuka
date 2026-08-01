@@ -655,23 +655,6 @@ pub fn draw_debug_labels(windows: &Windows, cam3d: ray::Camera3D, zoom: f32, ani
     }
 }
 
-// Which mode is in force, top centre, always drawn. A modal design has to say which mode
-// it is in: the two differ in who gets your clicks, and finding that out by clicking is
-// the wrong way round. Colour carries it as much as the word, for reading at a glance.
-pub fn draw_mode_badge(label: &str, canvas: bool, screen_w: i32) {
-    const TEXT: i32 = 14;
-    const PAD: i32 = 6;
-    let bg = ray::Color { r: 12, g: 12, b: 16, a: 190 };
-    let fg = if canvas {
-        ray::Color { r: 140, g: 200, b: 250, a: 255 }
-    } else {
-        ray::Color { r: 250, g: 200, b: 130, a: 255 }
-    };
-    let w = ray::measure_text(label, TEXT);
-    let x = (screen_w - w) / 2;
-    ray::draw_rectangle(x - PAD, 0, w + PAD * 2, TEXT + PAD * 2, bg);
-    ray::draw_text(label, x, PAD, TEXT, fg);
-}
 
 // Frame timing, top left. Three numbers because one is not enough to see lag: the rate,
 // this frame, and the worst frame in the last second or so. An average hides exactly the

@@ -2,11 +2,20 @@ TODO:
 
 MINIMUM SHIT:
 
+[ ] decent cursor for canvas 
+[ ] drag and drop
 [ ] Get audio working
 [ ] Correct pointer lock behavior
 [ ] Maximize window, minimize
 [ ] Fullscreen mode
 [ ] Pass pinch gestures to windows
+
+
+---
+
+TEST:
+
+[ ] Three finger pan/zoom OR cmd + two finger OR cmd + middle wheel/scroll
 
 ---
 
