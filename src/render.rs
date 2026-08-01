@@ -902,12 +902,8 @@ pub fn sync_children(windows: &mut Windows) {
     }
 
     // Then every subsurface tree, from each root that is not itself a subsurface, so
-    // a popup's children are placed off the popup we just moved. The tree comes back
-    // in the client's stacking order with the root at its own slot, and each surface
-    // is offset from the root's z by its distance from that slot: earlier slots are
-    // behind the root, later ones in front. Forcing them all in front, which is what
-    // this did first, puts a client's below-parent shadow on top of its own content
-    // and swallows every click aimed at it.
+    // a popup's children are placed off the popup we just moved. The tree comes back in the
+    // client's stacking order with the root at its own slot.
     let mut subs: Vec<(usize, f32, f32, f32, u32)> = Vec::new();
     for i in 0..windows.surface.len() {
         if windows.sub[i] {
@@ -923,7 +919,25 @@ pub fn sync_children(windows: &mut Windows) {
                 continue;
             }
             let Some(j) = index_of(windows, surface) else { continue };
-            let steps = root_slot as f32 - slot as f32;
+            // In front of the root, every one of them, ordered among themselves by the slot
+            // the client gave them. Later slot, nearer the camera.
+            //
+            // The tree also says which side of the root a subsurface sits on, and we used to
+            // honour it: earlier slots went behind. Chromium is why we no longer do. It puts
+            // its dialogs in a subsurface and places it *below* its own root, so the Restore
+            // pages bubble was drawn behind the browser window and you only saw the strip of
+            // it hanging out the bottom. That is not a misreading on our side; the tree
+            // really does say below, and Smithay maps place_below to the earlier slot
+            // exactly as it should. Chromium simply asks for something that, taken
+            // literally, is invisible.
+            //
+            // What this gives up is a subsurface a client genuinely wants behind, which is
+            // how a drop shadow that extends past the window is drawn. Doing it this way
+            // once before put such a shadow over the client's own content and swallowed the
+            // clicks aimed at it. No client we run does that today, and a bubble nobody can
+            // see is the worse of the two failures, but that is the trade and it is the
+            // thing to suspect if a client ever comes back looking veiled.
+            let steps = -(slot as f32 + 1.0);
             subs.push((
                 j,
                 windows.canvas_x[i] + ox,
