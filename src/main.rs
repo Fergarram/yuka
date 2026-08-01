@@ -2017,13 +2017,17 @@ fn main() {
                 // on the z=0 plane (constant in world units, independent of z).
                 let (gx, gy) = camera::screen_to_plane(cam3d, sxp, syp, 0.0)
                     .unwrap_or((ox, oy));
-                // Zoomed out, picking a window up lifts it toward the camera, which is the
-                // canvas idiom for having it in your hand and reads well when you can see the
-                // whole desk. At 1:1 and above it only comes to the front and stays on the
-                // plane: a lift there is perspective applied to something already filling the
-                // screen, so it swims rather than rises, and it takes the window off the pixel
-                // grid while you are close enough to see that happen.
-                if cam.zoom < 1.0 {
+                // In the overview, picking a window up lifts it toward the camera, which is
+                // the canvas idiom for having it in your hand and reads well when you can see
+                // the whole desk. At 1:1 it only comes to the front and stays on the plane: a
+                // lift there is perspective applied to something already filling the screen,
+                // so it swims rather than rises, and it takes the window off the pixel grid
+                // while you are close enough to watch that happen.
+                //
+                // Asked of the mode rather than of the zoom. They agree once a gesture has
+                // settled, but mid-pinch the zoom is somewhere in between and a drag started
+                // then would decide from a number that is still moving.
+                if zoomed_out {
                     render::raise(&mut windows, &surf);
                 } else {
                     render::front(&mut windows, &surf);
