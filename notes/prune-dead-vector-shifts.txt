@@ -1,0 +1,30 @@
+PRUNE_DEAD SHIFTS ELEVEN PARALLEL VECTORS PER REMOVAL
+
+src/render.rs. prune_dead removes a dead window with Vec::remove(i) on each of the
+parallel columns. Vec::remove shifts every element after i, so one dead window is
+eleven memmoves, and n dead windows in a frame is O(n * len) on each column.
+
+Order in the store is not carried by index. Draw order comes from the order column
+(draw_toplevels sorts by z then order) and placement comes from place_x, so nothing
+observes the slot ordering. swap_remove is correct here and is already what
+DmabufCache::evict and release_held_dmabuf use.
+
+The loop has to not advance i after a swap, since the swapped-in element is
+unexamined:
+
+    let mut i = 0;
+    while i < windows.surface.len() {
+        if windows.surface[i].is_alive() {
+            i += 1;
+            continue;
+        }
+        if windows.owns[i] && windows.tex_id[i] != 0 {
+            ray::unload_texture(windows.tex_id[i]);
+        }
+        windows.surface.swap_remove(i);
+        windows.tex_id.swap_remove(i);
+        // ... remaining columns
+        // no i += 1: re-test the element swapped into this slot
+    }
+
+Irrelevant at four windows. Relevant when an infinite canvas means hundreds.

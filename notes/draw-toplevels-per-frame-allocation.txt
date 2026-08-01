@@ -1,0 +1,15 @@
+DRAW_TOPLEVELS ALLOCATES AND SORTS A FRESH INDEX LIST EVERY FRAME
+
+src/render.rs. The draw pass builds `let mut idx: Vec<usize> = ...collect()` and sorts
+it, once per frame, forever. That is one heap allocation per frame in the hot path.
+
+Windows already owns a reused scratch buffer for shm row repacking; this wants the
+same treatment, a draw_order: Vec<usize> field cleared and refilled rather than
+allocated. That makes draw_toplevels take &mut Windows, which is fine, or the scratch
+can be threaded in from the caller if the draw pass should stay read-only over the
+store.
+
+Secondary: the sort is a full comparison sort over all windows every frame, but z only
+changes for windows that are lifting or settling and order only changes on front. A
+dirty flag set by animate, front, raise and settle would skip the sort entirely on the
+common frame where nothing moved.

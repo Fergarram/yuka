@@ -1,0 +1,152 @@
+WINDOW RESIZE IMPROVEMENT
+
+The problem, stated precisely
+
+    A resize drag has two halves that cannot be simultaneous. The quad tracks the
+    cursor immediately, the client's pixels arrive a round trip later. Today the
+    error is absorbed by stretching the quad (set.resize_stretch), so the corner is
+    always right and the content is stale and smeared. Turning the stretch off moves
+    the error to the other side: the pixels are always right and the corner trails
+    your hand.
+
+    The drag logic in main.rs is already the right shape. It asks every frame, gates
+    on the client having answered, recomputes the stretch against what the client
+    actually committed so a mid-drag commit changes pixels without moving the corner,
+    and learns min/max limits from monotone behaviour rather than from asks. None of
+    the remaining latency lives there.
+
+    What follows is ordered by value over effort. Do 1 and 2 first and measure before
+    writing 3 onward, because they may be enough.
+
+
+1. Flush this frame's configure and input before the blocking draw
+
+    The flush at main.rs:963 is correctly placed for frame callbacks: it lands before
+    the vsync-blocking draw on purpose, so a client renders concurrently with our page
+    flip instead of waiting a refresh. Its comment says so.
+
+    But the two things that matter for resize feel are sent later in the same
+    iteration and therefore miss it:
+
+        main.rs:1375   resize_toplevel, the configure for this frame's corner
+        main.rs:1650   route_input, this frame's pointer and keyboard events
+
+    Both sit in a local buffer until the next iteration reaches 963. In between is
+    end_drawing at main.rs:1720, which on DRM is a blocking modeset, the longest wait
+    in the frame. We compute the configure, hold it through the vblank, and hand it
+    over as the next frame starts.
+
+    Fix: a second flush after route_input and the resize block, immediately before
+    begin_drawing at main.rs:1679.
+
+        wl::state::flush(&mut server);
+        ray::begin_drawing();
+
+    Effect: the configure and the pointer events reach the client roughly a frame
+    earlier, and the client gets the whole draw plus vblank interval to answer rather
+    than starting after it.
+
+    This is not resize specific. Every pointer motion, button and key we route is
+    currently delivered a frame late. That is a frame off client input latency in
+    general.
+
+    The alternative is reordering so input poll, route_input and the resize ask all
+    precede the frame callback batch, keeping a single flush. Cleaner to read, but
+    route_input needs the camera and the window store current for hit testing and the
+    draw depends on route_input, so the reorder is not free. Prefer the second flush
+    unless the loop is being rearranged for other reasons.
+
+
+2. Ask the client for its fast path
+
+    resize_toplevel in wl/state.rs:309 sets only pending.size. Nothing in state.rs
+    ever touches pending.states.
+
+    Clients branch on xdg_toplevel::State::Resizing. Without it, GTK, Qt and Chromium
+    read each configure as a discrete window change and take the full relayout path.
+    With it, they know they are inside a stream and take shortcuts, and they skip
+    animations that make the trailing worse. We are currently always asking for
+    correct and never for fast.
+
+    Set it on every configure sent during a drag, clear it on release so the final
+    configure gets the proper layout. That means resize_toplevel needs to know which
+    of the two it is, e.g. a bool parameter, since the released ask at main.rs:1389
+    and the settle ask want it off while the per-frame ask at main.rs:1375 wants it
+    on.
+
+        toplevel.with_pending_state(|pending| {
+            pending.size = Some((w, h).into());
+            if resizing {
+                pending.states.set(xdg_toplevel::State::Resizing);
+            } else {
+                pending.states.unset(xdg_toplevel::State::Resizing);
+            }
+        });
+
+    While in here: nothing sets Activated either, so no client ever knows it has
+    keyboard focus. Separate issue, same two lines of the same function, visible as
+    greyed out chrome and missing focus rings.
+
+
+3. Predict instead of chase
+
+    We already measure the latency. r.waited is how many frames the client took to
+    answer the last ask.
+
+    Ask for where the corner will be when that buffer lands, not where the cursor is
+    now: target plus corner velocity times the measured answer latency. The residual
+    stretch then converges toward 1.0 during a steady drag instead of sitting at a
+    fixed error, and nothing waits for anything.
+
+    Clamp the prediction on direction reversal, otherwise an overshoot fights the
+    learned limits and the stuck counters read it as a refusal.
+
+    Note that om_wm.conf sets resize_wait_frames = 0 while settings.rs defaults it to
+    8. With 0, r.waited is always at least 1 by the time the gate is tested, so the
+    condition at main.rs:1374 reduces to `moved` and the one-in-flight gate is
+    effectively off in the shipped configuration. So the lever here really is
+    prediction, not gating. Worth deciding which of the two defaults is the intended
+    one while touching this.
+
+
+4. Learn the size quantum, like we learn the limits
+
+    RESIZE_PROGRESS_PX = 4.0 at main.rs:172 is a hardcoded stand-in for the fact that
+    a terminal answers in whole character cells.
+
+    The same trick that learns least/most can learn the step: take the differences
+    between consecutive committed sizes during a drag and only ask on those
+    boundaries. Every ask a client rounds away is a wasted round trip, and inside a
+    one-in-flight window a wasted round trip is a frame of staleness.
+
+
+5. What is drawn in the gap is a look, not a latency
+
+    If the stretch still reads badly on a slow client, the remaining fix is what fills
+    the gap, not when it arrives. Scaling resamples glyphs, which is why the artefact
+    is loudest on terminals.
+
+    The alternative: keep the texture at 1:1 anchored to the fixed corner, fill the
+    uncovered strips from the edge pixels when growing, crop them when shrinking. The
+    corner still tracks the cursor exactly and text stays crisp. The cost is that a
+    client with bottom-right chrome shows that chrome in the wrong place until it
+    catches up, where a scale keeps it proportionally placed.
+
+    Text wants crop, chrome wants scale, so this is a third value on
+    set.resize_stretch rather than a replacement for it.
+
+
+6. Measure it
+
+    Add ask-to-answer frames to the per-window debug labels (the ones from devlog 12).
+    A client that answers in one frame should probably be driven synchronously with no
+    stretch at all, since that is the conventional behaviour and it would feel exact.
+    A client that answers in five needs everything above. Right now we cannot tell
+    which client is which, so the policy has to be one size fits all.
+
+
+Stale comment to fix while in here
+
+    render.rs:75 says the drag scales the quad and "ask nothing, then ask once on
+    release". main.rs does the opposite: it asks every frame and asks again on
+    release. The Resize doc comment at main.rs:106 is the accurate one.
