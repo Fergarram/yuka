@@ -71,9 +71,10 @@ pub struct Windows {
     pub swizzle: Vec<f32>,
     // Live stretch, while a resize drag is in progress. A resize on Wayland is a
     // request: we ask, the client renders, and its pixels arrive a round trip later,
-    // which reads as the window trailing your hand. So during the drag we scale the
-    // quad here instead and ask nothing, then ask once on release. 1.0 the rest of the
-    // time, which is every window almost always.
+    // which reads as the window trailing your hand. So the quad is scaled here to where
+    // the cursor is while the client is asked for the same size in parallel, and the
+    // scale converges to 1.0 as its buffers catch up. 1.0 the rest of the time, which is
+    // every window almost always.
     pub scale_x: Vec<f32>,
     pub scale_y: Vec<f32>,
     // What the sampler is set to right now, so the choice is only pushed to GL when it

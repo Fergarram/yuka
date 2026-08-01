@@ -115,8 +115,11 @@ pub struct State {
     // Clients asking to be moved or resized, from dragging their own titlebar or edge.
     // Drained each frame by the canvas code, which is where a drag actually lives. The
     // resize entries carry which edges are moving, as a direction per axis.
-    pub move_requests: Vec<WlSurface>,
-    pub resize_requests: Vec<(WlSurface, i32, i32)>,
+    // Each carries the serial of the press that began it, which is what the compositor is
+    // meant to anchor the drag to: the request arrives a client's worth of latency after
+    // that press, and by then the pointer has moved on.
+    pub move_requests: Vec<(WlSurface, u32)>,
+    pub resize_requests: Vec<(WlSurface, i32, i32, u32)>,
     // The dmabuf we are currently displaying per surface, kept alive (not
     // released) so the client cannot overwrite it while we re-sample it each
     // frame. Released only when a newer buffer replaces it. shm buffers are not
@@ -517,6 +520,13 @@ pub fn surface_under(
 // dimensions, stride and a pointer to the pixel data (valid only for the call),
 // then release the buffer and clear the pending assignment. Returns true when a
 // shm buffer was handled.
+// Whether this surface is something we draw as a quad. Anything else that commits a buffer
+// is a cursor, a drag icon or similar, and the window path releases those buffers rather
+// than keeping them, which is why a cursor's pixels have to be taken before it does.
+pub fn is_window_like(state: &State, surface: &WlSurface) -> bool {
+    is_toplevel(state, surface) || is_popup(state, surface) || is_subsurface(surface)
+}
+
 // Read a cursor surface's pixels without consuming them. A cursor surface is committed
 // like any other, but it is not a window: nothing else in om_wm will take its buffer, and
 // the buffer has to stay put because a cursor is uploaded again every time it moves shape
@@ -798,15 +808,16 @@ impl XdgShellHandler for State {
     // its own edge means: the chrome belongs to the client, the window does not, so it has
     // to ask. Queued rather than acted on, because the drag lives in the canvas code and
     // this is the protocol boundary; main drains these the way it drains commits.
-    fn move_request(&mut self, surface: ToplevelSurface, _seat: WlSeat, _serial: Serial) {
-        self.move_requests.push(surface.wl_surface().clone());
+    fn move_request(&mut self, surface: ToplevelSurface, _seat: WlSeat, serial: Serial) {
+        self.move_requests
+            .push((surface.wl_surface().clone(), u32::from(serial)));
     }
 
     fn resize_request(
         &mut self,
         surface: ToplevelSurface,
         _seat: WlSeat,
-        _serial: Serial,
+        serial: Serial,
         edges: ResizeEdge,
     ) {
         // Which edges the client is dragging, as a direction per axis: 1 for the far edge
@@ -826,7 +837,8 @@ impl XdgShellHandler for State {
             // Super+drag would use rather than ignoring the request.
             _ => (1, 1),
         };
-        self.resize_requests.push((surface.wl_surface().clone(), ex, ey));
+        self.resize_requests
+            .push((surface.wl_surface().clone(), ex, ey, u32::from(serial)));
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {

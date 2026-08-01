@@ -28,6 +28,7 @@ use smithay::input::keyboard::{FilterResult, Keycode};
 use smithay::input::pointer::CursorImageStatus;
 use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::reexports::wayland_server::backend::ObjectId;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 
@@ -208,6 +209,17 @@ fn spawn_client(socket_name: &str, cmd: &str) -> Option<Child> {
     }
 }
 
+// Where the press with this serial landed, or the current pointer if we no longer have it.
+// A client quotes the serial of the press that started a move or resize, and that press is
+// the only honest anchor for the drag.
+fn press_at(log: &[(u32, f32, f32)], serial: u32, now_x: f32, now_y: f32) -> (f32, f32) {
+    log.iter()
+        .rev()
+        .find(|(s, _, _)| *s == serial)
+        .map(|(_, x, y)| (*x, *y))
+        .unwrap_or((now_x, now_y))
+}
+
 //
 // Pointer routing
 //
@@ -230,6 +242,20 @@ fn route_input(
     kb: Option<&input::Input>,
     debug: bool,
     super_down: bool,
+    // True while we are moving or resizing a window because the client asked us to. The
+    // compositor owns the pointer for the duration of an xdg_toplevel move or resize, and a
+    // client does not expect motion inside itself while it believes it is being dragged.
+    // Sending it anyway is what made Chromium jump: it reconciles our motion against its own
+    // drag when the drag ends. Super+drag never showed it, because Super suppresses client
+    // pointer events entirely, which is the same thing by a different route.
+    //
+    // Buttons still go through, since the release is what ends the client's own drag.
+    client_grab: bool,
+    // Where each button press landed, against the serial sent with it. A client asking to be
+    // moved or resized quotes that serial, and anchoring the drag to the press rather than to
+    // the pointer's current position is the difference between dragging from the point you
+    // grabbed and dragging from wherever the pointer reached while the client was deciding.
+    press_log: &mut Vec<(u32, f32, f32)>,
     ptr: &input::Pointer,
     pressed: bool,
     released: bool,
@@ -325,7 +351,7 @@ fn route_input(
         _ => true,
     };
     *last_motion = now_at;
-    if changed || entered {
+    if (changed || entered) && !client_grab {
         let focus = under
             .as_ref()
             .map(|(surf, ox, oy)| (surf.clone(), Point::<f64, Logical>::from((*ox as f64, *oy as f64))));
@@ -409,6 +435,13 @@ fn route_input(
         }
         if down {
             let serial = SERIAL_COUNTER.next_serial();
+            // Remember where this press was, so a move or resize request quoting its serial
+            // can be anchored to it. A handful is plenty: a client asks within a frame or
+            // two, and an older entry is of no use to anyone.
+            press_log.push((u32::from(serial), cxp as f32, cyp as f32));
+            if press_log.len() > 16 {
+                press_log.remove(0);
+            }
             pointer.button(state, &ButtonEvent { serial, time: time_ms, button, state: ButtonState::Pressed });
             sent = true;
         }
@@ -822,6 +855,22 @@ fn main() {
     let mut session_active = true;
     // What the cursor should be showing, as of the last frame, for the debug trace only.
     let mut last_cursor_want = "crosshair";
+    // Where recent button presses landed, by serial, for anchoring client-initiated drags.
+    let mut press_log: Vec<(u32, f32, f32)> = Vec::new();
+    // Cursor images we have seen, kept because a client may switch back to one without
+    // committing it again.
+    //
+    // Chromium keeps a surface per cursor shape and re-uses them: it calls set_cursor on a
+    // surface that committed minutes ago, so there is nothing to read at that moment, and
+    // the plane went on showing the previous shape with the previous hotspot. That looks
+    // like the cursor jumping while the window stays still. weston's toolkit commits every
+    // time, which is why it never showed it.
+    //
+    // Keyed by surface, capped, and only for surfaces small enough to be a cursor.
+    let mut cursor_images: Vec<(ObjectId, i32, i32, Vec<u32>)> = Vec::new();
+    // What we last handed the plane: surface and hotspot, so an unchanged cursor is not
+    // rebuilt every frame.
+    let mut cursor_key: Option<(ObjectId, i32, i32)> = None;
     // The dragged window's geometry as last seen, to notice the client changing it.
     let mut drag_geo: Option<(f32, f32, f32, f32)> = None;
     // When the last middle button press landed, for the double click chord.
@@ -910,26 +959,41 @@ fn main() {
         // of anything that is not a window so the client is not left waiting on it. That
         // includes cursors, which is why reading the pixels later found nothing: they have
         // to be taken here, while the buffer is still attached, and kept.
-        let cursor_surface = match &state.cursor_image {
-            CursorImageStatus::Surface(surf) => Some(surf.clone()),
-            _ => None,
-        };
-        if let (Some(surf), Some(cur)) = (cursor_surface.as_ref(), cursor.as_mut()) {
-            if committed.iter().any(|s| s == surf) {
-                let (hx, hy) = wl::state::cursor_hotspot(surf);
-                wl::state::with_cursor_pixels(surf, |w, h, stride, ptr| {
-                    if debug_input {
-                        println!(
-                            "om_wm: cursor image {w}x{h} hotspot {hx},{hy}{}",
-                            if w > 64 || h > 64 {
-                                " (larger than the 64x64 plane, cropped)"
-                            } else {
-                                ""
-                            }
-                        );
+        // Take a copy of every cursor-sized surface that commits, before the window path
+        // releases its buffer. Cheap: a cursor is a few kilobytes, and there are a handful.
+        for surface in &committed {
+            if wl::state::is_window_like(&state, surface) {
+                continue;
+            }
+            let id = surface.id();
+            let mut taken: Option<(i32, i32, Vec<u32>)> = None;
+            wl::state::with_cursor_pixels(surface, |w, h, stride, ptr| {
+                if w <= 0 || h <= 0 || w > 64 || h > 64 {
+                    return;
+                }
+                let mut pixels = vec![0u32; (w * h) as usize];
+                for y in 0..h as usize {
+                    let src = unsafe { ptr.add(y * stride as usize) as *const u32 };
+                    let dst = &mut pixels[y * w as usize..];
+                    unsafe { std::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), w as usize) };
+                }
+                taken = Some((w, h, pixels));
+            });
+            if let Some((w, h, pixels)) = taken {
+                if debug_input {
+                    println!("om_wm: cursor image {w}x{h} cached");
+                }
+                if let Some(slot) = cursor_images.iter_mut().find(|(k, ..)| *k == id) {
+                    *slot = (id, w, h, pixels);
+                } else {
+                    // A client has a handful of shapes; a cap keeps a misbehaving one from
+                    // growing this without bound.
+                    if cursor_images.len() >= 32 {
+                        cursor_images.remove(0);
                     }
-                    cursor::store_client_image(cur, w, h, stride, ptr, hx, hy);
-                });
+                    cursor_images.push((id, w, h, pixels));
+                }
+                cursor_key = None;
             }
         }
         for surface in &committed {
@@ -1235,9 +1299,6 @@ fn main() {
         render::prune_dead(&mut windows);
         render::animate(&mut windows, ray::frame_time());
         let cam3d = camera::camera_3d(&cam, ray::screen_height(), &set);
-        // Menus and subsurfaces are anchored to their parent, so they are placed
-        // before anything is hit tested or drawn.
-        render::sync_children(&mut windows);
         let cursor_pos = pointer_xy;
 
         // Super+drag: grab the window under the cursor and lift it toward the
@@ -1528,11 +1589,16 @@ fn main() {
         // What clients asked for themselves: a titlebar drag is a move request, an edge
         // drag is a resize request. Only in work mode, where the client owns the pointer;
         // in desk mode it never saw the press that would have started one.
-        let asked_move: Vec<WlSurface> = state.move_requests.drain(..).collect();
-        let asked_resize: Vec<(WlSurface, i32, i32)> = state.resize_requests.drain(..).collect();
+        let asked_move: Vec<(WlSurface, u32)> = state.move_requests.drain(..).collect();
+        let asked_resize: Vec<(WlSurface, i32, i32, u32)> = state.resize_requests.drain(..).collect();
         if mode == Mode::Work {
-            if let Some(surf) = asked_move.into_iter().last() {
-                if let Some((gx, gy)) = camera::screen_to_plane(cam3d, sxp, syp, 0.0) {
+            if let Some((surf, serial)) = asked_move.into_iter().last() {
+                // Anchor to the press the client is quoting. Between that press and this
+                // request sits the client's own latency, and a pointer that kept moving
+                // through it: anchoring to where the pointer is now would drag the window
+                // from a point you never grabbed. Falls back to now if the serial is stale.
+                let (ax, ay) = press_at(&press_log, serial, sxp, syp);
+                if let Some((gx, gy)) = camera::screen_to_plane(cam3d, ax, ay, 0.0) {
                     // The surface position, not the visible top-left: the drag applies its
                     // offset with set_window_pos, which is in surface coordinates, and a
                     // client's geometry offset sits between the two. Mixing them moved the
@@ -1557,9 +1623,10 @@ fn main() {
                     }
                 }
             }
-            if let Some((surf, ex, ey)) = asked_resize.into_iter().last() {
+            if let Some((surf, ex, ey, serial)) = asked_resize.into_iter().last() {
+                let (ax, ay) = press_at(&press_log, serial, sxp, syp);
                 if let (Some((gx, gy)), Some((w, h)), Some((ox, oy))) = (
-                    camera::screen_to_plane(cam3d, sxp, syp, 0.0),
+                    camera::screen_to_plane(cam3d, ax, ay, 0.0),
                     render::geo_size(&windows, &surf),
                     render::window_origin(&windows, &surf),
                 ) {
@@ -1603,6 +1670,32 @@ fn main() {
         // The hotspot comes with it, which is the part that was wrong before: a cursor
         // image says where in itself the pointer actually is, and without honouring that
         // the click lands somewhere other than the tip.
+        // Hand the plane whatever the client is currently asking for, from the cache. The
+        // hotspot is read live, because set_cursor can change it without the surface
+        // committing anything.
+        if let (Some(cur), CursorImageStatus::Surface(surf)) = (cursor.as_mut(), &state.cursor_image)
+        {
+            let id = surf.id();
+            let (hx, hy) = wl::state::cursor_hotspot(surf);
+            if cursor_key.as_ref() != Some(&(id.clone(), hx, hy)) {
+                if let Some((_, w, h, pixels)) = cursor_images.iter().find(|(k, ..)| *k == id) {
+                    if debug_input {
+                        println!("om_wm: cursor now {w}x{h} hotspot {hx},{hy}");
+                    }
+                    cursor::store_client_image(
+                        cur,
+                        *w,
+                        *h,
+                        w * 4,
+                        pixels.as_ptr() as *const u8,
+                        hx,
+                        hy,
+                    );
+                    cursor_key = Some((id, hx, hy));
+                }
+            }
+        }
+
         if let Some(cur) = cursor.as_mut() {
             let client_cursor = mode == Mode::Work && hovered.is_some();
             if debug_input {
@@ -1628,9 +1721,17 @@ fn main() {
             }
         }
 
-        // Everything that could move a window has run: the drag, the settle, and the
-        // child placement above. Put them all on the pixel grid, then decide how each
-        // one is sampled from where it actually ended up.
+        // Menus and subsurfaces are anchored to their root, so they are placed after
+        // everything that could have moved that root: the drag, the settle, the client's own
+        // move and resize requests.
+        //
+        // This used to run before all of that, which meant a window's children were placed
+        // from where it was a frame ago. Invisible on a client without subsurfaces, and
+        // visible on Chromium as part of the window trailing the rest of it while dragging.
+        render::sync_children(&mut windows);
+
+        // Everything that could move a window has run. Put them all on the pixel grid, then
+        // decide how each one is sampled from where it actually ended up.
         render::align_positions(&mut windows, cam.zoom);
         render::prepare_textures(&mut windows, cam.zoom, anisotropy);
 
@@ -1660,6 +1761,9 @@ fn main() {
                 inp.as_ref(),
                 debug_input,
                 super_down,
+                drag.as_ref().map(|d| d.from_client).unwrap_or(false)
+                    || resize.as_ref().map(|r| !r.right_button).unwrap_or(false),
+                &mut press_log,
                 &ptr,
                 pressed,
                 released,
@@ -1674,6 +1778,23 @@ fn main() {
         // nobody is holding.
         if let Some(i) = inp.as_ref() {
             forward_keys(&mut state, i, time_ms);
+        }
+
+        // Everything routed this frame goes out now, not on the next iteration.
+        //
+        // The flush that sends frame callbacks happens near the top of the loop, which is
+        // right for callbacks: a client then renders while we are blocked presenting. But
+        // this frame's pointer events, keys and resize configures are produced after it, so
+        // they used to sit in the buffer through the blocking present and reach the client as
+        // the next frame began. A frame of latency on everything we say to a client, for want
+        // of a flush.
+        wl::state::flush(&mut server);
+
+        // While a window is following the pointer, the cursor plane waits for the frame that
+        // window is in: the plane would otherwise be a frame ahead of it, which is the whole
+        // of what "the window lags the cursor" is.
+        if let Some(cur) = cursor.as_mut() {
+            cursor::set_deferred(cur, drag.is_some() || resize.is_some());
         }
 
         ray::begin_drawing();
@@ -1716,6 +1837,10 @@ fn main() {
         if screenshot && frame == shot_frame {
             ray::flush_batch();
             ray::take_screenshot("shot.png");
+        }
+        // Just before the present, so the plane and the frame land together.
+        if let Some(cur) = cursor.as_mut() {
+            cursor::present_deferred(cur);
         }
         ray::end_drawing();
 

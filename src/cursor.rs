@@ -135,6 +135,15 @@ pub struct Cursor {
     // it drags does not is either being told late, or being told slowly.
     move_calls: u64,
     move_ms: f64,
+    // Whether to hold the plane back until the frame is about to be presented.
+    //
+    // The plane updates the instant the ioctl lands, while our windows only appear at the
+    // next flip. Both are computed from the same input sample, so they agree about where the
+    // pointer is, but the cursor gets there a frame earlier. That is invisible until a window
+    // is following the cursor, when it reads as the window trailing and catching up. While
+    // that is happening the move waits for present_deferred, just before the flip, and the
+    // two land together.
+    deferred: bool,
 }
 
 // Which image the plane is carrying.
@@ -237,6 +246,7 @@ pub fn init(screen_w: i32, screen_h: i32) -> Option<Cursor> {
         shown_y: i32::MIN,
         move_calls: 0,
         move_ms: 0.0,
+        deferred: false,
     };
     let (x, y) = (c.x, c.y);
     move_to(&mut c, x, y);
@@ -260,7 +270,25 @@ pub fn move_by(c: &mut Cursor, dx: i32, dy: i32) {
 fn move_to(c: &mut Cursor, x: i32, y: i32) {
     c.x = x;
     c.y = y;
-    place(c);
+    if !c.deferred {
+        place(c);
+    }
+}
+
+// Hold the plane back to present time, or stop doing so. On for as long as something on the
+// canvas is following the pointer.
+pub fn set_deferred(c: &mut Cursor, deferred: bool) {
+    c.deferred = deferred;
+    if !deferred {
+        place(c);
+    }
+}
+
+// Move the plane now, for the caller that knows the frame is about to be presented.
+pub fn present_deferred(c: &mut Cursor) {
+    if c.deferred {
+        place(c);
+    }
 }
 
 // Put the plane where the pointer is, unless it is already there. The plane's top-left goes
