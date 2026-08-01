@@ -41,7 +41,9 @@ use smithay::wayland::selection::data_device::{
 };
 use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::shm::with_buffer_contents;
-use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge;
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::{
+    ResizeEdge, State as ToplevelState,
+};
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface,
     XdgShellHandler, XdgShellState,
@@ -309,7 +311,38 @@ pub fn toplevel_surfaces(state: &State) -> Vec<WlSurface> {
 //
 // Called every frame of a resize drag: Smithay only puts a configure on the wire when
 // the pending state actually differs, so a drag that has not moved sends nothing.
-pub fn resize_toplevel(state: &State, surface: &WlSurface, w: i32, h: i32) {
+// Tell a toplevel whether it has the keyboard.
+//
+// A client draws its own chrome, and it draws it greyed out with no focus ring until it is
+// told otherwise, because Activated is the only way it can know. Nothing set it, so every
+// window has been rendering itself as the inactive one since the first client connected.
+//
+// Smithay only puts a configure on the wire when the pending state actually differs, so
+// calling this for a window that is already in the state asked for costs nothing.
+pub fn set_activated(state: &State, surface: &WlSurface, active: bool) {
+    let Some(toplevel) = state
+        .xdg_state
+        .toplevel_surfaces()
+        .iter()
+        .find(|t| t.wl_surface() == surface)
+    else {
+        return;
+    };
+    toplevel.with_pending_state(|pending| {
+        if active {
+            pending.states.set(ToplevelState::Activated);
+        } else {
+            pending.states.unset(ToplevelState::Activated);
+        }
+    });
+    toplevel.send_pending_configure();
+}
+
+// resizing says whether this configure is one of a stream. A client that knows it is being
+// dragged takes a cheaper relayout path and skips the animations it would otherwise play on
+// a size change, which is the difference between a drag that keeps up and one that does not.
+// It has to be cleared on the last configure, so the client lays out properly once it stops.
+pub fn resize_toplevel(state: &State, surface: &WlSurface, w: i32, h: i32, resizing: bool) {
     let Some(toplevel) = state
         .xdg_state
         .toplevel_surfaces()
@@ -323,6 +356,11 @@ pub fn resize_toplevel(state: &State, surface: &WlSurface, w: i32, h: i32) {
     let h = clamp_dim(h, min.1, max.1);
     toplevel.with_pending_state(|pending| {
         pending.size = Some((w, h).into());
+        if resizing {
+            pending.states.set(ToplevelState::Resizing);
+        } else {
+            pending.states.unset(ToplevelState::Resizing);
+        }
     });
     toplevel.send_pending_configure();
 }

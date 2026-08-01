@@ -209,6 +209,30 @@ fn spawn_client(socket_name: &str, cmd: &str) -> Option<Child> {
     }
 }
 
+// Move the keyboard, and tell both windows involved.
+//
+// Focus is two facts, not one: Smithay routes key events to whoever holds it, and the client
+// draws itself differently depending on whether it has it. Only the first was being done, so
+// every window drew its chrome greyed out with no focus ring, forever, however focused it
+// actually was. Activated is the only way a client can know, and nothing was setting it.
+//
+// One place for all of it, because the focus changes in four (a press on a window, a press on
+// empty canvas, Super+Escape, and leaving work mode) and three of them would have forgotten.
+fn focus_window(state: &mut State, focused: &mut Option<WlSurface>, next: Option<WlSurface>) {
+    if *focused == next {
+        return;
+    }
+    if let Some(old) = focused.as_ref() {
+        wl::state::set_activated(state, old, false);
+    }
+    if let Some(new) = next.as_ref() {
+        wl::state::set_activated(state, new, true);
+    }
+    let serial = SERIAL_COUNTER.next_serial();
+    state.keyboard.clone().set_focus(state, next.clone(), serial);
+    *focused = next;
+}
+
 // Which corner of a window a point pulls on, as a direction per axis: 1 for the far edge
 // (right, bottom), -1 for the near one. split_x and split_y say where each axis divides, as a
 // fraction of the window, so 0.5 is down the middle and 0.25 puts the boundary a quarter of
@@ -311,15 +335,13 @@ fn route_input(
         .unwrap_or((0.0, 0.0));
     let loc = Point::<f64, Logical>::from((ccx as f64, ccy as f64));
     let pointer = state.pointer.clone();
-    let keyboard = state.keyboard.clone();
 
     // Super+Escape drops keyboard focus.
     let super_escape = kb
         .map(|kb| input::super_down(kb) && input::down(kb, input::KEY_ESC))
         .unwrap_or(false);
     if super_escape && focused.is_some() {
-        keyboard.set_focus(state, None, SERIAL_COUNTER.next_serial());
-        *focused = None;
+        focus_window(state, focused, None);
     }
 
     // Super claims the pointer for the canvas: no hover, no buttons, no scroll for
@@ -453,17 +475,9 @@ fn route_input(
                 // reason at all.
                 let window = wl::state::window_root(state, surf);
                 render::front(windows, &window);
-                if focused.as_ref() != Some(&window) {
-                    *focused = Some(window.clone());
-                    keyboard.set_focus(state, Some(window), SERIAL_COUNTER.next_serial());
-                }
+                focus_window(state, focused, Some(window));
             }
-            None => {
-                if focused.is_some() {
-                    keyboard.set_focus(state, None, SERIAL_COUNTER.next_serial());
-                    *focused = None;
-                }
-            }
+            None => focus_window(state, focused, None),
         }
     }
 
@@ -1225,11 +1239,7 @@ fn main() {
                 // Leaving work mode takes the keyboard and the pointer back off the
                 // clients, so nothing is left believing it still has either.
                 if mode == Mode::Desk {
-                    if focused.is_some() {
-                        let serial = SERIAL_COUNTER.next_serial();
-                        state.keyboard.clone().set_focus(&mut state, None, serial);
-                        focused = None;
-                    }
+                    focus_window(&mut state, &mut focused, None);
                     hovered = None;
                     grabbed = None;
                     last_motion = None;
@@ -1785,7 +1795,7 @@ fn main() {
                     let moved = (w - r.asked.0).abs() >= 1.0 || (h - r.asked.1).abs() >= 1.0;
                     r.waited += 1;
                     if moved && (answered || r.waited >= set.resize_wait_frames) {
-                        wl::state::resize_toplevel(&state, &r.surface, w as i32, h as i32);
+                        wl::state::resize_toplevel(&state, &r.surface, w as i32, h as i32, true);
                         r.asked = (w, h);
                         r.seen = (gw, gh);
                         r.waited = 0;
@@ -1798,17 +1808,20 @@ fn main() {
                     // and nothing to wait for: the quad has been showing the client's own
                     // size all along, so the last ask simply lands whenever it lands.
                     if alive {
-                        if let Some((w, h)) = want {
-                            let was = render::geo_size(&windows, &r.surface)
-                                .unwrap_or((r.from_w, r.from_h));
-                            wl::state::resize_toplevel(&state, &r.surface, w as i32, h as i32);
-                            if set.resize_stretch {
-                                resize_settle = Some(ResizeSettle {
-                                    surface: r.surface.clone(),
-                                    was,
-                                    frames: 0,
-                                });
-                            }
+                        let was = render::geo_size(&windows, &r.surface)
+                            .unwrap_or((r.from_w, r.from_h));
+                        // Unconditional, where it used to be skipped if the cursor could not
+                        // be projected: this configure is what takes the client back out of
+                        // Resizing, and one that never goes out leaves it laying out for a
+                        // drag that finished.
+                        let (w, h) = want.unwrap_or(was);
+                        wl::state::resize_toplevel(&state, &r.surface, w as i32, h as i32, false);
+                        if set.resize_stretch {
+                            resize_settle = Some(ResizeSettle {
+                                surface: r.surface.clone(),
+                                was,
+                                frames: 0,
+                            });
                         }
                     }
                     resize = None;
