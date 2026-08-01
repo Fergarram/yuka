@@ -209,6 +209,43 @@ fn spawn_client(socket_name: &str, cmd: &str) -> Option<Child> {
     }
 }
 
+// Which corner of a window a point pulls on, as a direction per axis: 1 for the far edge
+// (right, bottom), -1 for the near one. split_x and split_y say where each axis divides, as a
+// fraction of the window, so 0.5 is down the middle and 0.25 puts the boundary a quarter of
+// the way in and hands three quarters of that axis to the far side.
+//
+// Measured from the window's own edges rather than tested against its bounds, so it still
+// answers once the cursor has left the window entirely, which it does for most of a drag.
+fn corner_at(
+    px: f32,
+    py: f32,
+    ox: f32,
+    oy: f32,
+    w: f32,
+    h: f32,
+    split_x: f32,
+    split_y: f32,
+) -> (f32, f32) {
+    (
+        if px < ox + w * split_x { -1.0 } else { 1.0 },
+        if py < oy + h * split_y { -1.0 } else { 1.0 },
+    )
+}
+
+// Where an axis divides for a drag currently holding a given side of it. The side being held
+// keeps `hold` of the axis, so the boundary sits out of its way: hold the far side and it
+// moves toward the near edge, and the other way round.
+//
+// Asked with the corner in force rather than the one the drag started on, which is what makes
+// it hysteresis instead of a one-time bias: crossing over re-homes to the new corner, whose
+// own boundary is then the same distance away on the other side. Between the two the corner
+// does not change at all, so with hold at 0.75 the middle half of the window is a band where
+// a drag simply keeps doing what it was doing.
+fn corner_split(start_edge: f32, hold: f32) -> f32 {
+    let hold = hold.clamp(0.5, 0.95);
+    if start_edge > 0.0 { 1.0 - hold } else { hold }
+}
+
 // Where the press with this serial landed and on which frame, or the current pointer if we
 // no longer have it. A client quotes the serial of the press that started a move or resize,
 // and that press is the only honest anchor for the drag. The frame comes back with it so the
@@ -1537,6 +1574,34 @@ fn main() {
                         }
                         render::clear_scale(&mut windows, &root);
                         let (ox, oy) = render::window_origin(&windows, &root).unwrap_or((0.0, 0.0));
+                        // Which corner the drag holds, from the quadrant the press landed in.
+                        // Grab near the top left and the top left is what moves, the way every
+                        // other desktop does it, instead of always dragging the bottom right
+                        // corner however you grabbed the window.
+                        //
+                        // The opposite corner is what stays nailed down, and a near edge moving
+                        // means the window's origin travels as it grows, which the Resize block
+                        // already knows how to do for a client dragging its own edge.
+                        //
+                        // Always a corner, never a single edge. Splitting into nine rather than
+                        // four would add pure horizontal and vertical drags, at the cost of a
+                        // middle region where a drag resizes nothing at all.
+                        // An even split here: nothing has begun yet, so there is no quadrant
+                        // to favour. What it picks becomes the one favoured from now on.
+                        let (edge_x, edge_y) = corner_at(gx, gy, ox, oy, w, h, 0.5, 0.5);
+                        if debug_input {
+                            println!(
+                                "om_wm: resize grabbed {:.0},{:.0} into {w:.0}x{h:.0}, holding the {} corner",
+                                gx - ox,
+                                gy - oy,
+                                match (edge_x < 0.0, edge_y < 0.0) {
+                                    (true, true) => "top left",
+                                    (false, true) => "top right",
+                                    (true, false) => "bottom left",
+                                    (false, false) => "bottom right",
+                                }
+                            );
+                        }
                         resize = Some(Resize {
                             surface: root,
                             grab_x: gx,
@@ -1545,8 +1610,8 @@ fn main() {
                             from_y: oy,
                             from_w: w,
                             from_h: h,
-                            edge_x: 1.0,
-                            edge_y: 1.0,
+                            edge_x,
+                            edge_y,
                             right_button: true,
                             asked: (w, h),
                             seen: (w, h),
@@ -1564,6 +1629,67 @@ fn main() {
         }
         if let Some(r) = resize.as_mut() {
             let alive = r.surface.is_alive();
+            // Which corner the drag holds, re-tested every frame against the side of the
+            // window the cursor is on. The press decides where it starts and after that it
+            // follows your hand: cross the middle and the opposite corner takes over without
+            // letting go of the button.
+            //
+            // The consequence, chosen deliberately: shrinking inward eventually carries the
+            // cursor past the middle, the corner changes hands, and the window starts growing
+            // the other way instead of shrinking further. Going back the way you came undoes
+            // it, so it reads as pushing the window's edges around rather than as a mode.
+            //
+            // Only for our own drag. A client dragging its own edge named which edge that was,
+            // and a request to move the right edge must not turn into moving the top one.
+            if alive && r.right_button {
+                if let (Some((cx, cy)), Some((ow, oh)), Some((ox, oy))) = (
+                    camera::screen_to_plane(cam3d, sxp, syp, 0.0),
+                    render::geo_size(&windows, &r.surface),
+                    render::window_origin(&windows, &r.surface),
+                ) {
+                    let (ex, ey) = corner_at(
+                        cx,
+                        cy,
+                        ox,
+                        oy,
+                        ow,
+                        oh,
+                        corner_split(r.edge_x, set.resize_corner_hold),
+                        corner_split(r.edge_y, set.resize_corner_hold),
+                    );
+                    if ex != r.edge_x || ey != r.edge_y {
+                        if debug_input {
+                            println!(
+                                "om_wm: resize now holding the {} corner",
+                                match (ex < 0.0, ey < 0.0) {
+                                    (true, true) => "top left",
+                                    (false, true) => "top right",
+                                    (true, false) => "bottom left",
+                                    (false, false) => "bottom right",
+                                }
+                            );
+                        }
+                        // Re-seeded from here, because the size is measured as displacement
+                        // from where the drag was grabbed. Without this the new corner would
+                        // inherit everything the old one had accumulated and the window would
+                        // jump by that much on the frame it changed hands.
+                        //
+                        // What the client can manage is not re-seeded: the limits it has shown
+                        // us are a property of the window, not of which corner we are holding.
+                        r.edge_x = ex;
+                        r.edge_y = ey;
+                        r.grab_x = cx;
+                        r.grab_y = cy;
+                        r.from_x = ox;
+                        r.from_y = oy;
+                        r.from_w = ow;
+                        r.from_h = oh;
+                        r.asked = (ow, oh);
+                        r.seen = (ow, oh);
+                        r.waited = 0;
+                    }
+                }
+            }
             // Canvas units are surface pixels at zoom 1, and projecting the cursor
             // already divides by the zoom, so the corner tracks the cursor at any zoom.
             // Where the cursor says the corner is, held back at whatever the client has

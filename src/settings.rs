@@ -156,6 +156,16 @@ pub struct Settings {
     // How fast it travels back, as a fraction of the remaining distance per second. 0 turns
     // the spring off and a released pinch stays exactly where it was let go.
     pub zoom_spring_rate: f32,
+    // How much of each axis the corner a resize started on keeps, while that resize lasts.
+    //
+    // A drag can change which corner it holds without letting go, decided by which side of
+    // the window the cursor is on. Splitting the window down the middle makes that too easy
+    // to trigger by accident: shrinking inward walks the cursor toward the middle, and
+    // crossing it hands the drag to the opposite corner just as you are getting somewhere.
+    // So the corner you grabbed keeps this much of each axis and the boundary moves out of
+    // its way. 0.5 is an even split and no bias at all; 0.75 gives the starting quadrant
+    // three quarters of the window in both directions.
+    pub resize_corner_hold: f32,
 }
 
 // What the file is compared against: the values that ship, and the mtime that was last
@@ -216,6 +226,7 @@ pub fn defaults() -> Settings {
         fov_deg: 40.0,
         zoom_spring_floor: 0.75,
         zoom_spring_rate: 12.0,
+        resize_corner_hold: 0.75,
     }
 }
 
@@ -373,6 +384,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
         "fov_deg" => f32_key!(fov_deg),
         "zoom_spring_floor" => f32_key!(zoom_spring_floor),
         "zoom_spring_rate" => f32_key!(zoom_spring_rate),
+        "resize_corner_hold" => f32_key!(resize_corner_hold),
         "invert_scroll" => match value {
             "true" | "1" | "yes" => set.invert_scroll = true,
             "false" | "0" | "no" => set.invert_scroll = false,
