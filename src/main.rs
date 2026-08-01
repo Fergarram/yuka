@@ -209,15 +209,22 @@ fn spawn_client(socket_name: &str, cmd: &str) -> Option<Child> {
     }
 }
 
-// Where the press with this serial landed, or the current pointer if we no longer have it.
-// A client quotes the serial of the press that started a move or resize, and that press is
-// the only honest anchor for the drag.
-fn press_at(log: &[(u32, f32, f32)], serial: u32, now_x: f32, now_y: f32) -> (f32, f32) {
+// Where the press with this serial landed and on which frame, or the current pointer if we
+// no longer have it. A client quotes the serial of the press that started a move or resize,
+// and that press is the only honest anchor for the drag. The frame comes back with it so the
+// debug trace can say how long the client took to ask.
+fn press_at(
+    log: &[(u32, f32, f32, u32)],
+    serial: u32,
+    now_x: f32,
+    now_y: f32,
+    now_frame: u32,
+) -> (f32, f32, u32) {
     log.iter()
         .rev()
-        .find(|(s, _, _)| *s == serial)
-        .map(|(_, x, y)| (*x, *y))
-        .unwrap_or((now_x, now_y))
+        .find(|(s, _, _, _)| *s == serial)
+        .map(|(_, x, y, f)| (*x, *y, *f))
+        .unwrap_or((now_x, now_y, now_frame))
 }
 
 //
@@ -255,11 +262,12 @@ fn route_input(
     // moved or resized quotes that serial, and anchoring the drag to the press rather than to
     // the pointer's current position is the difference between dragging from the point you
     // grabbed and dragging from wherever the pointer reached while the client was deciding.
-    press_log: &mut Vec<(u32, f32, f32)>,
+    press_log: &mut Vec<(u32, f32, f32, u32)>,
     ptr: &input::Pointer,
     pressed: bool,
     released: bool,
     time_ms: u32,
+    frame: u32,
 ) {
     let Some((cxp, cyp)) = cursor_pos else { return };
     let (ccx, ccy) = camera::screen_to_plane(cam3d, cxp as f32, cyp as f32, 0.0)
@@ -438,7 +446,7 @@ fn route_input(
             // Remember where this press was, so a move or resize request quoting its serial
             // can be anchored to it. A handful is plenty: a client asks within a frame or
             // two, and an older entry is of no use to anyone.
-            press_log.push((u32::from(serial), cxp as f32, cyp as f32));
+            press_log.push((u32::from(serial), cxp as f32, cyp as f32, frame));
             if press_log.len() > 16 {
                 press_log.remove(0);
             }
@@ -856,7 +864,7 @@ fn main() {
     // What the cursor should be showing, as of the last frame, for the debug trace only.
     let mut last_cursor_want = "crosshair";
     // Where recent button presses landed, by serial, for anchoring client-initiated drags.
-    let mut press_log: Vec<(u32, f32, f32)> = Vec::new();
+    let mut press_log: Vec<(u32, f32, f32, u32)> = Vec::new();
     // Cursor images we have seen, kept because a client may switch back to one without
     // committing it again.
     //
@@ -1310,6 +1318,115 @@ fn main() {
         let (sxp, syp) = cursor_pos
             .map(|(x, y)| (x as f32, y as f32))
             .unwrap_or((0.0, 0.0));
+        // Read the socket once more before asking what clients want. The dispatch at the top
+        // of the loop happens before we have even polled input; a client answering this
+        // frame's press answers while we are blocked in the flip, which lands its request
+        // just after that dispatch and leaves it sitting there for a whole frame. That is
+        // most of the delay on a client that renders through EGL, because such a client is
+        // blocked in its own swap until our flip and cannot read the press before then.
+        //
+        // A commit that arrives here is uploaded on the next frame rather than this one,
+        // which is what already happens to anything that lands late.
+        wl::state::accept_and_dispatch(&mut server, &mut state);
+
+        // What clients asked for themselves: a titlebar drag is a move request, an edge
+        // drag is a resize request. Only in work mode, where the client owns the pointer;
+        // in desk mode it never saw the press that would have started one.
+        //
+        // Drained here, ahead of the two blocks that act on it, because a request that
+        // arrives at the top of this frame and is only picked up below them does not reach
+        // the quad until the next frame. That was a whole frame of the gap between grabbing
+        // a titlebar and the window starting to follow, on top of the round trip we cannot
+        // avoid: the press has to reach the client and its request has to come back.
+        let asked_move: Vec<(WlSurface, u32)> = state.move_requests.drain(..).collect();
+        let asked_resize: Vec<(WlSurface, i32, i32, u32)> = state.resize_requests.drain(..).collect();
+        if mode == Mode::Work {
+            if let Some((surf, serial)) = asked_move.into_iter().last() {
+                // Anchor to the press the client is quoting. Between that press and this
+                // request sits the client's own latency, and a pointer that kept moving
+                // through it: anchoring to where the pointer is now would drag the window
+                // from a point you never grabbed. Falls back to now if the serial is stale.
+                let (ax, ay, af) = press_at(&press_log, serial, sxp, syp, frame);
+                if debug_input {
+                    println!(
+                        "om_wm: move request serial {serial} on frame {frame}, press was frame {af} ({} frames), pointer has travelled {:.0},{:.0} since",
+                        frame.saturating_sub(af),
+                        sxp - ax,
+                        syp - ay
+                    );
+                }
+                if let Some((gx, gy)) = camera::screen_to_plane(cam3d, ax, ay, 0.0) {
+                    // The surface position, not the visible top-left: the drag applies its
+                    // offset with set_window_pos, which is in surface coordinates, and a
+                    // client's geometry offset sits between the two. Mixing them moved the
+                    // window by the client's shadow padding on the first frame.
+                    if let Some((ox, oy)) = render::surface_origin(&windows, &surf) {
+                        settling.retain(|(s, ..)| s != &surf);
+                        if resize_settle.as_ref().map(|st| &st.surface) == Some(&surf) {
+                            resize_settle = None;
+                        }
+                        render::clear_scale(&mut windows, &surf);
+                        // A client-initiated move is always work mode, so no lift: just
+                        // bring it to the front the way any compositor would.
+                        render::front(&mut windows, &surf);
+                        drag = Some(Drag {
+                            surface: surf,
+                            off_x: ox - gx,
+                            off_y: oy - gy,
+                            from_client: true,
+                            start_cursor: (sxp, syp),
+                            start_pos: (ox, oy),
+                        });
+                    }
+                }
+            }
+            if let Some((surf, ex, ey, serial)) = asked_resize.into_iter().last() {
+                let (ax, ay, af) = press_at(&press_log, serial, sxp, syp, frame);
+                if debug_input {
+                    println!(
+                        "om_wm: resize request serial {serial} on frame {frame}, press was frame {af} ({} frames), pointer has travelled {:.0},{:.0} since",
+                        frame.saturating_sub(af),
+                        sxp - ax,
+                        syp - ay
+                    );
+                }
+                if let (Some((gx, gy)), Some((w, h)), Some((ox, oy))) = (
+                    camera::screen_to_plane(cam3d, ax, ay, 0.0),
+                    render::geo_size(&windows, &surf),
+                    render::window_origin(&windows, &surf),
+                ) {
+                    // Same housekeeping the Super path does: a window still settling from
+                    // the last resize is carrying a stretch, and measuring a new drag
+                    // against a stretched window makes it jump.
+                    if resize_settle.as_ref().map(|st| &st.surface) == Some(&surf) {
+                        resize_settle = None;
+                    }
+                    render::clear_scale(&mut windows, &surf);
+                    resize = Some(Resize {
+                        surface: surf,
+                        grab_x: gx,
+                        grab_y: gy,
+                        from_x: ox,
+                        from_y: oy,
+                        from_w: w,
+                        from_h: h,
+                        edge_x: ex as f32,
+                        edge_y: ey as f32,
+                        right_button: false,
+                        asked: (w, h),
+                        seen: (w, h),
+                        waited: 0,
+                        least_w: w,
+                        least_h: h,
+                        most_w: w,
+                        most_h: h,
+                        stuck_small: 0,
+                        stuck_large: 0,
+                    });
+                }
+            }
+        }
+
         // Super+right-drag resizes. Wayland has nothing to stretch: we send the client
         // a configure with the size we want and it renders at that size in its own time,
         // clamping to whatever it declared as its minimum and maximum. So this drag
@@ -1317,6 +1434,7 @@ fn main() {
         //
         // The window's top-left stays put and the far corner follows the cursor, which
         // is the one mapping that needs no handle to grab.
+        //
         // Desk mode needs no modifier: a window is an object, so dragging it moves it and
         // right dragging it resizes it. Work mode keeps both behind Super, where they are
         // the compositor's way rather than the client's.
@@ -1586,82 +1704,6 @@ fn main() {
             });
         }
 
-        // What clients asked for themselves: a titlebar drag is a move request, an edge
-        // drag is a resize request. Only in work mode, where the client owns the pointer;
-        // in desk mode it never saw the press that would have started one.
-        let asked_move: Vec<(WlSurface, u32)> = state.move_requests.drain(..).collect();
-        let asked_resize: Vec<(WlSurface, i32, i32, u32)> = state.resize_requests.drain(..).collect();
-        if mode == Mode::Work {
-            if let Some((surf, serial)) = asked_move.into_iter().last() {
-                // Anchor to the press the client is quoting. Between that press and this
-                // request sits the client's own latency, and a pointer that kept moving
-                // through it: anchoring to where the pointer is now would drag the window
-                // from a point you never grabbed. Falls back to now if the serial is stale.
-                let (ax, ay) = press_at(&press_log, serial, sxp, syp);
-                if let Some((gx, gy)) = camera::screen_to_plane(cam3d, ax, ay, 0.0) {
-                    // The surface position, not the visible top-left: the drag applies its
-                    // offset with set_window_pos, which is in surface coordinates, and a
-                    // client's geometry offset sits between the two. Mixing them moved the
-                    // window by the client's shadow padding on the first frame.
-                    if let Some((ox, oy)) = render::surface_origin(&windows, &surf) {
-                        settling.retain(|(s, ..)| s != &surf);
-                        if resize_settle.as_ref().map(|st| &st.surface) == Some(&surf) {
-                            resize_settle = None;
-                        }
-                        render::clear_scale(&mut windows, &surf);
-                        // A client-initiated move is always work mode, so no lift: just
-                        // bring it to the front the way any compositor would.
-                        render::front(&mut windows, &surf);
-                        drag = Some(Drag {
-                            surface: surf,
-                            off_x: ox - gx,
-                            off_y: oy - gy,
-                            from_client: true,
-                            start_cursor: (sxp, syp),
-                            start_pos: (ox, oy),
-                        });
-                    }
-                }
-            }
-            if let Some((surf, ex, ey, serial)) = asked_resize.into_iter().last() {
-                let (ax, ay) = press_at(&press_log, serial, sxp, syp);
-                if let (Some((gx, gy)), Some((w, h)), Some((ox, oy))) = (
-                    camera::screen_to_plane(cam3d, ax, ay, 0.0),
-                    render::geo_size(&windows, &surf),
-                    render::window_origin(&windows, &surf),
-                ) {
-                    // Same housekeeping the Super path does: a window still settling from
-                    // the last resize is carrying a stretch, and measuring a new drag
-                    // against a stretched window makes it jump.
-                    if resize_settle.as_ref().map(|st| &st.surface) == Some(&surf) {
-                        resize_settle = None;
-                    }
-                    render::clear_scale(&mut windows, &surf);
-                    resize = Some(Resize {
-                        surface: surf,
-                        grab_x: gx,
-                        grab_y: gy,
-                        from_x: ox,
-                        from_y: oy,
-                        from_w: w,
-                        from_h: h,
-                        edge_x: ex as f32,
-                        edge_y: ey as f32,
-                        right_button: false,
-                        asked: (w, h),
-                        seen: (w, h),
-                        waited: 0,
-                        least_w: w,
-                        least_h: h,
-                        most_w: w,
-                        most_h: h,
-                        stuck_small: 0,
-                        stuck_large: 0,
-                    });
-                }
-            }
-        }
-
         // The cursor image. Desk mode is ours: the crosshair says the canvas has the
         // pointer, which is exactly what is true there. Work mode is the client's, because
         // a text field wants an I-beam and a resize edge wants an arrow, and the client is
@@ -1768,6 +1810,7 @@ fn main() {
                 pressed,
                 released,
                 time_ms,
+                frame,
             );
             if pointer_on_client {
                 forward_scroll(&mut state, &ptr, time_ms, &set);
