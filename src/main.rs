@@ -1452,18 +1452,26 @@ fn main() {
             }
         }
 
-        // A pinch that let go a little way out of 1:1 springs back to it. Being at 1:1 is
-        // worth something concrete, since that is the only scale where a window is sampled
-        // texel for texel, and drifting a few percent off it costs sharpness in exchange for
-        // nothing anyone asked for. Past the floor the zoom is taken as deliberate and left
-        // exactly where it was put.
+        // A pinch that let go springs back to 1:1, which is the only scale where a window is
+        // sampled texel for texel and the only one where what you see is what the client
+        // drew.
         //
-        // Only zooming out, and only from a gesture. A wheel notch has no release to spring
-        // from, and springing after each one would make the wheel unable to stop anywhere
-        // between the floor and 1:1.
+        // Zoomed in, always. There is nothing on the other side of 1:1 worth staying at: a
+        // magnified window is the same pixels made bigger, so sitting at 1.4 having let go is
+        // a blurrier version of where you already were.
+        //
+        // Zoomed out, only above the floor. Out there the extra canvas is the point, so past
+        // the floor the zoom is somewhere you asked to be and is left exactly where you put
+        // it. Between the floor and 1:1 it is a few percent of drift and costs sharpness for
+        // nothing.
+        //
+        // Only from a gesture either way. A wheel notch has no release to spring from, and
+        // springing after each one would leave the wheel unable to stop anywhere.
         let zoom_gesture_ended = pad.zoom_ended || ptr.pinch_ended;
         if zoom_gesture_ended && set.zoom_spring_rate > 0.0 {
-            let springs = cam.zoom < 1.0 && cam.zoom > set.zoom_spring_floor;
+            let zoomed_in = cam.zoom > 1.0;
+            let drifted_out = cam.zoom < 1.0 && cam.zoom > set.zoom_spring_floor;
+            let springs = zoomed_in || drifted_out;
             // Anchored where the fingers were, so the canvas point under them is the one
             // that holds still on the way back, exactly as it did during the pinch.
             zoom_spring = springs.then(|| pointer_xy.unwrap_or((0, 0)));
@@ -1488,7 +1496,11 @@ fn main() {
                 ray::screen_height() as f32,
                 &set,
             );
-            if cam.zoom >= 1.0 - SETTLED {
+            // Near 1:1 from either side, not merely past it. Testing for "at least 1:1"
+            // reads correctly climbing back from a zoom out and is already true on the first
+            // frame of a spring coming down from above, which cancelled it after one step
+            // too small to see.
+            if (cam.zoom - 1.0).abs() < SETTLED {
                 zoom_spring = None;
             }
         }

@@ -140,10 +140,12 @@ pub struct Settings {
     // Perspective field of view in degrees. Larger means more parallax on a lifted
     // window.
     pub fov_deg: f32,
-    // Where a pinch that zoomed out settles when the fingers lift. Above this the view
-    // springs back to 1:1; at it or below, the zoom is taken as meant and left alone. 1:1 is
-    // where a window is sampled texel for texel, so drifting a little off it costs sharpness
-    // for nothing, while a deliberate zoom out is somewhere you asked to be.
+    // How far out a pinch may settle before it is taken as meant.
+    //
+    // A released pinch springs back to 1:1. Zoomed in that is unconditional, since a magnified
+    // window is only the same pixels made bigger and there is nothing out there worth staying
+    // at. Zoomed out it applies only above this floor: past it the extra canvas is the point
+    // and the zoom is somewhere you asked to be, so it is left where you put it.
     pub zoom_spring_floor: f32,
     // How fast it travels back, as a fraction of the remaining distance per second. 0 turns
     // the spring off and a released pinch stays exactly where it was let go.
