@@ -104,22 +104,22 @@ struct Drag {
     start_pos: (f32, f32),
 }
 
-// An in-progress Super+right-drag resize.
+// An in-progress resize, ours or one a client asked for.
 //
-// Two things happen at once, because a resize on Wayland cannot be immediate: the
-// configure goes out, the client re-renders, commits, we import and upload, we draw.
-// That round trip is why waiting for the client made the window lerp behind the cursor.
+// A resize on Wayland cannot be immediate: the configure goes out, the client re-renders,
+// commits, we import and upload, we draw. The client is asked for a new size as fast as it
+// can answer, so its content keeps reflowing at whatever rate it manages, and the window is
+// whatever size it has committed. The corner reaches your cursor when the client says it
+// has, which means nothing on screen is ever a size the window is not.
 //
-// So the geometry is ours and the pixels are the client's. Every frame the quad is
-// scaled to exactly where the cursor is, which costs nothing and cannot lag. In parallel
-// the client is told the same size as fast as it can answer, so its content keeps
-// reflowing at whatever rate it manages: text rewraps, a page relayouts, and the
-// stretch shrinks toward 1.0 as its buffer catches up with the quad it is being drawn
-// into. Neither half waits for the other.
+// resize_stretch trades that away for a corner that tracks your hand exactly, by scaling the
+// quad to the cursor while the client catches up. Off by default: the cost is showing content
+// at a size it was not drawn at, and having to take the difference back whenever the client
+// declines to follow.
 //
-// Sizes are computed from where the drag started rather than accumulated per frame, so
-// nothing drifts, and the scale is recomputed against whatever the client has actually
-// committed, so a commit mid-drag changes the pixels without moving the corner.
+// Sizes are computed from where the drag was grabbed rather than accumulated per frame, so
+// nothing drifts, and they are recomputed against whatever the client has actually committed,
+// so a commit mid-drag changes the window without moving the edge being held still.
 struct Resize {
     surface: WlSurface,
     // Canvas point where the drag started, and the window's real origin and size then.
@@ -1102,17 +1102,13 @@ fn main() {
         }
 
         // Say which way dmabufs are being handled, at startup and on every reload that
-        // changes it. Release tears by construction and is a measurement rather than a mode,
-        // and it is one word in a config file, so it is never allowed to be quietly on.
+        // changes it.
         if announced_dmabuf != Some(set.dmabuf_mode) {
             announced_dmabuf = Some(set.dmabuf_mode);
             match set.dmabuf_mode {
                 DmabufMode::Hold => println!("om_wm: dmabuf_mode hold, buffers sampled in place"),
                 DmabufMode::Blit => println!(
                     "om_wm: dmabuf_mode blit, buffers copied into textures we own and released at once"
-                ),
-                DmabufMode::Release => eprintln!(
-                    "om_wm: WARNING dmabuf_mode release: client buffers are handed back while we are still sampling them, so dmabuf windows tear. This is a measurement, not a mode to run in."
                 ),
             }
         }

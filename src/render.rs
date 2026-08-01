@@ -90,12 +90,14 @@ pub struct Windows {
     pub geo_h: Vec<f32>,
     // 1.0 for shm (BGRA in memory), 0.0 for dmabuf (correct RGBA via EGL).
     pub swizzle: Vec<f32>,
-    // Live stretch, while a resize drag is in progress. A resize on Wayland is a
-    // request: we ask, the client renders, and its pixels arrive a round trip later,
-    // which reads as the window trailing your hand. So the quad is scaled here to where
-    // the cursor is while the client is asked for the same size in parallel, and the
-    // scale converges to 1.0 as its buffers catch up. 1.0 the rest of the time, which is
-    // every window almost always.
+    // Live stretch during a resize drag, and 1.0 the rest of the time, which is every
+    // window almost always and every window at all unless resize_stretch is turned on.
+    //
+    // A resize on Wayland is a request: we ask, the client renders, and its pixels arrive a
+    // round trip later. By default we wait for them, so the window is only ever the size the
+    // client has committed. With the stretch on, the quad is scaled here to where the cursor
+    // is while the client is asked for the same size in parallel, so the corner tracks your
+    // hand at the cost of showing content at a size it was not drawn at.
     pub scale_x: Vec<f32>,
     pub scale_y: Vec<f32>,
     // What the sampler is set to right now, so the choice is only pushed to GL when it
@@ -218,19 +220,19 @@ pub fn visible(windows: &Windows, i: usize) -> (f32, f32, f32, f32) {
     )
 }
 
-// What we do with a client's dmabuf once it is imported. Hold is the shipping answer, Blit
-// is the one that costs a GPU side copy and buys back everything holding gives up, and
-// Release is neither: it tears, and exists so the cost of holding can be measured against
-// something. The arms not selected at runtime are unused by construction.
+// What we do with a client's dmabuf once it is imported. The arm not selected at runtime is
+// unused by construction.
+//
+// There was a third, which sampled in place and handed the buffer straight back so that the
+// cost of holding could be measured against something. It tore by construction, and the
+// measurement it existed for came back empty: releasing early made no difference to how long
+// a client took to answer, so there was nothing to trade the tearing for.
 #[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq)]
 pub enum DmabufMode {
     // Sample the client's buffer in place and keep it until a newer one replaces it. No
     // copy, and the client cannot draw into that buffer while we have it.
     Hold,
-    // Sample in place but hand the buffer straight back. The client draws into what we are
-    // reading, so the window tears. A measurement, not a mode to ship.
-    Release,
     // Copy the imported image into a texture of our own, then hand the buffer back at once.
     // One GPU side copy per commit, and in exchange the client never waits on us, nothing
     // tears, and the texture is ours so it can carry a mip chain.
@@ -1182,10 +1184,6 @@ pub fn upload_committed(
             DmabufMode::Blit | DmabufMode::Hold => {
                 store_entry(windows, surface, tex, w, h, 0.0, false, popup, sub);
                 Keep::Hold
-            }
-            DmabufMode::Release => {
-                store_entry(windows, surface, tex, w, h, 0.0, false, popup, sub);
-                Keep::Release
             }
         }
     });

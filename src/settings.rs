@@ -133,8 +133,7 @@ pub struct Settings {
     // one that is merely slow to redraw work it will throw away.
     pub resize_wait_frames: u32,
     // What happens to a client's dmabuf once we have imported it: hold it and sample it in
-    // place, hand it straight back and tear, or copy it into a texture of our own and hand it
-    // back. See DmabufMode.
+    // place, or copy it into a texture of our own and hand it back. See DmabufMode.
     pub dmabuf_mode: DmabufMode,
 
     // Camera.
@@ -367,11 +366,10 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
         },
         "dmabuf_mode" => match value {
             "hold" => set.dmabuf_mode = DmabufMode::Hold,
-            "release" => set.dmabuf_mode = DmabufMode::Release,
             "blit" => set.dmabuf_mode = DmabufMode::Blit,
             _ => {
                 eprintln!(
-                    "om_wm: settings: {path}:{line}: dmabuf_mode wants hold, release or blit"
+                    "om_wm: settings: {path}:{line}: dmabuf_mode wants hold or blit"
                 );
                 return false;
             }
