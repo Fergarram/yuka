@@ -244,6 +244,11 @@ fn focus_window(state: &mut State, focused: &mut Option<WlSurface>, next: Option
     }
     let serial = SERIAL_COUNTER.next_serial();
     state.keyboard.clone().set_focus(state, next.clone(), serial);
+    if next.is_none() {
+        // Setting focus to nothing does not reach the seat's focus hook, so the clipboard has
+        // to be told separately or it stays pointed at the window that just lost it.
+        wl::state::clear_clipboard_focus(state);
+    }
     *focused = next;
 }
 

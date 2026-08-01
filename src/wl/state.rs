@@ -15,7 +15,7 @@ use smithay::backend::allocator::{Buffer, Format, Fourcc, Modifier};
 use smithay::reexports::wayland_server::{
     backend::{ClientData, ClientId, DisconnectReason, ObjectId},
     protocol::{wl_buffer::WlBuffer, wl_seat::WlSeat, wl_surface::WlSurface},
-    Client, Display, ListeningSocket, Resource,
+    Client, Display, DisplayHandle, ListeningSocket, Resource,
 };
 use smithay::desktop::utils::under_from_surface_tree;
 use smithay::desktop::{
@@ -37,7 +37,8 @@ use smithay::wayland::compositor::{
     SurfaceAttributes, TraversalAction,
 };
 use smithay::wayland::selection::data_device::{
-    ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+    set_data_device_focus, ClientDndGrabHandler, DataDeviceHandler, DataDeviceState,
+    ServerDndGrabHandler,
 };
 use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::shm::with_buffer_contents;
@@ -82,6 +83,10 @@ const ACTIVATION_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(3
 //
 
 pub struct State {
+    // Kept because the selection has to be told who holds the keyboard, and that is a
+    // freestanding call rather than something the seat does for itself. init built one and
+    // dropped it, which is why nothing could paste.
+    pub display_handle: DisplayHandle,
     pub compositor_state: CompositorState,
     pub shm_state: ShmState,
     pub xdg_state: XdgShellState,
@@ -97,8 +102,7 @@ pub struct State {
     pub output_global: GlobalId,
     #[allow(dead_code)]
     pub output_manager_state: OutputManagerState,
-    // Held to keep the wl_seat global alive; used for the keyboard next.
-    #[allow(dead_code)]
+    // The seat itself, which the clipboard is a property of.
     pub seat: Seat<State>,
     pub pointer: PointerHandle<State>,
     pub keyboard: KeyboardHandle<State>,
@@ -252,6 +256,7 @@ pub fn init(
         .to_string();
 
     let state = State {
+        display_handle: dh.clone(),
         compositor_state,
         shm_state,
         xdg_state,
@@ -411,6 +416,16 @@ fn clamp_dim(v: i32, min: i32, max: i32) -> i32 {
         v = v.min(max);
     }
     v
+}
+
+// Take the clipboard away from whoever had it.
+//
+// The other half of focus_changed, which Smithay does not call when focus is unset: it sends
+// the leave and stops there. Without this, dropping focus entirely (clicking empty canvas,
+// Super+Escape, leaving work mode) left the last window still holding the selection offer and
+// able to go on reading it.
+pub fn clear_clipboard_focus(state: &State) {
+    set_data_device_focus(&state.display_handle, &state.seat, None);
 }
 
 // True if the surface is a real xdg toplevel window, not a cursor or subsurface
@@ -906,7 +921,21 @@ impl SeatHandler for State {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
+    // Point the clipboard at whoever now holds the keyboard.
+    //
+    // A selection is offered to one client: the focused one. Smithay does not follow the
+    // keyboard on its own, it hands you this call and expects it from the focus hook, and we
+    // were not making it. So a client could copy, the source was recorded, and then nothing
+    // was ever offered the result. Copy in one window and paste in another and nothing
+    // arrived; the same inside a single window.
+    //
+    // Only the regular selection, the one behind ctrl+c and a Copy menu item. Primary
+    // selection is a separate protocol and we deliberately do not advertise it, so middle
+    // click has nothing to paste from and stays free for the canvas.
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        let client = focused.and_then(|surface| surface.client());
+        set_data_device_focus(&self.display_handle, seat, client);
+    }
     // What the client under the pointer wants the cursor to look like: its own surface
     // with a hotspot, a named shape, or nothing at all. Recorded rather than acted on,
     // because drawing it belongs to the cursor plane and this is the protocol boundary.
