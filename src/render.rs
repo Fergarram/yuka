@@ -632,7 +632,7 @@ pub fn draw_debug_labels(windows: &Windows, cam3d: ray::Camera3D, zoom: f32, ani
             format!("{kind} {source} tex{} {}x{}", windows.tex_id[i], windows.tex_w[i], windows.tex_h[i]),
             format!("{sampling}  scale {scale:.2}x"),
             format!(
-                "canvas {:.1},{:.1}  geo {:.0},{:.0} {:.0}x{:.0}  z {:.1}",
+                "canvas {:.1},{:.1}  geo {:.0},{:.0} {:.0}x{:.0}  z {:.2}",
                 windows.canvas_x[i], windows.canvas_y[i],
                 windows.geo_x[i], windows.geo_y[i], windows.geo_w[i], windows.geo_h[i],
                 windows.z[i],
@@ -925,25 +925,34 @@ pub fn sync_children(windows: &mut Windows) {
                 continue;
             }
             let Some(j) = index_of(windows, surface) else { continue };
-            // In front of the root, every one of them, ordered among themselves by the slot
-            // the client gave them. Later slot, nearer the camera.
+            // In front of the root, every one of them, and ordered among themselves by the
+            // slot the client gave them read backwards: the earliest slot is nearest the
+            // camera.
             //
-            // The tree also says which side of the root a subsurface sits on, and we used to
-            // honour it: earlier slots went behind. Chromium is why we no longer do. It puts
-            // its dialogs in a subsurface and places it *below* its own root, so the Restore
-            // pages bubble was drawn behind the browser window and you only saw the strip of
-            // it hanging out the bottom. That is not a misreading on our side; the tree
-            // really does say below, and Smithay maps place_below to the earlier slot
-            // exactly as it should. Chromium simply asks for something that, taken
-            // literally, is invisible.
+            // Backwards because that is what the only client we have with more than one
+            // subsurface actually means. Chromium builds its overlays by placing each new one
+            // below the last, so the list runs front to back, the exact reverse of what the
+            // protocol says it is. Measured twice, with the tree dumped from a live session:
             //
-            // What this gives up is a subsurface a client genuinely wants behind, which is
-            // how a drop shadow that extends past the window is drawn. Doing it this way
-            // once before put such a shadow over the client's own content and swallowed the
-            // clicks aimed at it. No client we run does that today, and a bubble nobody can
-            // see is the worse of the two failures, but that is the trade and it is the
-            // thing to suspect if a client ever comes back looking veiled.
-            let steps = -(slot as f32 + 1.0);
+            //     tree 3 surfaces, root at slot 2
+            //       slot 0  350x94   the tooltip      belongs in front
+            //       slot 1  334x458  the QR bubble    belongs in the middle
+            //       slot 2  968x808  the root         belongs at the back
+            //
+            // Read literally that says the tooltip is under the bubble and both are under an
+            // opaque browser window, which would make all of it invisible, and no client asks
+            // for that. Read backwards it is exactly right, and it also explains the Restore
+            // pages bubble that started this: one subsurface, below the root, meant to be on
+            // top of it.
+            //
+            // So the tree's stacking is taken as front to back rather than back to front, and
+            // the root is always the back. What this gives up is a client that uses the order
+            // as written: a drop shadow placed genuinely behind the window would come out in
+            // front of it, over the content and swallowing clicks. Nothing we run does that,
+            // every weston client here has a single surface and no subsurfaces at all, but
+            // that is the trade and it is the first thing to suspect if a client ever comes
+            // back looking veiled or stacked inside out.
+            let steps = -((tree.len() - slot) as f32);
             subs.push((
                 j,
                 windows.canvas_x[i] + ox,

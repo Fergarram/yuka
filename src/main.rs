@@ -906,6 +906,10 @@ fn main() {
     let clear = ray::Color { r: 24, g: 24, b: 32, a: 255 };
     let mut frame: u32 = 0;
     let debug_input = std::env::var("OM_WM_DEBUG_INPUT").is_ok();
+    // Dumps each toplevel's surface tree, which is what decides how children stack. Twice now
+    // a child has drawn on the wrong side of something and the slots were the only way to see
+    // what the client had actually asked for.
+    let debug_tree = std::env::var("OM_WM_DEBUG_TREE").is_ok();
     let shot_env = std::env::var("OM_WM_SHOT");
     let screenshot = shot_env.is_ok();
     let shot_frame: u32 = shot_env
@@ -1119,6 +1123,23 @@ fn main() {
                 // No raise needed: a window is given the frontmost stack order as it is
                 // stored, and nothing between there and here can have changed that.
                 focus_window(&mut state, &mut focused, Some(surface));
+            }
+        }
+
+        if debug_tree && frame % 120 == 0 {
+            for surface in wl::state::toplevel_surfaces(&state) {
+                let tree = wl::state::surface_tree(&surface);
+                let root_slot = tree.iter().position(|(s, _, _)| *s == surface).unwrap_or(0);
+                println!("om_wm: tree {} surfaces, root at slot {root_slot}", tree.len());
+                for (slot, (s, ox, oy)) in tree.iter().enumerate() {
+                    let size = render::geo_size(&windows, s)
+                        .map(|(w, h)| format!("{w:.0}x{h:.0}"))
+                        .unwrap_or_else(|| "no entry".to_string());
+                    println!(
+                        "om_wm:   slot {slot} off {ox:.0},{oy:.0} {size}{}",
+                        if slot == root_slot { "  <- root" } else { "" }
+                    );
+                }
             }
         }
 
