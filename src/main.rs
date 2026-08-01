@@ -209,6 +209,15 @@ fn spawn_client(socket_name: &str, cmd: &str) -> Option<Child> {
     }
 }
 
+// Whether two surfaces belong to the same client, which is what separates a dialog opening
+// in front of you from another application taking your keystrokes.
+fn same_client(a: &WlSurface, b: &WlSurface) -> bool {
+    match (a.client(), b.client()) {
+        (Some(x), Some(y)) => x.id() == y.id(),
+        _ => false,
+    }
+}
+
 // Move the keyboard, and tell both windows involved.
 //
 // Focus is two facts, not one: Smithay routes key events to whoever holds it, and the client
@@ -1084,6 +1093,33 @@ fn main() {
                 surface,
                 set.dmabuf_mode,
             );
+        }
+
+        // A window that has just drawn its first frame takes the keyboard, so that something
+        // you launched is something you can type into without hunting for it. Work mode only:
+        // desk mode hands no client the keyboard at all, and a window arriving on the canvas
+        // there is an object appearing on a desk, not a prompt.
+        //
+        // Only from the client that already had focus, or when nothing had it. That is the
+        // difference between a dialog opening in front of you, which you want, and an
+        // application you left running in the background helping itself to your keystrokes
+        // mid-sentence, which is the reason compositors stopped letting clients do this at
+        // all. The protocol's own answer for the wider case is xdg_activation_v1, where the
+        // app doing the launching hands over a token proving a user asked for it; we do not
+        // implement it, so anything that is not the focused client waits to be clicked.
+        for surface in windows.mapped.drain(..).collect::<Vec<_>>() {
+            if mode != Mode::Work {
+                continue;
+            }
+            let welcome = match focused.as_ref() {
+                Some(current) => same_client(current, &surface),
+                None => true,
+            };
+            if welcome {
+                // No raise needed: a window is given the frontmost stack order as it is
+                // stored, and nothing between there and here can have changed that.
+                focus_window(&mut state, &mut focused, Some(surface));
+            }
         }
 
         // New windows open where the view is.

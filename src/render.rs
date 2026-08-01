@@ -134,6 +134,11 @@ pub struct Windows {
     next_order: u32,
     // Reused scratch for repacking shm rows when stride != width*4.
     scratch: Vec<u8>,
+    // Windows that became real this frame: a toplevel's first buffer, which is the moment it
+    // has a size and something to show and can therefore be focused. Drained by the main
+    // loop. Popups and subsurfaces are not in here; neither is anything a client has merely
+    // created and not yet drawn into.
+    pub mapped: Vec<WlSurface>,
 }
 
 // dmabuf EGLImage cache keyed by the client's wl_buffer identity.
@@ -180,6 +185,7 @@ pub fn windows_new() -> Windows {
         cascade: 0,
         next_order: 0,
         scratch: Vec::new(),
+        mapped: Vec::new(),
     }
 }
 
@@ -1074,6 +1080,9 @@ fn store_entry(
             windows.popup.push(popup);
             windows.sub.push(sub);
             windows.placed.push(false);
+            if !popup && !sub {
+                windows.mapped.push(surface.clone());
+            }
             println!(
                 "om_wm: {} + {w}x{h} at {cx:.0},{cy:.0}",
                 if popup { "popup" } else { "window" }
@@ -1345,6 +1354,7 @@ pub fn destroy_owned(windows: &mut Windows) {
     windows.canvas_y.clear();
     windows.draw_x.clear();
     windows.draw_y.clear();
+    windows.mapped.clear();
     windows.z.clear();
     windows.target_z.clear();
     windows.order.clear();
