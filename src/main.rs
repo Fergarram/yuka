@@ -1317,18 +1317,13 @@ fn main() {
             camera::camera_update(&mut cam, inp.as_ref(), &set);
         }
 
-        // The view lands on whole pixels every frame, whatever moved it: keys, wheel,
-        // middle drag, trackpad, or a zoom reset that changed the scale without touching
-        // the pan. Nothing has to remember to do it, so nothing can forget.
-        camera::snap_pan(
-            &mut cam,
-            ray::screen_width() as f32,
-            ray::screen_height() as f32,
-        );
-
         render::prune_dead(&mut windows);
         render::animate(&mut windows, ray::frame_time());
-        let cam3d = camera::camera_3d(&cam, ray::screen_height(), &set);
+        // The view lands on whole pixels whatever moved it: keys, wheel, middle drag,
+        // trackpad, or a zoom reset that changed the scale without touching the pan. Applied
+        // as the 3D camera is built rather than written back into cam, so no code path can
+        // forget it and none can accumulate it either.
+        let cam3d = camera::camera_3d(&cam, ray::screen_width(), ray::screen_height(), &set);
         let cursor_pos = pointer_xy;
 
         // Super+drag: grab the window under the cursor and lift it toward the

@@ -58,9 +58,23 @@ pub struct Windows {
     pub tex_id: Vec<u32>,
     pub tex_w: Vec<i32>,
     pub tex_h: Vec<i32>,
-    // Top-left position on the infinite canvas, assigned on first appearance.
+    // Top-left position on the infinite canvas, assigned on first appearance. This is the
+    // truth about where a window is, and only something that actually moves the window ever
+    // writes it: a drag, a resize that holds an edge still, a child being placed from its
+    // parent. Nothing to do with pixels touches it.
     pub canvas_x: Vec<f32>,
     pub canvas_y: Vec<f32>,
+    // The same position rounded onto the pixel grid, recomputed from canvas_x/y every frame
+    // by align_positions and never fed back into them. Everything visible reads these.
+    //
+    // Derived rather than stored because the grid depends on the zoom, so the rounding is a
+    // property of how the window is being *looked at*, not of where it is. Writing it back
+    // was a bug you could watch: at zoom z the grid is 1/z canvas units, a pinch changes z
+    // every frame, and each frame re-rounded the previous frame's rounded value against a
+    // different grid. Sixty half-pixel corrections a second, each window walking on its own,
+    // and at zoom 0.3 two windows a unit apart could land on top of each other for good.
+    pub draw_x: Vec<f32>,
+    pub draw_y: Vec<f32>,
     // Visual lift height (current + target, animated) and stack order for
     // draw-order ties among windows at the same z.
     pub z: Vec<f32>,
@@ -142,6 +156,8 @@ pub fn windows_new() -> Windows {
         tex_h: Vec::new(),
         canvas_x: Vec::new(),
         canvas_y: Vec::new(),
+        draw_x: Vec::new(),
+        draw_y: Vec::new(),
         z: Vec::new(),
         target_z: Vec::new(),
         order: Vec::new(),
@@ -189,12 +205,14 @@ pub fn dmabuf_cache_new() -> DmabufCache {
 // The part of an entry that is actually the window, in canvas coordinates: its
 // surface origin shifted by the geometry offset, sized to the geometry. Everything
 // visible or clickable is expressed in these, never in raw texture bounds.
+// Reads the pixel-aligned position, not the true one, so that what is hit tested is exactly
+// what was drawn. The two differ by less than half a screen pixel.
 pub fn visible(windows: &Windows, i: usize) -> (f32, f32, f32, f32) {
     // The stretch is anchored at the top left, which is where a resize drag holds the
     // window while its far corner follows the cursor.
     (
-        windows.canvas_x[i] + windows.geo_x[i],
-        windows.canvas_y[i] + windows.geo_y[i],
+        windows.draw_x[i] + windows.geo_x[i],
+        windows.draw_y[i] + windows.geo_y[i],
         windows.geo_w[i] * windows.scale_x[i],
         windows.geo_h[i] * windows.scale_y[i],
     )
@@ -293,6 +311,8 @@ pub fn prune_dead(windows: &mut Windows) {
         windows.tex_h.remove(i);
         windows.canvas_x.remove(i);
         windows.canvas_y.remove(i);
+        windows.draw_x.remove(i);
+        windows.draw_y.remove(i);
         windows.z.remove(i);
         windows.target_z.remove(i);
         windows.order.remove(i);
@@ -350,8 +370,10 @@ pub fn window_at(
         // A client can declare an input region smaller than its buffer; a
         // transparent surface without one would otherwise swallow clicks meant for
         // whatever is behind it.
-        let local_x = cx - windows.canvas_x[i];
-        let local_y = cy - windows.canvas_y[i];
+        // Against the drawn origin, not the true one: the question is what the pointer was
+        // over on screen, and what is on screen is the aligned rectangle the test above used.
+        let local_x = cx - windows.draw_x[i];
+        let local_y = cy - windows.draw_y[i];
         if state::input_region_contains(&windows.surface[i], local_x, local_y) {
             // Same keys as the draw pass, in the same order, or the thing you click is
             // not the thing on top: stack order first, then z within that stack entry,
@@ -366,6 +388,9 @@ pub fn window_at(
             }
         }
     }
+    // The true origin comes back, not the drawn one. This is what a drag anchors to, and a
+    // drag that started from the rounded position would write the rounding into the position
+    // it then moves.
     best.map(|i| (windows.surface[i].clone(), windows.canvas_x[i], windows.canvas_y[i]))
 }
 
@@ -382,10 +407,15 @@ pub fn window_z(windows: &Windows, surface: &WlSurface) -> Option<f32> {
 }
 
 // Canvas position of a window's center (origin + half its texture size).
+// The true centre, not the drawn one: this pairs with set_window_center, which writes the
+// true position, and reading the rounded one would feed the alignment back into the position
+// every time a window is dropped.
 pub fn window_center(windows: &Windows, surface: &WlSurface) -> Option<(f32, f32)> {
     index_of(windows, surface).map(|i| {
-        let (x, y, w, h) = visible(windows, i);
-        (x + w * 0.5, y + h * 0.5)
+        (
+            windows.canvas_x[i] + windows.geo_x[i] + windows.geo_w[i] * windows.scale_x[i] * 0.5,
+            windows.canvas_y[i] + windows.geo_y[i] + windows.geo_h[i] * windows.scale_y[i] * 0.5,
+        )
     })
 }
 
@@ -426,7 +456,7 @@ pub fn set_window_pos(windows: &mut Windows, surface: &WlSurface, x: f32, y: f32
 }
 
 // Land every window on whole pixels, every frame, the way the camera does. Same rule as
-// camera::snap_pan from the other side of the same product: with the view already on a
+// camera::snapped_center from the other side of the same product: with the view already on a
 // whole pixel, a canvas position whose product with the zoom is an integer puts the
 // window's edges on pixel boundaries, so its texture is sampled 1:1 rather than blurred
 // across two columns. At zoom 1 that is simply rounding to whole canvas units.
@@ -439,12 +469,19 @@ pub fn set_window_pos(windows: &mut Windows, surface: &WlSurface, x: f32, y: f32
 // Run this after everything that moves a window (drag, settle, child placement) and
 // before the pixels are read for sampling decisions or drawn.
 pub fn align_positions(windows: &mut Windows, zoom: f32) {
-    if zoom <= 0.0 {
+    // Away from 1:1 the window is filtered rather than sampled texel for texel, so there is
+    // nothing for the grid to buy and the drawn position is simply the real one. Same test
+    // the camera uses, so the two never disagree about which frames are aligned.
+    if !camera::snaps_to_pixels(zoom) {
+        for i in 0..windows.canvas_x.len() {
+            windows.draw_x[i] = windows.canvas_x[i];
+            windows.draw_y[i] = windows.canvas_y[i];
+        }
         return;
     }
     for i in 0..windows.canvas_x.len() {
-        windows.canvas_x[i] = (windows.canvas_x[i] * zoom).round() / zoom;
-        windows.canvas_y[i] = (windows.canvas_y[i] * zoom).round() / zoom;
+        windows.draw_x[i] = (windows.canvas_x[i] * zoom).round() / zoom;
+        windows.draw_y[i] = (windows.canvas_y[i] * zoom).round() / zoom;
     }
 }
 
@@ -456,9 +493,9 @@ pub fn align_positions(windows: &mut Windows, zoom: f32) {
 //   nearest    At 1:1 and above, on a window that is not lifted. Exact texels, no
 //              blending, which is the sharpest a client's own rendering can look and the
 //              right answer for magnifying: showing bigger pixels beats showing a blur
-//              of pixels that were never rendered. Safe to do unconditionally now that
-//              the view and every window position are rounded to the pixel grid every
-//              frame (camera::snap_pan, align_positions).
+//              of pixels that were never rendered. Note that above 1:1 the grid is
+//              deliberately let go (camera::snaps_to_pixels), so a magnified window is
+//              sampled texel for texel from a position that is no longer aligned.
 //   bilinear   Zoomed out, and on a lifted window, where the scale is neither 1:1 nor
 //              constant across the quad.
 //
@@ -1001,6 +1038,10 @@ fn store_entry(
             windows.tex_h.push(h);
             windows.canvas_x.push(cx);
             windows.canvas_y.push(cy);
+            // Aligned before the first draw, but seeded here so a window is never drawn
+            // from an uninitialised slot if anything reads it earlier.
+            windows.draw_x.push(cx);
+            windows.draw_y.push(cy);
             windows.z.push(0.0);
             windows.target_z.push(0.0);
             windows.order.push(order);
@@ -1260,6 +1301,8 @@ pub fn destroy_owned(windows: &mut Windows) {
     windows.tex_h.clear();
     windows.canvas_x.clear();
     windows.canvas_y.clear();
+    windows.draw_x.clear();
+    windows.draw_y.clear();
     windows.z.clear();
     windows.target_z.clear();
     windows.order.clear();
