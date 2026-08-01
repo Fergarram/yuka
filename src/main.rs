@@ -32,7 +32,7 @@ use smithay::reexports::wayland_server::backend::ObjectId;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 
-use render::Windows;
+use render::{DmabufMode, Windows};
 use wl::state::State;
 
 //
@@ -863,6 +863,8 @@ fn main() {
     let mut session_active = true;
     // What the cursor should be showing, as of the last frame, for the debug trace only.
     let mut last_cursor_want = "crosshair";
+    // The dmabuf mode we last said out loud, so a live reload that changes it says so once.
+    let mut announced_dmabuf: Option<DmabufMode> = None;
     // Where recent button presses landed, by serial, for anchoring client-initiated drags.
     let mut press_log: Vec<(u32, f32, f32, u32)> = Vec::new();
     // Cursor images we have seen, kept because a client may switch back to one without
@@ -1056,6 +1058,22 @@ fn main() {
             settings::reload(&mut conf_watch, &mut set);
         } else if frame % SETTINGS_POLL_FRAMES == 0 {
             settings::reload_if_changed(&mut conf_watch, &mut set);
+        }
+
+        // Say which way dmabufs are being handled, at startup and on every reload that
+        // changes it. Release tears by construction and is a measurement rather than a mode,
+        // and it is one word in a config file, so it is never allowed to be quietly on.
+        if announced_dmabuf != Some(set.dmabuf_mode) {
+            announced_dmabuf = Some(set.dmabuf_mode);
+            match set.dmabuf_mode {
+                DmabufMode::Hold => println!("om_wm: dmabuf_mode hold, buffers sampled in place"),
+                DmabufMode::Blit => println!(
+                    "om_wm: dmabuf_mode blit, buffers copied into textures we own and released at once"
+                ),
+                DmabufMode::Release => eprintln!(
+                    "om_wm: WARNING dmabuf_mode release: client buffers are handed back while we are still sampling them, so dmabuf windows tear. This is a measurement, not a mode to run in."
+                ),
+            }
         }
 
         // Quit chord (ctrl+alt+backspace, the traditional one). While we hold the
