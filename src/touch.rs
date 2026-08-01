@@ -179,13 +179,9 @@ pub struct Touchpad {
     // currently down, when the contact began (device clock), the most fingers it
     // ever had, and the furthest any of them travelled.
     down: usize,
-    contact_start: f64,
     contact_max: usize,
-    contact_moved: f32,
     // When the last completed tap happened, and whether a double tap is waiting
     // to be consumed by update.
-    last_tap: f64,
-    tap_reset: bool,
     // OM_WM_DEBUG_TAP=1: report every contact and why it did or did not count as
     // a tap. Trackpad thresholds are hard to guess at, and this turns tuning them
     // into reading numbers.
@@ -272,8 +268,10 @@ pub struct Gesture {
     // to rest, or the gesture turned into a pan. A paused pinch reports a factor of 1.0
     // exactly like a finished one, so the caller cannot tell them apart and needs telling.
     pub zoom_ended: bool,
-    // A two-finger double tap asked for the zoom to be reset.
-    pub reset_zoom: bool,
+    // How many fingers made this gesture, so the caller can tell a two-finger scroll, which
+    // belongs to whatever is under the pointer, from a three-finger one, which is the canvas.
+    // Zero when there is no gesture.
+    pub fingers: u32,
 }
 
 impl Default for Gesture {
@@ -284,7 +282,7 @@ impl Default for Gesture {
             scroll_y: 0.0,
             pinch: 1.0,
             zoom_ended: false,
-            reset_zoom: false,
+            fingers: 0,
         }
     }
 }
@@ -392,11 +390,7 @@ pub fn open(path: &str, set: &Settings) -> Option<Touchpad> {
         zoom_ref: None,
         zoom_armed: false,
         down: 0,
-        contact_start: 0.0,
         contact_max: 0,
-        contact_moved: 0.0,
-        last_tap: TAP_NEVER,
-        tap_reset: false,
         debug_taps: std::env::var("OM_WM_DEBUG_TAP").is_ok(),
         primary_slot: None,
         prev_single: None,
@@ -516,9 +510,6 @@ pub fn reset(tp: &mut Touchpad, set: &Settings) {
     tp.zoom_armed = false;
     tp.down = 0;
     tp.contact_max = 0;
-    tp.contact_moved = 0.0;
-    tp.last_tap = TAP_NEVER;
-    tp.tap_reset = false;
     tp.primary_slot = None;
     tp.prev_single = None;
     tp.ptr_accum_x = 0.0;
@@ -595,40 +586,6 @@ pub fn view(tp: &Touchpad, set: &Settings) -> PadView {
 // Taps
 //
 
-// A contact just ended (the last finger came up). A quick, still, two-finger
-// contact is a tap, and two taps in quick succession ask for a zoom reset.
-//
-// This lives on the event stream instead of the per-frame slot snapshot because
-// read_events drains the whole queue at once: a tap that starts and finishes
-// between two frames leaves no frame where two fingers look down, so a snapshot
-// never sees it at all.
-fn end_contact(tp: &mut Touchpad, time: f64, set: &Settings) {
-    let held = time - tp.contact_start;
-    let quick = held <= set.tap_max_secs;
-    let still = tp.contact_moved <= tp.span * set.move_start_frac;
-    let tap = tp.contact_max == 2 && quick && still;
-    if tp.debug_taps {
-        eprintln!(
-            "om_wm: contact fingers={} held={:.0}ms moved={:.0} (limits {:.0}ms, {:.0}) tap={tap} gap={:.0}ms",
-            tp.contact_max,
-            held * 1000.0,
-            tp.contact_moved,
-            set.tap_max_secs * 1000.0,
-            tp.span * set.move_start_frac,
-            (time - tp.last_tap) * 1000.0
-        );
-    }
-    if !tap {
-        return;
-    }
-    if time - tp.last_tap <= set.double_tap_secs {
-        tp.tap_reset = true;
-        // Consumed, so a third tap does not reset again.
-        tp.last_tap = TAP_NEVER;
-    } else {
-        tp.last_tap = time;
-    }
-}
 
 //
 // Update
@@ -680,18 +637,13 @@ fn read_events(tp: &mut Touchpad, set: &Settings) {
                     tp.slots[tp.cur].still_y = tp.slots[tp.cur].y;
                     tp.slots[tp.cur].resting = false;
                     if tp.down == 0 {
-                        tp.contact_start = time;
                         tp.contact_max = 0;
-                        tp.contact_moved = 0.0;
                     }
                     tp.down += 1;
                     tp.contact_max = tp.contact_max.max(tp.down);
                 }
                 if was && !now {
                     tp.down = tp.down.saturating_sub(1);
-                    if tp.down == 0 {
-                        end_contact(tp, time, set);
-                    }
                 }
             }
             (EV_ABS, ABS_MT_POSITION_X) => {
@@ -711,10 +663,6 @@ fn read_events(tp: &mut Touchpad, set: &Settings) {
                     tp.slots[tp.cur].start_x = slot.x;
                     tp.slots[tp.cur].start_y = slot.y;
                     tp.slots[tp.cur].start_set = true;
-                } else {
-                    let dx = (slot.x - slot.start_x) as f32;
-                    let dy = (slot.y - slot.start_y) as f32;
-                    tp.contact_moved = tp.contact_moved.max((dx * dx + dy * dy).sqrt());
                 }
                 // Idle tracking: the clock only restarts when the finger leaves a small
                 // circle, so the noise a still finger reports does not keep it awake.
@@ -972,22 +920,15 @@ fn update_gesture(tp: &mut Touchpad, cursor: Option<&mut Cursor>, set: &Settings
     // make a one-finger move look like a two-finger gesture, so parked fingers are not
     // counted and not used as gesture points.
     classify_fingers(tp, set);
-    let mut pts: [(f32, f32); 2] = [(0.0, 0.0); 2];
+    let mut pts: [(f32, f32); 3] = [(0.0, 0.0); 3];
     let mut count = 0usize;
     for s in &tp.slots {
         if s.active && !s.resting && !s.faint {
-            if count < 2 {
+            if count < 3 {
                 pts[count] = (s.x as f32, s.y as f32);
             }
             count += 1;
         }
-    }
-
-    // Two-finger double tap asks for the zoom to be reset. read_events decided that off
-    // the event stream; passing it on is all that is left.
-    if tp.tap_reset {
-        tp.tap_reset = false;
-        out.reset_zoom = true;
     }
 
     // Pointer motion is one finger's job: two fingers are a gesture, wherever that gesture
@@ -1074,9 +1015,9 @@ fn update_gesture(tp: &mut Touchpad, cursor: Option<&mut Cursor>, set: &Settings
         return out;
     }
 
-    // Not a two-finger gesture: nothing to pan or zoom. Panning stops dead when
-    // the fingers lift, no glide.
-    if count != 2 {
+    // Two fingers or three. Anything else is not a gesture: nothing to pan or zoom, and
+    // panning stops dead when the fingers lift, no glide.
+    if count != 2 && count != 3 {
         tp.prev_centroid = None;
         tp.prev_dist = None;
         tp.mode = GestureMode::None;
@@ -1087,13 +1028,25 @@ fn update_gesture(tp: &mut Touchpad, cursor: Option<&mut Cursor>, set: &Settings
         return out;
     }
 
-    let centroid = ((pts[0].0 + pts[1].0) * 0.5, (pts[0].1 + pts[1].1) * 0.5);
-    let dx = pts[0].0 - pts[1].0;
-    let dy = pts[0].1 - pts[1].1;
-    let dist = (dx * dx + dy * dy).sqrt();
+    out.fingers = count as u32;
+    let n = count as f32;
+    let centroid = (
+        pts[..count].iter().map(|p| p.0).sum::<f32>() / n,
+        pts[..count].iter().map(|p| p.1).sum::<f32>() / n,
+    );
+    // How spread out the fingers are, as twice their mean distance from the centroid. For two
+    // that is exactly the gap between them, so every threshold written against the old
+    // two-finger distance still means what it meant. For three it is the same idea one
+    // dimension wider, and a pinch is a ratio either way, so nothing else has to know.
+    let dist = 2.0
+        * pts[..count]
+            .iter()
+            .map(|p| ((p.0 - centroid.0).powi(2) + (p.1 - centroid.1).powi(2)).sqrt())
+            .sum::<f32>()
+        / n;
 
     // Pan and zoom each have to travel a minimum distance from where the gesture
-    // began before they do anything: a two-finger tap, a resting hand or a hand
+    // began before they do anything: a tap, a resting hand or a hand
     // settling on the pad should move neither. Arming re-baselines, so the motion
     // starts from there rather than jumping by the whole threshold. The pan
     // threshold is also the drift a tap is allowed, so a contact either pans or

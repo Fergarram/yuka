@@ -1293,11 +1293,16 @@ fn main() {
         // drives the trackpad itself. Everything downstream then treats the two modes
         // identically, including forwarding to whatever the pointer is over.
         //
-        // Whether that reaches the canvas or the window under the pointer is decided below,
-        // by whether Super is held. The pad reports the same thing either way.
-        ptr.scroll_x += pad.scroll_x;
-        ptr.scroll_y += pad.scroll_y;
-        ptr.pinch *= pad.pinch;
+        // Three fingers are the canvas, always, and that is the one gesture needing no
+        // modifier: nothing else on the pad uses three, so there is nothing to confuse it
+        // with. Two join the pointer's own scroll and go wherever Super says, so the same two
+        // fingers scroll a page or pan the canvas depending on one key.
+        let three_finger = pad.fingers >= 3;
+        if !three_finger {
+            ptr.scroll_x += pad.scroll_x;
+            ptr.scroll_y += pad.scroll_y;
+            ptr.pinch *= pad.pinch;
+        }
         // Whether the wheel and the fingers belong to the canvas or to the window under the
         // pointer. Super takes them for the canvas; otherwise they go to whatever is hovered.
         let pointer_on_client = !super_down && hovered.is_some();
@@ -1369,15 +1374,10 @@ fn main() {
                 last_middle_ms = now_ms;
             }
         }
-        // A two-finger double tap on the trackpad asks for the same reset as Super+0.
-        if super_down && pad.reset_zoom {
-            camera::reset_zoom(&mut cam, &set);
-        }
-
         // Super+0 scales around the screen center; the middle click has a cursor
         // to anchor on, so it keeps the canvas under the pointer fixed.
         // A reset says where the zoom should be, so nothing may be on its way somewhere else.
-        if reset_click || reset_key || (super_down && pad.reset_zoom) {
+        if reset_click || reset_key {
             zoom_spring = None;
         }
         if reset_click {
@@ -1399,7 +1399,16 @@ fn main() {
         // before on purpose: route_input updates it later in the frame, and using
         // one value for both branches is what stops them both firing on the frame
         // the pointer crosses a window edge.
-        if super_down {
+        // What the canvas moves by this frame: the three-finger gesture on its own, or
+        // everything the pointer has while Super is held.
+        let (cam_scroll_x, cam_scroll_y, cam_pinch) = if three_finger {
+            (pad.scroll_x, pad.scroll_y, pad.pinch)
+        } else if super_down {
+            (ptr.scroll_x, ptr.scroll_y, ptr.pinch)
+        } else {
+            (0.0, 0.0, 1.0)
+        };
+        if super_down || three_finger {
             let (cxp, cyp) = pointer_xy.unwrap_or((0, 0));
             if ptr.wheel != 0.0 {
                 // The wheel is a zoom of its own; whatever a pinch was settling toward is
@@ -1423,14 +1432,14 @@ fn main() {
             // Finger scroll pans, pinch zooms at the cursor. The camera moves
             // against the fingers so the canvas travels with them, matching
             // touch.rs.
-            if ptr.scroll_x != 0.0 || ptr.scroll_y != 0.0 {
-                cam.cx -= ptr.scroll_x / cam.zoom;
-                cam.cy += ptr.scroll_y / cam.zoom;
+            if cam_scroll_x != 0.0 || cam_scroll_y != 0.0 {
+                cam.cx -= cam_scroll_x / cam.zoom;
+                cam.cy += cam_scroll_y / cam.zoom;
             }
-            if ptr.pinch != 1.0 {
+            if cam_pinch != 1.0 {
                 camera::zoom_at(
                     &mut cam,
-                    ptr.pinch,
+                    cam_pinch,
                     cxp as f32,
                     cyp as f32,
                     ray::screen_width() as f32,

@@ -71,12 +71,6 @@ pub struct Settings {
     // Pinch motion ignored around the current distance, to stop a pan wobbling the zoom.
     pub pinch_deadzone_frac: f32,
 
-    // Trackpad: taps.
-    // Longest a contact can last and still count as a tap, and the window in which a
-    // second tap makes it a double.
-    pub tap_max_secs: f64,
-    pub double_tap_secs: f64,
-
     // Trackpad: how much contact counts as a touch at all, in the raw units the overlay
     // shows (this pad reports 0..2048). Below the first threshold a contact is ignored
     // entirely; once counted it is only dropped below the second, which stops a contact
@@ -193,8 +187,6 @@ pub fn defaults() -> Settings {
         mode_eps_frac: 0.0015,
         pinch_deadzone_frac: 0.0005,
 
-        tap_max_secs: 0.25,
-        double_tap_secs: 0.4,
 
         touch_min_size: 0.0,
         touch_drop_size: 0.0,
@@ -335,8 +327,6 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
         "mode_bias" => f32_key!(mode_bias),
         "mode_eps_frac" => f32_key!(mode_eps_frac),
         "pinch_deadzone_frac" => f32_key!(pinch_deadzone_frac),
-        "tap_max_secs" => f64_key!(tap_max_secs),
-        "double_tap_secs" => f64_key!(double_tap_secs),
         "touch_min_size" => f32_key!(touch_min_size),
         "touch_drop_size" => f32_key!(touch_drop_size),
         "rest_zone_frac" => f32_key!(rest_zone_frac),
