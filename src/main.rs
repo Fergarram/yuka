@@ -1001,7 +1001,7 @@ fn main() {
         wl::state::accept_and_dispatch(&mut server, &mut state);
 
         for key in state.dead_dmabufs.drain(..).collect::<Vec<_>>() {
-            dmabuf_cache.evict(&egl, &key);
+            render::evict_dmabuf(&mut windows, &mut dmabuf_cache, &egl, &key);
         }
         wl::state::prune_held(&mut state);
 

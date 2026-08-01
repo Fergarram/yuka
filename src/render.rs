@@ -1072,6 +1072,33 @@ fn store_entry(
 // dmabuf cache
 //
 
+// Drop the cached import of a buffer the client has destroyed, and unhook any window that is
+// still displaying it.
+//
+// Both halves, or neither. The cache owns the texture and deletes it here, but a window that
+// was drawn from it keeps the name in tex_id, and a deleted name is not a texture: the window
+// would sample nothing and draw as a hole for as long as its client went without committing
+// again. Clearing the entry makes it undrawable instead, which is the honest description of a
+// window whose pixels have been taken away, and its next commit puts it back.
+//
+// Windows that own their texture are left alone. An shm upload, or a dmabuf copied out under
+// DmabufMode::Blit, is ours and does not go away with the client's buffer.
+pub fn evict_dmabuf(
+    windows: &mut Windows,
+    cache: &mut DmabufCache,
+    egl: &Egl,
+    key: &ObjectId,
+) {
+    let Some(tex) = cache.evict(egl, key) else { return };
+    for i in 0..windows.tex_id.len() {
+        if !windows.owns[i] && windows.tex_id[i] == tex {
+            windows.tex_id[i] = 0;
+            windows.tex_w[i] = 0;
+            windows.tex_h[i] = 0;
+        }
+    }
+}
+
 impl DmabufCache {
     fn index_of(&self, key: &ObjectId) -> Option<usize> {
         self.key.iter().position(|k| k == key)
@@ -1104,15 +1131,18 @@ impl DmabufCache {
         Some((tex, info.width, info.height))
     }
 
-    pub fn evict(&mut self, egl: &Egl, key: &ObjectId) {
-        if let Some(i) = self.index_of(key) {
-            egl.destroy(self.image[i], self.tex[i]);
-            self.key.swap_remove(i);
-            self.image.swap_remove(i);
-            self.tex.swap_remove(i);
-            self.w.swap_remove(i);
-            self.h.swap_remove(i);
-        }
+    // Returns the texture it destroyed, because a window may still be pointing at it and the
+    // caller has to know which one. See evict_dmabuf.
+    fn evict(&mut self, egl: &Egl, key: &ObjectId) -> Option<u32> {
+        let i = self.index_of(key)?;
+        let tex = self.tex[i];
+        egl.destroy(self.image[i], tex);
+        self.key.swap_remove(i);
+        self.image.swap_remove(i);
+        self.tex.swap_remove(i);
+        self.w.swap_remove(i);
+        self.h.swap_remove(i);
+        Some(tex)
     }
 
     pub fn destroy_all(&mut self, egl: &Egl) {
