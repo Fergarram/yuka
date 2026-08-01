@@ -148,9 +148,22 @@ pub struct Settings {
     // pointer or receives a key, and two fingers pan and pinch without asking Super. In there
     // the windows are applications again.
     //
-    // It is also the line a gesture is measured against. Let go above it and the zoom returns
-    // to zoom_default; let go at or below it and it settles here.
+    // Where a gesture lands is decided by overview_snap_at rather than by this, so getting
+    // here does not mean pinching all the way here.
     pub overview_zoom: f32,
+    // The two lines a gesture is measured against, one for each direction, which together
+    // make the boundary a band rather than an edge.
+    //
+    // Leaving 1:1 you have to get below snap_out; leaving the overview you have to get above
+    // snap_in. Both sit well away from where they are travelling to, because a threshold at
+    // the destination would mean pinching the whole way before letting go counted as meaning
+    // it, and a gesture that has to be finished exactly is a gesture you fight. A short pinch
+    // says which side you want and the animation covers the rest.
+    //
+    // Between them nothing changes, so a pinch that wanders does not flip the mode back and
+    // forth, and the same scale can mean either answer depending on where you set off from.
+    pub overview_snap_out: f32,
+    pub overview_snap_in: f32,
     // Perspective field of view in degrees. Larger means more parallax on a lifted
     // window.
     pub fov_deg: f32,
@@ -223,6 +236,8 @@ pub fn defaults() -> Settings {
         zoom_max: 8.0,
         zoom_default: 1.0,
         overview_zoom: 0.57,
+        overview_snap_out: 0.85,
+        overview_snap_in: 0.65,
         fov_deg: 40.0,
         zoom_spring_rate: 12.0,
         resize_corner_hold: 0.75,
@@ -378,6 +393,8 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
         "zoom_max" => f32_key!(zoom_max),
         "zoom_default" => f32_key!(zoom_default),
         "overview_zoom" => f32_key!(overview_zoom),
+        "overview_snap_out" => f32_key!(overview_snap_out),
+        "overview_snap_in" => f32_key!(overview_snap_in),
         "fov_deg" => f32_key!(fov_deg),
         "zoom_spring_rate" => f32_key!(zoom_spring_rate),
         "resize_corner_hold" => f32_key!(resize_corner_hold),

@@ -1499,7 +1499,15 @@ fn main() {
             wheel_zoom_ms = 0;
         }
         if (zoom_gesture_ended || wheel_settled) && set.zoom_spring_rate > 0.0 {
-            let target = if cam.zoom > set.overview_zoom {
+            // Which line applies depends on which side the gesture set off from, which is
+            // what makes it a band: coming out of 1:1 you must pass snap_out, coming out of
+            // the overview you must pass snap_in, and in between you stay where you were.
+            let line = if zoomed_out {
+                set.overview_snap_in
+            } else {
+                set.overview_snap_out
+            };
+            let target = if cam.zoom >= line {
                 set.zoom_default
             } else {
                 set.overview_zoom
@@ -1521,19 +1529,19 @@ fn main() {
         // Letting go of the windows is the other half of both, and happens in route_input.
         // Not for a swipe down: coming home from the overview leaves focus alone, because by
         // then there is nothing focused to leave.
-        let at_overview = match zoom_ease.as_ref().map(|e| e.target) {
-            // Already travelling: decide against where it is heading rather than where the
-            // zoom has got to, so pressing twice reverses cleanly instead of depending on
-            // how far the first press ran.
-            Some(t) => (t - set.overview_zoom).abs() < (t - set.zoom_default).abs(),
-            // The midpoint between two scales is their geometric mean, not their average:
-            // zoom multiplies, so half way between 0.57 and 1.0 is 0.76 rather than 0.79.
-            None => cam.zoom < (set.overview_zoom * set.zoom_default).sqrt(),
-        };
+        // Which side the key toggles away from is simply which side we are on. That is
+        // tracked rather than inferred now, and it is set the moment a zoom starts
+        // travelling, so pressing twice reverses cleanly instead of depending on how far the
+        // first press ran.
+        let at_overview = zoomed_out;
         let overview = pad.swipe_up || (let_go && !at_overview);
         let back = pad.swipe_down || (let_go && at_overview);
         if overview || back {
             zoomed_out = overview;
+            // Around the middle of the screen, both of them. These move the whole canvas
+            // rather than a piece of it, so where the cursor happens to be sitting is not
+            // what the gesture is about, and turning around it throws the view sideways as
+            // well as out. Tried the other way and it felt worse.
             zoom_ease = Some(ZoomEase {
                 ax: ray::screen_width() as f32 * 0.5,
                 ay: ray::screen_height() as f32 * 0.5,
