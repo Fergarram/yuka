@@ -219,7 +219,12 @@ fn spawn_client(socket_name: &str, cmd: &str) -> Option<Child> {
 // One place for all of it, because the focus changes in four (a press on a window, a press on
 // empty canvas, Super+Escape, and leaving work mode) and three of them would have forgotten.
 fn focus_window(state: &mut State, focused: &mut Option<WlSurface>, next: Option<WlSurface>) {
-    if *focused == next {
+    // Against what the seat actually holds, not only against what we last asked for. A grab
+    // is allowed to refuse a focus change and a popup grab does exactly that, so our idea of
+    // who is focused can be a window the keyboard never went to. Comparing the two means a
+    // refused change is noticed and asked for again once the grab lets go, instead of being
+    // skipped forever by a guard that thinks the job is already done.
+    if *focused == next && state.keyboard.current_focus() == next {
         return;
     }
     if let Some(old) = focused.as_ref() {
@@ -1017,6 +1022,11 @@ fn main() {
         }
 
         wl::state::accept_and_dispatch(&mut server, &mut state);
+        // Retire popups the client has destroyed, and the grabs they were holding. Nothing
+        // else does it: a dead popup stays in its grab's active list, the grab therefore
+        // never reports itself ended, and a keyboard grab that never ends swallows every
+        // focus change we make for the rest of the session.
+        state.popups.cleanup();
 
         for key in state.dead_dmabufs.drain(..).collect::<Vec<_>>() {
             render::evict_dmabuf(&mut windows, &mut dmabuf_cache, &egl, &key);
