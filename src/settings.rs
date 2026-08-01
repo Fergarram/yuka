@@ -116,10 +116,15 @@ pub struct Settings {
     // that never declared a minimum of their own.
     pub resize_min_px: f32,
     // Whether a resize drag stretches the window locally while it waits for the client.
-    // On, the corner tracks the cursor exactly and the contents are scaled until the
-    // client's own render catches up. Off, nothing moves until the client answers, which
-    // is what every other Wayland compositor does, and what makes a slow client feel like
-    // the window is trailing your hand.
+    //
+    // Off by default, which is what every other Wayland compositor does: the window is
+    // whatever size the client last committed, and the corner reaches the cursor when the
+    // client says it has. Nothing on screen is ever a size the window is not, so there is
+    // no overshoot to take back and no snap when the drag ends.
+    //
+    // On, the quad is scaled to the cursor while the client catches up. The corner tracks
+    // your hand exactly, at the cost of showing content at a size it was not drawn at, and
+    // of having to undo the difference whenever the client declines to follow.
     pub resize_stretch: bool,
     // During a resize drag the quad already shows the size you are dragging to, so this
     // only paces how often the client is asked to re-render into it: the next ask waits
@@ -199,7 +204,7 @@ pub fn defaults() -> Settings {
         double_click_ms: 400,
 
         resize_min_px: 120.0,
-        resize_stretch: true,
+        resize_stretch: false,
         resize_wait_frames: 8,
         dmabuf_mode: DmabufMode::Hold,
 

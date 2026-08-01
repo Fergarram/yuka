@@ -1462,14 +1462,19 @@ fn main() {
                 let (ax, ay, af) = press_at(&press_log, serial, sxp, syp, frame);
                 if debug_input {
                     let (w, h) = render::geo_size(&windows, &surf).unwrap_or((0.0, 0.0));
+                    // The declared limits come with it, because they are what the quad is
+                    // now held to and a window that declares nothing is a different case to
+                    // read about than one that declares and is being obeyed.
+                    let (lo, hi) = wl::state::size_limits(&surf);
                     println!(
-                        "om_wm: resize request {}x{} {} took {} frames (press frame {af}, now {frame}), pointer travelled {:.0},{:.0} since",
+                        "om_wm: resize request {}x{} {} took {} frames (press frame {af}, now {frame}), pointer travelled {:.0},{:.0} since, client says min {}x{} max {}x{}",
                         w as i32,
                         h as i32,
                         render::source(&windows, &surf),
                         frame.saturating_sub(af),
                         sxp - ax,
-                        syp - ay
+                        syp - ay,
+                        lo.0, lo.1, hi.0, hi.1
                     );
                 }
                 if let (Some((gx, gy)), Some((w, h)), Some((ox, oy))) = (
@@ -1564,10 +1569,29 @@ fn main() {
             // Where the cursor says the corner is, held back at whatever the client has
             // shown it cannot pass. Written as min-then-max rather than clamp: bounds
             // learned at runtime can cross, and clamp panics when they do.
-            let floor_w = if r.stuck_small >= RESIZE_STUCK_COMMITS { r.least_w } else { set.resize_min_px };
-            let floor_h = if r.stuck_small >= RESIZE_STUCK_COMMITS { r.least_h } else { set.resize_min_px };
-            let ceil_w = if r.stuck_large >= RESIZE_STUCK_COMMITS { r.most_w } else { f32::MAX };
-            let ceil_h = if r.stuck_large >= RESIZE_STUCK_COMMITS { r.most_h } else { f32::MAX };
+            // What the window says it can be, read fresh because a client may change its mind
+            // mid-drag. Zero in either direction is Wayland for "no limit", and for a minimum
+            // that is where our own floor stands in, since a window that never said has to be
+            // stopped from being dragged away to nothing.
+            //
+            // These are the same numbers resize_toplevel clamps the ask to, which is the whole
+            // point: the quad cannot show a size the client was never going to be given. It
+            // used to clamp only to resize_min_px, so dragging under a declared minimum
+            // stretched the window somewhere it could not go, and it sat there until the
+            // learned limits noticed a few commits later and snapped it back. The window is
+            // the source of truth about its own size, and it had already said so.
+            let (said_min, said_max) = wl::state::size_limits(&r.surface);
+            let min_w = if said_min.0 > 0 { said_min.0 as f32 } else { set.resize_min_px };
+            let min_h = if said_min.1 > 0 { said_min.1 as f32 } else { set.resize_min_px };
+            let max_w = if said_max.0 > 0 { said_max.0 as f32 } else { f32::MAX };
+            let max_h = if said_max.1 > 0 { said_max.1 as f32 } else { f32::MAX };
+            // Behaviour on top of declaration, never under it: a client that declares nothing
+            // and simply refuses is still learned from, and one that declares is held to what
+            // it said even if it happens to have managed less.
+            let floor_w = if r.stuck_small >= RESIZE_STUCK_COMMITS { r.least_w.max(min_w) } else { min_w };
+            let floor_h = if r.stuck_small >= RESIZE_STUCK_COMMITS { r.least_h.max(min_h) } else { min_h };
+            let ceil_w = if r.stuck_large >= RESIZE_STUCK_COMMITS { r.most_w.min(max_w) } else { max_w };
+            let ceil_h = if r.stuck_large >= RESIZE_STUCK_COMMITS { r.most_h.min(max_h) } else { max_h };
             let want = camera::screen_to_plane(cam3d, sxp, syp, 0.0).map(|(px, py)| {
                 // An edge direction of zero pins that axis; -1 means the near edge is the
                 // one under the cursor, so moving it left or up makes the window bigger.
@@ -1591,13 +1615,19 @@ fn main() {
                     if set.resize_stretch {
                         render::set_scale(&mut windows, &r.surface, w / gw, h / gh);
                     }
+                    // How big the window is on screen this frame: the size the cursor is
+                    // asking for while the stretch is showing it, and otherwise simply what
+                    // the client has committed.
+                    let (shown_w, shown_h) = if set.resize_stretch { (w, h) } else { (gw, gh) };
                     // Dragging a near edge keeps the far one still, which means the window
-                    // has to travel as it grows. Derived from the size actually in force
-                    // rather than accumulated, so a client that clamps cannot make the
-                    // still edge drift.
+                    // has to travel as it grows. Against the size on screen, not the size we
+                    // asked for: with the stretch off those are different numbers for as long
+                    // as the client takes to answer, and moving the origin by the ask while
+                    // the quad stayed its old size slid the window and dragged the far edge
+                    // off its mark.
                     if r.edge_x < 0.0 || r.edge_y < 0.0 {
-                        let x = if r.edge_x < 0.0 { r.from_x + r.from_w - w } else { r.from_x };
-                        let y = if r.edge_y < 0.0 { r.from_y + r.from_h - h } else { r.from_y };
+                        let x = if r.edge_x < 0.0 { r.from_x + r.from_w - shown_w } else { r.from_x };
+                        let y = if r.edge_y < 0.0 { r.from_y + r.from_h - shown_h } else { r.from_y };
                         render::set_window_origin(&mut windows, &r.surface, x, y);
                     }
 
@@ -1640,19 +1670,23 @@ fn main() {
                     }
                 }
                 _ => {
-                    // Released: ask once, for the size the stretch is showing, and keep
-                    // the stretch until the client answers so the window does not snap
-                    // back to its old size for a frame.
+                    // Released: ask once, for the size the drag ended on, and keep any
+                    // stretch until the client answers so the window does not snap back to
+                    // its old size for a frame. With no stretch there is nothing being held
+                    // and nothing to wait for: the quad has been showing the client's own
+                    // size all along, so the last ask simply lands whenever it lands.
                     if alive {
                         if let Some((w, h)) = want {
                             let was = render::geo_size(&windows, &r.surface)
                                 .unwrap_or((r.from_w, r.from_h));
                             wl::state::resize_toplevel(&state, &r.surface, w as i32, h as i32);
-                            resize_settle = Some(ResizeSettle {
-                                surface: r.surface.clone(),
-                                was,
-                                frames: 0,
-                            });
+                            if set.resize_stretch {
+                                resize_settle = Some(ResizeSettle {
+                                    surface: r.surface.clone(),
+                                    was,
+                                    frames: 0,
+                                });
+                            }
                         }
                     }
                     resize = None;
