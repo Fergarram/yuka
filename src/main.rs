@@ -1143,6 +1143,25 @@ fn main() {
             }
         }
 
+        // And focus a window another client asked us to activate. This is the case our own
+        // rule above cannot reach: you clicked a link in one application and a different one
+        // opened the page. The token is what makes it safe to honour, and whether to trust it
+        // was decided at the protocol boundary; by the time it arrives here it is a window the
+        // user asked for.
+        //
+        // Raised in either mode, focused only in work mode, for the same reason a newly mapped
+        // window is: desk mode hands no client the keyboard. Bringing it to the front of the
+        // stack is still the useful half of "the user wants to see this".
+        for surface in state.activation_requests.drain(..).collect::<Vec<_>>() {
+            if !surface.is_alive() {
+                continue;
+            }
+            render::front(&mut windows, &surface);
+            if mode == Mode::Work {
+                focus_window(&mut state, &mut focused, Some(surface));
+            }
+        }
+
         // New windows open where the view is.
         render::set_place_origin(&mut windows, cam.cx, cam.cy);
 

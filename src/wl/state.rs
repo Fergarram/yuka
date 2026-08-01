@@ -54,14 +54,28 @@ use smithay::wayland::dmabuf::{
 };
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::wayland::viewporter::ViewporterState;
+use smithay::wayland::xdg_activation::{
+    XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
+};
 use smithay::{
     delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_output,
-    delegate_seat, delegate_shm, delegate_viewporter, delegate_xdg_shell,
+    delegate_seat, delegate_shm, delegate_viewporter, delegate_xdg_activation,
+    delegate_xdg_shell,
 };
 
 use smithay::backend::allocator::dmabuf::Dmabuf;
 
 use crate::egl::{DmabufInfo, DmabufPlane};
+
+//
+// Constants
+//
+
+// How old an activation token may be and still be honoured. It is the gap between a user
+// clicking something and the application it launched finishing its own startup, so it has to
+// be generous: a browser starting cold is seconds, not milliseconds. Bounded all the same, so
+// a token cannot be pocketed and spent much later.
+const ACTIVATION_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
 
 //
 // Types
@@ -104,6 +118,10 @@ pub struct State {
     // Popup tracking (menus). Smithay owns the tree, the positioner maths and
     // the parent relationships; we only ask it where they go.
     pub popups: PopupManager,
+    // Focus handed between clients, which is the one case our own rule cannot cover: a window
+    // opened by a different application than the one you were using. Smithay mints the tokens
+    // and matches them back; the policy about which to honour is ours, below.
+    pub xdg_activation_state: XdgActivationState,
 
     // Surfaces that committed since the last drain. The render side reads and
     // clears this each frame. Plain surface handles, no rendering state here.
@@ -122,6 +140,9 @@ pub struct State {
     // that press, and by then the pointer has moved on.
     pub move_requests: Vec<(WlSurface, u32)>,
     pub resize_requests: Vec<(WlSurface, i32, i32, u32)>,
+    // Surfaces a client has asked us to activate with a token we accepted. Drained each frame
+    // by the main loop, which is where focus lives.
+    pub activation_requests: Vec<WlSurface>,
     // The dmabuf we are currently displaying per surface, kept alive (not
     // released) so the client cannot overwrite it while we re-sample it each
     // frame. Released only when a newer buffer replaces it. shm buffers are not
@@ -168,6 +189,7 @@ pub fn init(
     let xdg_state = XdgShellState::new::<State>(&dh);
     let viewporter_state = ViewporterState::new::<State>(&dh);
     let data_device_state = DataDeviceState::new::<State>(&dh);
+    let xdg_activation_state = XdgActivationState::new::<State>(&dh);
 
     // A wl_output, and xdg_output alongside it. Toolkits that derive their scale
     // and window sizing from an output (GTK, Chromium) never map a window without
@@ -245,11 +267,13 @@ pub fn init(
         dmabuf_global,
         data_device_state,
         popups: PopupManager::default(),
+        xdg_activation_state,
         committed: Vec::new(),
         dead_dmabufs: Vec::new(),
         cursor_image: CursorImageStatus::default_named(),
         move_requests: Vec::new(),
         resize_requests: Vec::new(),
+        activation_requests: Vec::new(),
         held_dmabufs: Vec::new(),
     };
 
@@ -825,6 +849,42 @@ impl DataDeviceHandler for State {
 }
 
 
+// Focus travelling between clients, which xdg_shell has no way to express and which we
+// deliberately do not let a client take for itself.
+//
+// The shape of it: an application the user is interacting with asks us for a token, quoting
+// the input event that prompted it. We hand back an opaque string only we could have minted.
+// It passes that to whatever it launches, and the new application presents it back with the
+// surface it wants focused. Because the token can only be produced against a real event on a
+// real seat, an application nobody touched cannot produce one, which is what separates
+// clicking a link and having the browser come forward from a background process helping
+// itself to the keyboard.
+//
+// Our policy is the two checks the protocol leaves to the compositor: the token has to name
+// the event that caused it, and it has to be recent. Anything else is refused and the window
+// waits to be clicked, which is where we were before this existed.
+impl XdgActivationHandler for State {
+    fn activation_state(&mut self) -> &mut XdgActivationState {
+        &mut self.xdg_activation_state
+    }
+
+    fn request_activation(
+        &mut self,
+        token: XdgActivationToken,
+        data: XdgActivationTokenData,
+        surface: WlSurface,
+    ) {
+        let asked_for = data.serial.is_some();
+        let recent = data.timestamp.elapsed() < ACTIVATION_MAX_AGE;
+        if asked_for && recent {
+            self.activation_requests.push(surface);
+        }
+        // Spent either way. A token is proof of one user action and stays good for one
+        // activation; leaving it in the pool would let a client replay it.
+        self.xdg_activation_state.remove_token(&token);
+    }
+}
+
 impl BufferHandler for State {
     fn buffer_destroyed(&mut self, buffer: &WlBuffer) {
         self.dead_dmabufs.push(buffer.id());
@@ -987,3 +1047,4 @@ delegate_dmabuf!(State);
 delegate_seat!(State);
 delegate_output!(State);
 delegate_data_device!(State);
+delegate_xdg_activation!(State);
