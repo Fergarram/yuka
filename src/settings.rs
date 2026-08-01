@@ -141,20 +141,19 @@ pub struct Settings {
     pub zoom_min: f32,
     pub zoom_max: f32,
     pub zoom_default: f32,
-    // The scale a three-finger swipe up pulls back to, and the far end of what Super+Escape
-    // toggles between. Below 1:1 because the point of it is seeing where everything is: 0.57
-    // puts about 1.75 times as much canvas on screen as 1:1 does.
+    // The other scale, and the boundary between the two ways of working.
+    //
+    // The zoom only ever comes to rest at this or at zoom_default, so which one it rests at
+    // is the mode. Out here the canvas owns everything: no window takes focus, hears the
+    // pointer or receives a key, and two fingers pan and pinch without asking Super. In there
+    // the windows are applications again.
+    //
+    // It is also the line a gesture is measured against. Let go above it and the zoom returns
+    // to zoom_default; let go at or below it and it settles here.
     pub overview_zoom: f32,
     // Perspective field of view in degrees. Larger means more parallax on a lifted
     // window.
     pub fov_deg: f32,
-    // How far out a pinch may settle before it is taken as meant.
-    //
-    // A released pinch springs back to 1:1. Zoomed in that is unconditional, since a magnified
-    // window is only the same pixels made bigger and there is nothing out there worth staying
-    // at. Zoomed out it applies only above this floor: past it the extra canvas is the point
-    // and the zoom is somewhere you asked to be, so it is left where you put it.
-    pub zoom_spring_floor: f32,
     // How fast it travels back, as a fraction of the remaining distance per second. 0 turns
     // the spring off and a released pinch stays exactly where it was let go.
     pub zoom_spring_rate: f32,
@@ -225,7 +224,6 @@ pub fn defaults() -> Settings {
         zoom_default: 1.0,
         overview_zoom: 0.57,
         fov_deg: 40.0,
-        zoom_spring_floor: 0.75,
         zoom_spring_rate: 12.0,
         resize_corner_hold: 0.75,
     }
@@ -381,7 +379,6 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
         "zoom_default" => f32_key!(zoom_default),
         "overview_zoom" => f32_key!(overview_zoom),
         "fov_deg" => f32_key!(fov_deg),
-        "zoom_spring_floor" => f32_key!(zoom_spring_floor),
         "zoom_spring_rate" => f32_key!(zoom_spring_rate),
         "resize_corner_hold" => f32_key!(resize_corner_hold),
         "invert_scroll" => match value {
