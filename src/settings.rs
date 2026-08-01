@@ -64,6 +64,10 @@ pub struct Settings {
     // threshold doubles as the drift a tap is allowed.
     pub move_start_frac: f32,
     pub pinch_start_frac: f32,
+    // How far three fingers must travel, as a fraction of the pad, to count as a swipe.
+    // Larger than a pan threshold on purpose: a swipe is a command rather than a motion being
+    // followed, and firing one by accident costs you your place on the canvas.
+    pub swipe_frac: f32,
     // How much one motion has to lead the other to take over pan/zoom, and the noise
     // floor below which neither counts.
     pub mode_bias: f32,
@@ -137,6 +141,10 @@ pub struct Settings {
     pub zoom_min: f32,
     pub zoom_max: f32,
     pub zoom_default: f32,
+    // The scale a three-finger swipe up pulls back to, and the far end of what Super+Escape
+    // toggles between. Below 1:1 because the point of it is seeing where everything is: 0.57
+    // puts about 1.75 times as much canvas on screen as 1:1 does.
+    pub overview_zoom: f32,
     // Perspective field of view in degrees. Larger means more parallax on a lifted
     // window.
     pub fov_deg: f32,
@@ -185,6 +193,7 @@ pub fn defaults() -> Settings {
         window_scroll_sens: 1.0,
         move_start_frac: 0.012,
         pinch_start_frac: 0.02,
+        swipe_frac: 0.15,
         mode_bias: 1.6,
         mode_eps_frac: 0.0015,
         pinch_deadzone_frac: 0.0005,
@@ -214,6 +223,7 @@ pub fn defaults() -> Settings {
         zoom_min: 0.1,
         zoom_max: 8.0,
         zoom_default: 1.0,
+        overview_zoom: 0.57,
         fov_deg: 40.0,
         zoom_spring_floor: 0.75,
         zoom_spring_rate: 12.0,
@@ -326,6 +336,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
         "window_scroll_sens" => f32_key!(window_scroll_sens),
         "move_start_frac" => f32_key!(move_start_frac),
         "pinch_start_frac" => f32_key!(pinch_start_frac),
+        "swipe_frac" => f32_key!(swipe_frac),
         "mode_bias" => f32_key!(mode_bias),
         "mode_eps_frac" => f32_key!(mode_eps_frac),
         "pinch_deadzone_frac" => f32_key!(pinch_deadzone_frac),
@@ -368,6 +379,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
         "zoom_min" => f32_key!(zoom_min),
         "zoom_max" => f32_key!(zoom_max),
         "zoom_default" => f32_key!(zoom_default),
+        "overview_zoom" => f32_key!(overview_zoom),
         "fov_deg" => f32_key!(fov_deg),
         "zoom_spring_floor" => f32_key!(zoom_spring_floor),
         "zoom_spring_rate" => f32_key!(zoom_spring_rate),

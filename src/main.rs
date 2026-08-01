@@ -76,6 +76,13 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 // a window and a right drag resizes it. Released, everything belongs to whatever is under the
 // pointer, which is what a compositor is supposed to do.
 
+// A zoom travelling to a scale, holding one screen point still on the way.
+struct ZoomEase {
+    ax: f32,
+    ay: f32,
+    target: f32,
+}
+
 // A window being dragged: which one, the offset from the cursor to its origin, and whether
 // the client started it.
 //
@@ -318,7 +325,6 @@ fn route_input(
     // that surface's own coordinates.
     last_motion: &mut Option<(WlSurface, f32, f32)>,
     held: bool,
-    kb: Option<&input::Input>,
     debug: bool,
     super_down: bool,
     // True while we are moving or resizing a window because the client asked us to. The
@@ -335,6 +341,8 @@ fn route_input(
     // the pointer's current position is the difference between dragging from the point you
     // grabbed and dragging from wherever the pointer reached while the client was deciding.
     press_log: &mut Vec<(u32, f32, f32, u32)>,
+    // True on the frame Super+Escape was pressed, or three fingers went up.
+    let_go: bool,
     ptr: &input::Pointer,
     pressed: bool,
     released: bool,
@@ -347,23 +355,16 @@ fn route_input(
     let loc = Point::<f64, Logical>::from((ccx as f64, ccy as f64));
     let pointer = state.pointer.clone();
 
-    // Super+Escape lets go of everything.
+    // Letting go of everything, decided by the caller and applied here to the input half.
     //
     // The keyboard, which also takes the clipboard offer and the window's Activated state with
     // it. The pointer, so nothing is left believing the cursor is inside it. And the implicit
-    // grab, which is the one that used to survive: a button held when you pressed the chord
+    // grab, which is the one that used to survive: a button held when the chord was pressed
     // kept every later event pointed at whatever it started on, so releasing Super handed the
     // client back events it should never have seen.
     //
-    // On the press edge rather than while held, because it is one action rather than a state
-    // you sit in. Nothing else this frame: you asked for everything to be let go of.
-    let super_escape = kb
-        .map(|kb| {
-            input::super_down(kb)
-                && input::events(kb).iter().any(|&(c, p)| p && c == input::KEY_ESC)
-        })
-        .unwrap_or(false);
-    if super_escape {
+    // Nothing else this frame: everything was asked to be let go of.
+    if let_go {
         focus_window(state, focused, None);
         *grabbed = None;
         if hovered.is_some() {
@@ -975,10 +976,14 @@ fn main() {
     // number goes in the filename so a second one does not quietly replace the first.
     let mut shot_now = false;
     let mut shots: u32 = 0;
-    // Where a released pinch is springing back to 1:1 around, in screen pixels, or None when
-    // nothing is settling. The anchor is kept rather than re-read so the point under the
-    // fingers stays put for the whole return, even if the cursor moves meanwhile.
-    let mut zoom_spring: Option<(i32, i32)> = None;
+    // A zoom on its way somewhere, or None when nothing is travelling. The anchor is kept
+    // rather than re-read so the canvas point it turns around stays put for the whole
+    // journey, even if the cursor moves meanwhile.
+    //
+    // Two things use it. A released pinch heads for 1:1 around the fingers, and the overview
+    // heads for overview_zoom around the middle of the screen, which is what "the centre of
+    // the camera" means once it is a screen point.
+    let mut zoom_ease: Option<ZoomEase> = None;
     // Surface the pointer is currently over, so crossing into another one can
     // emit leave and enter.
     let mut hovered: Option<WlSurface> = None;
@@ -1268,6 +1273,15 @@ fn main() {
         }
 
         let super_down = inp.as_ref().map(input::super_down).unwrap_or(false);
+        // Super+Escape. Detected here rather than inside route_input, which used to do it,
+        // because half of what it does is the camera's and route_input has no camera.
+        let let_go = inp
+            .as_ref()
+            .map(|i| {
+                input::super_down(i)
+                    && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_ESC)
+            })
+            .unwrap_or(false);
         // What the fingers did, not what it did to the camera: where a scroll goes is
         // decided below, alongside the wheel's, so a trackpad can scroll a window.
         let pad = match touchpad.as_mut() {
@@ -1293,16 +1307,16 @@ fn main() {
         // drives the trackpad itself. Everything downstream then treats the two modes
         // identically, including forwarding to whatever the pointer is over.
         //
-        // Three fingers are the canvas, always, and that is the one gesture needing no
-        // modifier: nothing else on the pad uses three, so there is nothing to confuse it
-        // with. Two join the pointer's own scroll and go wherever Super says, so the same two
-        // fingers scroll a page or pan the canvas depending on one key.
-        let three_finger = pad.fingers >= 3;
-        if !three_finger {
-            ptr.scroll_x += pad.scroll_x;
-            ptr.scroll_y += pad.scroll_y;
-            ptr.pinch *= pad.pinch;
-        }
+        // Every window's hold on the keyboard, the pointer and the implicit grab is dropped
+        // by the key and by the swipe alike: stepping back to look at everything is not a
+        // moment when one window should still be taking your keystrokes.
+        let release_all = let_go || pad.swipe_up;
+
+        // Whether this reaches the canvas or the window under the pointer is decided below,
+        // by whether Super is held. The pad reports the same thing either way.
+        ptr.scroll_x += pad.scroll_x;
+        ptr.scroll_y += pad.scroll_y;
+        ptr.pinch *= pad.pinch;
         // Whether the wheel and the fingers belong to the canvas or to the window under the
         // pointer. Super takes them for the canvas; otherwise they go to whatever is hovered.
         let pointer_on_client = !super_down && hovered.is_some();
@@ -1378,7 +1392,7 @@ fn main() {
         // to anchor on, so it keeps the canvas under the pointer fixed.
         // A reset says where the zoom should be, so nothing may be on its way somewhere else.
         if reset_click || reset_key {
-            zoom_spring = None;
+            zoom_ease = None;
         }
         if reset_click {
             let (cxp, cyp) = pointer_xy.unwrap_or((0, 0));
@@ -1399,21 +1413,12 @@ fn main() {
         // before on purpose: route_input updates it later in the frame, and using
         // one value for both branches is what stops them both firing on the frame
         // the pointer crosses a window edge.
-        // What the canvas moves by this frame: the three-finger gesture on its own, or
-        // everything the pointer has while Super is held.
-        let (cam_scroll_x, cam_scroll_y, cam_pinch) = if three_finger {
-            (pad.scroll_x, pad.scroll_y, pad.pinch)
-        } else if super_down {
-            (ptr.scroll_x, ptr.scroll_y, ptr.pinch)
-        } else {
-            (0.0, 0.0, 1.0)
-        };
-        if super_down || three_finger {
+        if super_down {
             let (cxp, cyp) = pointer_xy.unwrap_or((0, 0));
             if ptr.wheel != 0.0 {
                 // The wheel is a zoom of its own; whatever a pinch was settling toward is
                 // not where the wheel is going.
-                zoom_spring = None;
+                zoom_ease = None;
                 let wheel = if set.invert_scroll { -ptr.wheel } else { ptr.wheel };
                 camera::zoom_at(
                     &mut cam,
@@ -1432,14 +1437,14 @@ fn main() {
             // Finger scroll pans, pinch zooms at the cursor. The camera moves
             // against the fingers so the canvas travels with them, matching
             // touch.rs.
-            if cam_scroll_x != 0.0 || cam_scroll_y != 0.0 {
-                cam.cx -= cam_scroll_x / cam.zoom;
-                cam.cy += cam_scroll_y / cam.zoom;
+            if ptr.scroll_x != 0.0 || ptr.scroll_y != 0.0 {
+                cam.cx -= ptr.scroll_x / cam.zoom;
+                cam.cy += ptr.scroll_y / cam.zoom;
             }
-            if cam_pinch != 1.0 {
+            if ptr.pinch != 1.0 {
                 camera::zoom_at(
                     &mut cam,
-                    cam_pinch,
+                    ptr.pinch,
                     cxp as f32,
                     cyp as f32,
                     ray::screen_width() as f32,
@@ -1448,7 +1453,7 @@ fn main() {
                 );
                 // A pinch owns the zoom while it lasts, so anything the last one was still
                 // settling toward is no longer where we are going.
-                zoom_spring = None;
+                zoom_ease = None;
             }
         }
 
@@ -1474,34 +1479,67 @@ fn main() {
             let springs = zoomed_in || drifted_out;
             // Anchored where the fingers were, so the canvas point under them is the one
             // that holds still on the way back, exactly as it did during the pinch.
-            zoom_spring = springs.then(|| pointer_xy.unwrap_or((0, 0)));
+            zoom_ease = springs.then(|| {
+                let (ax, ay) = pointer_xy.unwrap_or((0, 0));
+                ZoomEase { ax: ax as f32, ay: ay as f32, target: 1.0 }
+            });
         }
-        if let Some((ax, ay)) = zoom_spring {
+
+        // Three fingers, and Super+Escape, move the whole canvas rather than a piece of it,
+        // so they turn around the middle of the screen rather than the cursor.
+        //
+        // The fingers name a direction: up steps back far enough to see where everything is,
+        // down comes home to 1:1. The key has no direction, so it toggles on where you
+        // already are, which makes one chord both "show me everything" and "put me back".
+        //
+        // Letting go of the windows is the other half of both, and happens in route_input.
+        // Not for a swipe down: coming home from the overview leaves focus alone, because by
+        // then there is nothing focused to leave.
+        let at_overview = match zoom_ease.as_ref().map(|e| e.target) {
+            // Already travelling: decide against where it is heading rather than where the
+            // zoom has got to, so pressing twice reverses cleanly instead of depending on
+            // how far the first press ran.
+            Some(t) => (t - set.overview_zoom).abs() < (t - set.zoom_default).abs(),
+            // The midpoint between two scales is their geometric mean, not their average:
+            // zoom multiplies, so half way between 0.57 and 1.0 is 0.76 rather than 0.79.
+            None => cam.zoom < (set.overview_zoom * set.zoom_default).sqrt(),
+        };
+        let overview = pad.swipe_up || (let_go && !at_overview);
+        let back = pad.swipe_down || (let_go && at_overview);
+        if overview || back {
+            zoom_ease = Some(ZoomEase {
+                ax: ray::screen_width() as f32 * 0.5,
+                ay: ray::screen_height() as f32 * 0.5,
+                target: if overview { set.overview_zoom } else { set.zoom_default },
+            });
+        }
+        if let Some(ease) = zoom_ease.as_ref() {
+            let (ax, ay, target) = (ease.ax, ease.ay, ease.target);
             // Close enough that another step would be invisible: land on 1:1 exactly, so the
             // pixel grid engages rather than sitting a hair off it forever.
             const SETTLED: f32 = 0.001;
             let t = (set.zoom_spring_rate * ray::frame_time()).min(1.0);
-            let next = if (1.0 - cam.zoom).abs() < SETTLED {
-                1.0
+            let next = if (target - cam.zoom).abs() < SETTLED {
+                target
             } else {
-                cam.zoom + (1.0 - cam.zoom) * t
+                cam.zoom + (target - cam.zoom) * t
             };
             let factor = next / cam.zoom;
             camera::zoom_at(
                 &mut cam,
                 factor,
-                ax as f32,
-                ay as f32,
+                ax,
+                ay,
                 ray::screen_width() as f32,
                 ray::screen_height() as f32,
                 &set,
             );
-            // Near 1:1 from either side, not merely past it. Testing for "at least 1:1"
-            // reads correctly climbing back from a zoom out and is already true on the first
-            // frame of a spring coming down from above, which cancelled it after one step
-            // too small to see.
-            if (cam.zoom - 1.0).abs() < SETTLED {
-                zoom_spring = None;
+            // Near the target from either side, not merely past it. Testing for "at least
+            // 1:1" read correctly climbing back from a zoom out and was already true on the
+            // first frame of one coming down from above, which cancelled it after a step too
+            // small to see.
+            if (cam.zoom - target).abs() < SETTLED {
+                zoom_ease = None;
             }
         }
 
@@ -2139,12 +2177,12 @@ fn main() {
                 &mut grabbed,
                 &mut last_motion,
                 ptr.left || ptr.right || ptr.middle,
-                inp.as_ref(),
                 debug_input,
                 super_down,
                 drag.as_ref().map(|d| d.from_client).unwrap_or(false)
                     || resize.as_ref().map(|r| !r.right_button).unwrap_or(false),
                 &mut press_log,
+                release_all,
                 &ptr,
                 pressed,
                 released,

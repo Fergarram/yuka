@@ -163,6 +163,10 @@ pub struct Touchpad {
     prev_dist: Option<f32>,
     // Which of pan/zoom the gesture is currently applying.
     mode: GestureMode,
+    // Where three fingers were when they landed, and whether they have already been counted
+    // as a swipe. Latched so a hand that keeps travelling only fires once.
+    swipe_ref: Option<(f32, f32)>,
+    swiped: bool,
     // Whether the two-finger gesture now in progress has zoomed at any point, so that the
     // end of the gesture can be reported as the end of a pinch. Not simply the previous
     // frame's mode: a gesture is allowed to move between panning and zooming while the
@@ -268,10 +272,10 @@ pub struct Gesture {
     // to rest, or the gesture turned into a pan. A paused pinch reports a factor of 1.0
     // exactly like a finished one, so the caller cannot tell them apart and needs telling.
     pub zoom_ended: bool,
-    // How many fingers made this gesture, so the caller can tell a two-finger scroll, which
-    // belongs to whatever is under the pointer, from a three-finger one, which is the canvas.
-    // Zero when there is no gesture.
-    pub fingers: u32,
+    // Three fingers went up, or down. Fires once, on the frame the travel passes the
+    // threshold, and says nothing else: an instruction rather than a motion to follow.
+    pub swipe_up: bool,
+    pub swipe_down: bool,
 }
 
 impl Default for Gesture {
@@ -282,7 +286,8 @@ impl Default for Gesture {
             scroll_y: 0.0,
             pinch: 1.0,
             zoom_ended: false,
-            fingers: 0,
+            swipe_up: false,
+            swipe_down: false,
         }
     }
 }
@@ -384,6 +389,8 @@ pub fn open(path: &str, set: &Settings) -> Option<Touchpad> {
         prev_centroid: None,
         prev_dist: None,
         mode: GestureMode::None,
+        swipe_ref: None,
+        swiped: false,
         zoomed_gesture: false,
         pan_ref: None,
         pan_armed: false,
@@ -504,6 +511,8 @@ pub fn reset(tp: &mut Touchpad, set: &Settings) {
     tp.prev_centroid = None;
     tp.prev_dist = None;
     tp.mode = GestureMode::None;
+    tp.swipe_ref = None;
+    tp.swiped = false;
     tp.pan_ref = None;
     tp.pan_armed = false;
     tp.zoom_ref = None;
@@ -931,6 +940,11 @@ fn update_gesture(tp: &mut Touchpad, cursor: Option<&mut Cursor>, set: &Settings
         }
     }
 
+    if count != 3 {
+        tp.swipe_ref = None;
+        tp.swiped = false;
+    }
+
     // Pointer motion is one finger's job: two fingers are a gesture, wherever that gesture
     // goes, so they do not drag the cursor along with them. Except when the caller says
     // otherwise or the pad is held down, when every finger is pointing, because a
@@ -1015,9 +1029,39 @@ fn update_gesture(tp: &mut Touchpad, cursor: Option<&mut Cursor>, set: &Settings
         return out;
     }
 
-    // Two fingers or three. Anything else is not a gesture: nothing to pan or zoom, and
+    // Three fingers say one thing: which way they went. It fires once, on the frame the
+    // travel passes the threshold, and they are ignored from then until they lift, so a hand
+    // that carries on drifting cannot fire it twice, and cannot fire the other way either by
+    // coming back. Nothing here pans or zooms; the caller decides what a swipe means.
+    if count == 3 {
+        let centroid = (
+            (pts[0].0 + pts[1].0 + pts[2].0) / 3.0,
+            (pts[0].1 + pts[1].1 + pts[2].1) / 3.0,
+        );
+        match tp.swipe_ref {
+            None => tp.swipe_ref = Some(centroid),
+            Some(r) if !tp.swiped => {
+                // Up is y decreasing, the same direction the scroll convention calls
+                // positive. Whichever way it went has to lead the sideways travel, or a
+                // diagonal drag across the pad would count as one.
+                let up = r.1 - centroid.1;
+                let across = (centroid.0 - r.0).abs();
+                if up.abs() >= tp.span * set.swipe_frac && up.abs() > across {
+                    tp.swiped = true;
+                    if up > 0.0 {
+                        out.swipe_up = true;
+                    } else {
+                        out.swipe_down = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Two fingers, and only two. Anything else is not a gesture: nothing to pan or zoom, and
     // panning stops dead when the fingers lift, no glide.
-    if count != 2 && count != 3 {
+    if count != 2 {
         tp.prev_centroid = None;
         tp.prev_dist = None;
         tp.mode = GestureMode::None;
@@ -1028,22 +1072,10 @@ fn update_gesture(tp: &mut Touchpad, cursor: Option<&mut Cursor>, set: &Settings
         return out;
     }
 
-    out.fingers = count as u32;
-    let n = count as f32;
-    let centroid = (
-        pts[..count].iter().map(|p| p.0).sum::<f32>() / n,
-        pts[..count].iter().map(|p| p.1).sum::<f32>() / n,
-    );
-    // How spread out the fingers are, as twice their mean distance from the centroid. For two
-    // that is exactly the gap between them, so every threshold written against the old
-    // two-finger distance still means what it meant. For three it is the same idea one
-    // dimension wider, and a pinch is a ratio either way, so nothing else has to know.
-    let dist = 2.0
-        * pts[..count]
-            .iter()
-            .map(|p| ((p.0 - centroid.0).powi(2) + (p.1 - centroid.1).powi(2)).sqrt())
-            .sum::<f32>()
-        / n;
+    let centroid = ((pts[0].0 + pts[1].0) * 0.5, (pts[0].1 + pts[1].1) * 0.5);
+    let dx = pts[0].0 - pts[1].0;
+    let dy = pts[0].1 - pts[1].1;
+    let dist = (dx * dx + dy * dy).sqrt();
 
     // Pan and zoom each have to travel a minimum distance from where the gesture
     // began before they do anything: a tap, a resting hand or a hand
