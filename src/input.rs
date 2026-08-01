@@ -123,6 +123,9 @@ pub struct Pointer {
     pub scroll_y: f32,
     // Pinch factor for this frame (1.0 = no change), Libinput trackpad mode only.
     pub pinch: f32,
+    // True on the frame libinput says the pinch is over. Same edge touch.rs reports for the
+    // custom path, so nothing downstream has to know which one is driving.
+    pub pinch_ended: bool,
     pub left_pressed: bool,
     pub left_released: bool,
     pub right_pressed: bool,
@@ -151,6 +154,7 @@ impl Default for Pointer {
             scroll_x: 0.0,
             scroll_y: 0.0,
             pinch: 1.0,
+            pinch_ended: false,
             left_pressed: false,
             left_released: false,
             right_pressed: false,
@@ -512,7 +516,10 @@ fn gesture_event(inp: &mut Input, p: &mut Pointer, event: GestureEvent) {
             p.scroll_x += e.dx() as f32;
             p.scroll_y -= e.dy() as f32;
         }
-        GestureEvent::Pinch(GesturePinchEvent::End(_)) => inp.pinch_scale = 1.0,
+        GestureEvent::Pinch(GesturePinchEvent::End(_)) => {
+            inp.pinch_scale = 1.0;
+            p.pinch_ended = true;
+        }
         GestureEvent::Swipe(GestureSwipeEvent::Update(e)) => {
             p.scroll_x += e.dx() as f32;
             p.scroll_y -= e.dy() as f32;

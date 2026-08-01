@@ -143,6 +143,14 @@ pub struct Settings {
     // Perspective field of view in degrees. Larger means more parallax on a lifted
     // window.
     pub fov_deg: f32,
+    // Where a pinch that zoomed out settles when the fingers lift. Above this the view
+    // springs back to 1:1; at it or below, the zoom is taken as meant and left alone. 1:1 is
+    // where a window is sampled texel for texel, so drifting a little off it costs sharpness
+    // for nothing, while a deliberate zoom out is somewhere you asked to be.
+    pub zoom_spring_floor: f32,
+    // How fast it travels back, as a fraction of the remaining distance per second. 0 turns
+    // the spring off and a released pinch stays exactly where it was let go.
+    pub zoom_spring_rate: f32,
 }
 
 // What the file is compared against: the values that ship, and the mtime that was last
@@ -201,6 +209,8 @@ pub fn defaults() -> Settings {
         zoom_max: 8.0,
         zoom_default: 1.0,
         fov_deg: 40.0,
+        zoom_spring_floor: 0.75,
+        zoom_spring_rate: 12.0,
     }
 }
 
@@ -356,6 +366,8 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
         "zoom_max" => f32_key!(zoom_max),
         "zoom_default" => f32_key!(zoom_default),
         "fov_deg" => f32_key!(fov_deg),
+        "zoom_spring_floor" => f32_key!(zoom_spring_floor),
+        "zoom_spring_rate" => f32_key!(zoom_spring_rate),
         "invert_scroll" => match value {
             "true" | "1" | "yes" => set.invert_scroll = true,
             "false" | "0" | "no" => set.invert_scroll = false,

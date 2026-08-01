@@ -885,6 +885,10 @@ fn main() {
     let mut drag_geo: Option<(f32, f32, f32, f32)> = None;
     // When the last middle button press landed, for the double click chord.
     let mut last_middle_ms: u32 = 0;
+    // Where a released pinch is springing back to 1:1 around, in screen pixels, or None when
+    // nothing is settling. The anchor is kept rather than re-read so the point under the
+    // fingers stays put for the whole return, even if the cursor moves meanwhile.
+    let mut zoom_spring: Option<(i32, i32)> = None;
     // Surface the pointer is currently over, so crossing into another one can
     // emit leave and enter.
     let mut hovered: Option<WlSurface> = None;
@@ -1254,6 +1258,12 @@ fn main() {
 
         // Super+0 scales around the screen center; the middle click has a cursor
         // to anchor on, so it keeps the canvas under the pointer fixed.
+        // A reset says where the zoom should be, so nothing may be on its way somewhere else.
+        if (reset_click || reset_key || (mode == Mode::Desk && pad.reset_zoom && !super_down))
+            && mode == Mode::Desk
+        {
+            zoom_spring = None;
+        }
         if reset_click && mode == Mode::Desk {
             let (cxp, cyp) = pointer_xy.unwrap_or((0, 0));
             camera::reset_zoom_at(
@@ -1276,6 +1286,9 @@ fn main() {
         if mode == Mode::Desk && !pointer_on_client {
             let (cxp, cyp) = pointer_xy.unwrap_or((0, 0));
             if ptr.wheel != 0.0 {
+                // The wheel is a zoom of its own; whatever a pinch was settling toward is
+                // not where the wheel is going.
+                zoom_spring = None;
                 let wheel = if set.invert_scroll { -ptr.wheel } else { ptr.wheel };
                 camera::zoom_at(
                     &mut cam,
@@ -1308,6 +1321,50 @@ fn main() {
                     ray::screen_height() as f32,
                     &set,
                 );
+                // A pinch owns the zoom while it lasts, so anything the last one was still
+                // settling toward is no longer where we are going.
+                zoom_spring = None;
+            }
+        }
+
+        // A pinch that let go a little way out of 1:1 springs back to it. Being at 1:1 is
+        // worth something concrete, since that is the only scale where a window is sampled
+        // texel for texel, and drifting a few percent off it costs sharpness in exchange for
+        // nothing anyone asked for. Past the floor the zoom is taken as deliberate and left
+        // exactly where it was put.
+        //
+        // Only zooming out, and only from a gesture. A wheel notch has no release to spring
+        // from, and springing after each one would make the wheel unable to stop anywhere
+        // between the floor and 1:1.
+        let zoom_gesture_ended = pad.zoom_ended || ptr.pinch_ended;
+        if zoom_gesture_ended && mode == Mode::Desk && set.zoom_spring_rate > 0.0 {
+            let springs = cam.zoom < 1.0 && cam.zoom > set.zoom_spring_floor;
+            // Anchored where the fingers were, so the canvas point under them is the one
+            // that holds still on the way back, exactly as it did during the pinch.
+            zoom_spring = springs.then(|| pointer_xy.unwrap_or((0, 0)));
+        }
+        if let Some((ax, ay)) = zoom_spring {
+            // Close enough that another step would be invisible: land on 1:1 exactly, so the
+            // pixel grid engages rather than sitting a hair off it forever.
+            const SETTLED: f32 = 0.001;
+            let t = (set.zoom_spring_rate * ray::frame_time()).min(1.0);
+            let next = if (1.0 - cam.zoom).abs() < SETTLED {
+                1.0
+            } else {
+                cam.zoom + (1.0 - cam.zoom) * t
+            };
+            let factor = next / cam.zoom;
+            camera::zoom_at(
+                &mut cam,
+                factor,
+                ax as f32,
+                ay as f32,
+                ray::screen_width() as f32,
+                ray::screen_height() as f32,
+                &set,
+            );
+            if cam.zoom >= 1.0 - SETTLED {
+                zoom_spring = None;
             }
         }
 

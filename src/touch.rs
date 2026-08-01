@@ -163,6 +163,11 @@ pub struct Touchpad {
     prev_dist: Option<f32>,
     // Which of pan/zoom the gesture is currently applying.
     mode: GestureMode,
+    // Whether the two-finger gesture now in progress has zoomed at any point, so that the
+    // end of the gesture can be reported as the end of a pinch. Not simply the previous
+    // frame's mode: a gesture is allowed to move between panning and zooming while the
+    // fingers stay down, and the pinch is not over until they lift.
+    zoomed_gesture: bool,
     // Centroid and finger distance when the current two-finger gesture began, and
     // whether each has travelled far enough from there to pan or to zoom.
     pan_ref: Option<(f32, f32)>,
@@ -263,6 +268,10 @@ pub struct Gesture {
     pub scroll_y: f32,
     // Pinch factor for this frame, 1.0 for none.
     pub pinch: f32,
+    // True on the one frame a pinch stops, however it stopped: fingers lifted, a hand came
+    // to rest, or the gesture turned into a pan. A paused pinch reports a factor of 1.0
+    // exactly like a finished one, so the caller cannot tell them apart and needs telling.
+    pub zoom_ended: bool,
     // A two-finger double tap asked for the zoom to be reset.
     pub reset_zoom: bool,
 }
@@ -274,6 +283,7 @@ impl Default for Gesture {
             scroll_x: 0.0,
             scroll_y: 0.0,
             pinch: 1.0,
+            zoom_ended: false,
             reset_zoom: false,
         }
     }
@@ -376,6 +386,7 @@ pub fn open(path: &str, set: &Settings) -> Option<Touchpad> {
         prev_centroid: None,
         prev_dist: None,
         mode: GestureMode::None,
+        zoomed_gesture: false,
         pan_ref: None,
         pan_armed: false,
         zoom_ref: None,
@@ -925,7 +936,31 @@ fn press_is_right(tp: &Touchpad, set: &Settings) -> bool {
 // pointer_only: treat every finger as a pointing finger rather than a gesture. The caller
 // sets it while Super is held, which is window manipulation and never a scroll, and it is
 // also true whenever the pad's own button is down, since dragging is not scrolling.
+// The gesture this frame, plus the edge for a pinch that has just finished. The edge is
+// computed out here rather than inside, because the body leaves by half a dozen different
+// paths (fingers lifted, a hand rested, the pad held for a drag) and every one of them ends
+// a gesture. Reading the mode once, after whichever path was taken, cannot miss one.
 pub fn update(
+    tp: &mut Touchpad,
+    cursor: Option<&mut Cursor>,
+    pointer_only: bool,
+    set: &Settings,
+) -> Gesture {
+    let mut out = update_gesture(tp, cursor, pointer_only, set);
+    if tp.mode == GestureMode::Zoom {
+        tp.zoomed_gesture = true;
+    }
+    // Fires once the gesture has stopped altogether, not merely stopped zooming. Turning a
+    // pinch into a pan without lifting is one gesture, and springing the zoom back while
+    // two fingers are still moving would pull the canvas out from under them.
+    out.zoom_ended = tp.zoomed_gesture && tp.mode == GestureMode::None;
+    if out.zoom_ended {
+        tp.zoomed_gesture = false;
+    }
+    out
+}
+
+fn update_gesture(
     tp: &mut Touchpad,
     cursor: Option<&mut Cursor>,
     pointer_only: bool,
