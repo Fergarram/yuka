@@ -1604,28 +1604,28 @@ fn main() {
         // stops rather than a toggle, so the same gesture repeated walks in one direction and
         // then does nothing more.
         //
-        // Up steps out: in from 1:1 it comes back to 1:1 first, at 1:1 it goes to the
-        // overview, and past the overview there is nowhere further to step. Down comes
-        // straight home from anywhere out, and does nothing at all when you are already in.
+        // Up steps out, and only from 1:1 or closer: zoomed in it comes back to 1:1, at 1:1
+        // it goes to the overview, and anywhere already out it moves nothing. A view you have
+        // pinched to some scale of your own is a place you chose, and yanking it to the
+        // overview because you asked to let go of the windows is the canvas deciding it knows
+        // better. Down comes straight home from anywhere out, and does nothing when you are
+        // already in.
         //
-        // The key has no direction, so it is the only one that turns around: at 1:1 it goes
-        // to the overview, and from anywhere else it brings you home. Between them that is
-        // one chord for "show me everything" and "put me back", and two gestures that always
-        // mean the same thing whichever way the view is currently sitting.
+        // Super+Escape moves nothing. It lets go of every window and leaves the view exactly
+        // where you had put it, which is the whole of what it is for: a key with no direction
+        // cannot say where to go, and made to guess it moved the canvas out from under work
+        // that only wanted the keyboard back.
         const NEAR: f32 = 0.001;
-        let at_default = (cam.zoom - set.zoom_default).abs() < NEAR;
         let target = if pad.swipe_up {
             if cam.zoom > set.zoom_default + NEAR {
                 Some(set.zoom_default)
-            } else if cam.zoom > set.overview_zoom + NEAR {
+            } else if cam.zoom > set.zoom_default - NEAR {
                 Some(set.overview_zoom)
             } else {
                 None
             }
         } else if pad.swipe_down {
             (cam.zoom < set.zoom_default - NEAR).then_some(set.zoom_default)
-        } else if let_go {
-            Some(if at_default { set.overview_zoom } else { set.zoom_default })
         } else {
             None
         };
