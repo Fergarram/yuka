@@ -95,6 +95,18 @@ pub struct Settings {
     // 0 never creeps, which is what om_wm did before this existed. 0.05 closes half the drift
     // in about a fifth of a second. Higher forgives more and demands a brisker pinch.
     pub zoom_ref_follow: f32,
+    // Where a three-finger swipe turns the view around: the middle of the screen, or the
+    // cursor.
+    //
+    // False, the middle of the screen, is the default because a swipe moves the whole canvas
+    // rather than a piece of it. It is "show me everything" and "put me back", and where the
+    // cursor happens to be resting is not what the gesture is about; anchoring there sends the
+    // view somewhere your hands did not choose.
+    //
+    // True anchors on the cursor instead, which keeps whatever you are pointing at exactly
+    // where it is while the scale changes around it. That is the pinch's rule, and it makes
+    // the swipe a faster way of doing the same thing rather than a different kind of move.
+    pub swipe_zoom_at_cursor: bool,
 
     // Trackpad: how much contact counts as a touch at all, in the raw units the overlay
     // shows (this pad reports 0..2048). Below the first threshold a contact is ignored
@@ -234,6 +246,7 @@ pub fn defaults() -> Settings {
         mode_eps_frac: 0.0015,
         pinch_deadzone_frac: 0.0005,
         zoom_ref_follow: 0.05,
+        swipe_zoom_at_cursor: false,
 
 
         touch_min_size: 0.0,
@@ -423,6 +436,16 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
         "zoom_ease_rate" => f32_key!(zoom_ease_rate),
         "zoom_detent" => f32_key!(zoom_detent),
         "resize_corner_hold" => f32_key!(resize_corner_hold),
+        "swipe_zoom_at_cursor" => match value {
+            "true" | "1" | "yes" => set.swipe_zoom_at_cursor = true,
+            "false" | "0" | "no" => set.swipe_zoom_at_cursor = false,
+            _ => {
+                eprintln!(
+                    "om_wm: settings: {path}:{line}: swipe_zoom_at_cursor wants true or false"
+                );
+                return false;
+            }
+        },
         "invert_scroll" => match value {
             "true" | "1" | "yes" => set.invert_scroll = true,
             "false" | "0" | "no" => set.invert_scroll = false,

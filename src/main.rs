@@ -1704,14 +1704,18 @@ fn main() {
             None
         };
 
-        // Around the middle of the screen. These move the whole canvas rather than a piece of
-        // it, so where the cursor happens to be sitting is not what the gesture is about.
+        // Around the middle of the screen by default. These move the whole canvas rather than
+        // a piece of it, so where the cursor happens to be sitting is not what the gesture is
+        // about. swipe_zoom_at_cursor takes the pinch's rule instead and holds whatever you
+        // are pointing at still while the scale changes around it.
         if let Some(target) = target {
-            zoom_ease = Some(ZoomEase {
-                ax: ray::screen_width() as f32 * 0.5,
-                ay: ray::screen_height() as f32 * 0.5,
-                target,
-            });
+            let (ax, ay) = if set.swipe_zoom_at_cursor {
+                let (px, py) = pointer_xy.unwrap_or((0, 0));
+                (px as f32, py as f32)
+            } else {
+                (ray::screen_width() as f32 * 0.5, ray::screen_height() as f32 * 0.5)
+            };
+            zoom_ease = Some(ZoomEase { ax, ay, target });
         }
 
         // The detent at 1:1, tested every frame rather than when a pinch ends.
