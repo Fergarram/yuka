@@ -55,9 +55,6 @@ const RESIZE_SETTLE_FRAMES: u32 = 90;
 // How often to stat the settings file. Once a second is instant to a human hitting
 // save, and 60 stats a minute is nothing next to a frame.
 const SETTINGS_POLL_FRAMES: u32 = 60;
-// How long after the last Super+wheel notch the zoom is taken to have finished moving. A
-// pinch says when the fingers lift; a wheel says nothing, so quiet has to stand in for it.
-const WHEEL_SETTLE_MS: u32 = 200;
 // How long to sleep per iteration while another VT owns the display.
 const VT_IDLE_MS: u64 = 30;
 // Size of the window in the nested build. On DRM we take the whole screen instead.
@@ -333,8 +330,6 @@ fn route_input(
     held: bool,
     debug: bool,
     super_down: bool,
-    // Out in the overview, where the canvas owns the pointer and no client hears it.
-    zoomed_out: bool,
     // True while we are moving or resizing a window because the client asked us to. The
     // compositor owns the pointer for the duration of an xdg_toplevel move or resize, and a
     // client does not expect motion inside itself while it believes it is being dragged.
@@ -386,11 +381,9 @@ fn route_input(
     }
 
     // The canvas claims the pointer: no hover, no buttons, no scroll for clients, so zooming
-    // and dragging never make the thing under the cursor react. Either because Super is held,
-    // or because the view is out in the overview, where windows are objects on a canvas rather
-    // than applications. Pointer focus is withdrawn on the way in, so nothing is left
-    // believing the cursor is still inside it.
-    if super_down || zoomed_out {
+    // and dragging never make the thing under the cursor react. Pointer focus is withdrawn on
+    // the way in, so nothing is left believing the cursor is still inside it.
+    if super_down {
         if hovered.is_some() {
             let serial = SERIAL_COUNTER.next_serial();
             pointer.motion(state, None, &MotionEvent { location: loc, serial, time: time_ms });
@@ -1090,11 +1083,6 @@ fn main() {
     let mut pinch_scale: f64 = 1.0;
     // Which of the two scales the zoom last settled at, which is the mode. Out here the canvas
     // owns the pointer and no window hears anything; in there they are applications again.
-    let mut zoomed_out = false;
-    let mut was_zoomed_out = false;
-    // When the last Super+wheel notch arrived, so the wheel can be given the ending that a
-    // pinch reports for itself. Zero when nothing is pending.
-    let mut wheel_zoom_ms: u32 = 0;
     // Surface the pointer is currently over, so crossing into another one can
     // emit leave and enter.
     let mut hovered: Option<WlSurface> = None;
@@ -1179,6 +1167,20 @@ fn main() {
         }
         wl::state::prune_held(&mut state);
 
+        // A window that has gone takes the focus with it.
+        //
+        // Closing one is a click, and a click focuses what it lands on, so the window spends
+        // its last moment focused and then stops existing. Nothing noticed: focused went on
+        // holding a surface that was no longer there, which is not the same as holding
+        // nothing. Two fingers went on believing they belonged to a window that had closed,
+        // and the canvas would not take them until something else was clicked.
+        //
+        // Straight after the dispatch that carried the destroy, so nothing downstream sees a
+        // frame of it.
+        if focused.as_ref().is_some_and(|s| !s.is_alive()) {
+            focus_window(&mut state, &mut focused, None);
+        }
+
         let committed: Vec<_> = state.committed.drain(..).collect();
         // A cursor surface commits like any other, and the window path releases the buffer
         // of anything that is not a window so the client is not left waiting on it. That
@@ -1243,11 +1245,10 @@ fn main() {
         // app doing the launching hands over a token proving a user asked for it; we do not
         // implement it, so anything that is not the focused client waits to be clicked.
         for surface in windows.mapped.drain(..).collect::<Vec<_>>() {
-            let welcome = !zoomed_out
-                && match focused.as_ref() {
-                    Some(current) => same_client(current, &surface),
-                    None => true,
-                };
+            let welcome = match focused.as_ref() {
+                Some(current) => same_client(current, &surface),
+                None => true,
+            };
             if welcome {
                 // No raise needed: a window is given the frontmost stack order as it is
                 // stored, and nothing between there and here can have changed that.
@@ -1285,9 +1286,7 @@ fn main() {
                 continue;
             }
             render::front(&mut windows, &surface);
-            if !zoomed_out {
-                focus_window(&mut state, &mut focused, Some(surface));
-            }
+            focus_window(&mut state, &mut focused, Some(surface));
         }
 
         // New windows open where the view is.
@@ -1424,7 +1423,7 @@ fn main() {
         // Every window's hold on the keyboard, the pointer and the implicit grab is dropped
         // by the key and by the swipe alike: stepping back to look at everything is not a
         // moment when one window should still be taking your keystrokes.
-        let release_all = let_go || pad.swipe_up;
+        let release_all = let_go || pad.swipe_up || pad.swipe_down;
 
         // Whether this reaches the canvas or the window under the pointer is decided below,
         // by whether Super is held. The pad reports the same thing either way.
@@ -1433,7 +1432,15 @@ fn main() {
         ptr.pinch *= pad.pinch;
         // Whether the wheel and the fingers belong to the canvas or to the window under the
         // pointer. Super takes them for the canvas; otherwise they go to whatever is hovered.
-        let pointer_on_client = !super_down && !zoomed_out && hovered.is_some();
+        // Two fingers belong to a window only while a window is being worked in. Nothing
+        // focused means nothing is being worked in, so they go to the canvas instead, and you
+        // do not have to reach for Super to move the view you are already looking at.
+        //
+        // Focus rather than hover, because hover is where the cursor happens to be resting
+        // and focus is what you last chose. Click a window and two fingers scroll it; click
+        // the canvas and the same two fingers move the canvas.
+        let pointer_on_client =
+            !super_down && focused.is_some() && hovered.is_some();
         if let Some(cur) = cursor.as_mut() {
             cursor::move_by(cur, ptr.dx as i32, ptr.dy as i32);
         }
@@ -1530,7 +1537,7 @@ fn main() {
         // Out in the overview the canvas has the pointer already, so two fingers pan and
         // pinch it with nothing held down. In close they belong to the window under the
         // cursor unless Super takes them.
-        if super_down || zoomed_out {
+        if super_down || focused.is_none() {
             let (cxp, cyp) = pointer_xy.unwrap_or((0, 0));
             if ptr.wheel != 0.0 {
                 // The wheel is a zoom of its own; whatever a pinch was settling toward is
@@ -1574,48 +1581,14 @@ fn main() {
             }
         }
 
-        let zoom_gesture_ended = pad.zoom_ended || ptr.pinch_ended;
-
-        // Every zoom ends at one of two scales, and which one it ends at is the mode.
+        // Nothing herds the zoom any more. A pinch is left exactly where the fingers left
+        // it, at any scale between the limits, which is what makes the canvas free: the view
+        // is a place you are rather than one of two places you may be.
         //
-        // Let go above the boundary and it returns to zoom_default, where the windows are
-        // applications. Let go at or below it and it settles at overview_zoom, where the
-        // canvas owns everything. Nothing is left sitting between them, so there is never a
-        // scale where it is unclear who the pointer belongs to, and the mode cannot change
-        // under a hand that is still moving.
-        //
-        // The wheel gets the same treatment a little later than the pad does. A pinch reports
-        // when the fingers lift and a wheel reports nothing at all, so its gesture is over
-        // when the notches stop coming.
-        if super_down && ptr.wheel != 0.0 {
-            wheel_zoom_ms = start.elapsed().as_millis() as u32;
-        }
-        let wheel_settled = wheel_zoom_ms != 0
-            && (start.elapsed().as_millis() as u32).saturating_sub(wheel_zoom_ms)
-                >= WHEEL_SETTLE_MS;
-        if wheel_settled {
-            wheel_zoom_ms = 0;
-        }
-        if (zoom_gesture_ended || wheel_settled) && set.zoom_spring_rate > 0.0 {
-            // Which line applies depends on which side the gesture set off from, which is
-            // what makes it a band: coming out of 1:1 you must pass snap_out, coming out of
-            // the overview you must pass snap_in, and in between you stay where you were.
-            let line = if zoomed_out {
-                set.overview_snap_in
-            } else {
-                set.overview_snap_out
-            };
-            let target = if cam.zoom >= line {
-                set.zoom_default
-            } else {
-                set.overview_zoom
-            };
-            zoomed_out = target <= set.overview_zoom;
-            // Around the fingers, so whatever you were pinching at holds still on the way to
-            // wherever it lands.
-            let (ax, ay) = pointer_xy.unwrap_or((0, 0));
-            zoom_ease = Some(ZoomEase { ax: ax as f32, ay: ay as f32, target });
-        }
+        // Which way of working is in force is therefore no longer a question about the zoom.
+        // It is said outright, by the three-finger swipes and by Super+Escape below, and it
+        // stays said until one of them says otherwise. Zooming inside either one changes what
+        // you can see and not what your hands do.
 
         // Three fingers, and Super+Escape, move the whole canvas rather than a piece of it,
         // so they turn around the middle of the screen rather than the cursor.
@@ -1627,31 +1600,52 @@ fn main() {
         // Letting go of the windows is the other half of both, and happens in route_input.
         // Not for a swipe down: coming home from the overview leaves focus alone, because by
         // then there is nothing focused to leave.
-        // Which side the key toggles away from is simply which side we are on. That is
-        // tracked rather than inferred now, and it is set the moment a zoom starts
-        // travelling, so pressing twice reverses cleanly instead of depending on how far the
-        // first press ran.
-        let at_overview = zoomed_out;
-        let overview = pad.swipe_up || (let_go && !at_overview);
-        let back = pad.swipe_down || (let_go && at_overview);
-        if overview || back {
-            zoomed_out = overview;
-            // Around the middle of the screen, both of them. These move the whole canvas
-            // rather than a piece of it, so where the cursor happens to be sitting is not
-            // what the gesture is about, and turning around it throws the view sideways as
-            // well as out. Tried the other way and it felt worse.
+        // Where a gesture sends the view, if anywhere. Each is a step with somewhere it
+        // stops rather than a toggle, so the same gesture repeated walks in one direction and
+        // then does nothing more.
+        //
+        // Up steps out: in from 1:1 it comes back to 1:1 first, at 1:1 it goes to the
+        // overview, and past the overview there is nowhere further to step. Down comes
+        // straight home from anywhere out, and does nothing at all when you are already in.
+        //
+        // The key has no direction, so it is the only one that turns around: at 1:1 it goes
+        // to the overview, and from anywhere else it brings you home. Between them that is
+        // one chord for "show me everything" and "put me back", and two gestures that always
+        // mean the same thing whichever way the view is currently sitting.
+        const NEAR: f32 = 0.001;
+        let at_default = (cam.zoom - set.zoom_default).abs() < NEAR;
+        let target = if pad.swipe_up {
+            if cam.zoom > set.zoom_default + NEAR {
+                Some(set.zoom_default)
+            } else if cam.zoom > set.overview_zoom + NEAR {
+                Some(set.overview_zoom)
+            } else {
+                None
+            }
+        } else if pad.swipe_down {
+            (cam.zoom < set.zoom_default - NEAR).then_some(set.zoom_default)
+        } else if let_go {
+            Some(if at_default { set.overview_zoom } else { set.zoom_default })
+        } else {
+            None
+        };
+
+        // Around the middle of the screen. These move the whole canvas rather than a piece of
+        // it, so where the cursor happens to be sitting is not what the gesture is about.
+        if let Some(target) = target {
             zoom_ease = Some(ZoomEase {
                 ax: ray::screen_width() as f32 * 0.5,
                 ay: ray::screen_height() as f32 * 0.5,
-                target: if overview { set.overview_zoom } else { set.zoom_default },
+                target,
             });
         }
+
         if let Some(ease) = zoom_ease.as_ref() {
             let (ax, ay, target) = (ease.ax, ease.ay, ease.target);
             // Close enough that another step would be invisible: land on 1:1 exactly, so the
             // pixel grid engages rather than sitting a hair off it forever.
             const SETTLED: f32 = 0.001;
-            let t = (set.zoom_spring_rate * ray::frame_time()).min(1.0);
+            let t = (set.zoom_ease_rate * ray::frame_time()).min(1.0);
             let next = if (target - cam.zoom).abs() < SETTLED {
                 target
             } else {
@@ -1827,11 +1821,15 @@ fn main() {
         // The window's top-left stays put and the far corner follows the cursor, which
         // is the one mapping that needs no handle to grab.
         //
-        // Behind Super, which is the compositor's way of moving and resizing a window as
-        // opposed to the client's own titlebar and edges.
-        // Out in the overview a drag can mean nothing else, since no client is listening, so
-        // a window is picked up without holding anything.
-        let grab_windows = super_down || zoomed_out;
+        // Behind Super, always, which is the compositor's way of moving and resizing a window
+        // as opposed to the client's own titlebar and edges.
+        //
+        // The overview used to let a drag do it with nothing held, on the grounds that no
+        // client was listening out there so a drag could not mean anything else. That was a
+        // mode you could be in without being told: a plain drag moved a window or worked in
+        // it depending on a gesture made minutes earlier, with nothing on screen to say
+        // which. One way to pick a window up, and it is the same everywhere.
+        let grab_windows = super_down;
         if ptr.right_pressed && grab_windows && resize.is_none() {
             if let Some((surf, ..)) = render::window_at(&windows, cam3d, sxp, syp) {
                 if let Some((gx, gy)) = camera::screen_to_plane(cam3d, sxp, syp, 0.0) {
@@ -2125,7 +2123,7 @@ fn main() {
                 // Asked of the mode rather than of the zoom. They agree once a gesture has
                 // settled, but mid-pinch the zoom is somewhere in between and a drag started
                 // then would decide from a number that is still moving.
-                if zoomed_out {
+                if cam.zoom < set.zoom_default {
                     render::raise(&mut windows, &surf);
                 } else {
                     render::front(&mut windows, &surf);
@@ -2285,22 +2283,7 @@ fn main() {
         // Crossing out into the overview lets go: a window still holding the keyboard from up
         // close would go on taking keys meant for the canvas, and one holding an implicit grab
         // would go on receiving a drag it can no longer see.
-        if zoomed_out != was_zoomed_out {
-            println!(
-                "om_wm: {}",
-                if zoomed_out {
-                    "overview: the canvas has the pointer, no window is focused"
-                } else {
-                    "1:1: windows have the pointer"
-                }
-            );
-        }
-        if zoomed_out && !was_zoomed_out {
-            focus_window(&mut state, &mut focused, None);
-            grabbed = None;
-        }
-        was_zoomed_out = zoomed_out;
-
+ 
         // Menus and subsurfaces are anchored to their root, so they are placed after
         // everything that could have moved that root: the drag, the settle, the client's own
         // move and resize requests.
@@ -2337,7 +2320,6 @@ fn main() {
                 ptr.left || ptr.right || ptr.middle,
                 debug_input,
                 super_down,
-                zoomed_out,
                 drag.as_ref().map(|d| d.from_client).unwrap_or(false)
                     || resize.as_ref().map(|r| !r.right_button).unwrap_or(false),
                 &mut press_log,
