@@ -472,7 +472,26 @@ pub fn set_window_center(windows: &mut Windows, surface: &WlSurface, cx: f32, cy
     if let Some(i) = index_of(windows, surface) {
         windows.canvas_x[i] = cx - windows.geo_w[i] * 0.5 - windows.geo_x[i];
         windows.canvas_y[i] = cy - windows.geo_h[i] * 0.5 - windows.geo_y[i];
+        repin(windows, i);
     }
+}
+
+// Move a maximized window's pin to wherever the window now is.
+//
+// Every setter above ends here, so anything that moves a window moves the pin with it and
+// hold_maximized has nothing to fight. Without this a maximized window could not be dragged at
+// all: the drag moved it and the next frame put it back, once per frame, forever.
+//
+// Maximized here means shaped like the view was when you asked, not owning the screen the way
+// it would on a desktop that had one. There is no reason a window that size cannot also be
+// somewhere else, so a drag moves it and it stays maximized. Unmaximizing still gives back the
+// rectangle it had before, size and position both.
+fn repin(windows: &mut Windows, i: usize) {
+    if !windows.maximized[i] {
+        return;
+    }
+    windows.max_x[i] = windows.canvas_x[i] + windows.geo_x[i];
+    windows.max_y[i] = windows.canvas_y[i] + windows.geo_y[i];
 }
 
 // Where a window's visible top-left sits on the canvas, geometry offset included: what a
@@ -492,6 +511,7 @@ pub fn set_window_origin(windows: &mut Windows, surface: &WlSurface, x: f32, y: 
     if let Some(i) = index_of(windows, surface) {
         windows.canvas_x[i] = x - windows.geo_x[i];
         windows.canvas_y[i] = y - windows.geo_y[i];
+        repin(windows, i);
     }
 }
 
@@ -500,6 +520,7 @@ pub fn set_window_pos(windows: &mut Windows, surface: &WlSurface, x: f32, y: f32
     if let Some(i) = index_of(windows, surface) {
         windows.canvas_x[i] = x;
         windows.canvas_y[i] = y;
+        repin(windows, i);
     }
 }
 
