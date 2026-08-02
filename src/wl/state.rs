@@ -54,14 +54,15 @@ use smithay::wayland::dmabuf::{
     ImportNotifier,
 };
 use smithay::wayland::shm::{ShmHandler, ShmState};
+use smithay::wayland::pointer_gestures::PointerGesturesState;
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::xdg_activation::{
     XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
 };
 use smithay::{
     delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_output,
-    delegate_seat, delegate_shm, delegate_viewporter, delegate_xdg_activation,
-    delegate_xdg_shell,
+    delegate_pointer_gestures, delegate_seat, delegate_shm, delegate_viewporter,
+    delegate_xdg_activation, delegate_xdg_shell,
 };
 
 use smithay::backend::allocator::dmabuf::Dmabuf;
@@ -105,6 +106,10 @@ pub struct State {
     // The seat itself, which the clipboard is a property of.
     pub seat: Seat<State>,
     pub pointer: PointerHandle<State>,
+    // Pinch and swipe as sequences a client can follow, rather than as scroll it has to
+    // guess at. Held for the lifetime of the program to keep the global registered.
+    #[allow(dead_code)]
+    pub pointer_gestures_state: PointerGesturesState,
     pub keyboard: KeyboardHandle<State>,
     pub dmabuf_state: DmabufState,
     #[allow(dead_code)]
@@ -218,6 +223,7 @@ pub fn init(
     // wl_seat with a pointer so clients can receive pointer events.
     let mut seat = seat_state.new_wl_seat(&dh, "seat0");
     let pointer = seat.add_pointer();
+    let pointer_gestures_state = PointerGesturesState::new::<State>(&dh);
     let keyboard = seat
         .add_keyboard(XkbConfig::default(), 600, 25)
         .expect("keyboard");
@@ -267,6 +273,7 @@ pub fn init(
         output_manager_state,
         seat,
         pointer,
+        pointer_gestures_state,
         keyboard,
         dmabuf_state,
         dmabuf_global,
@@ -1077,3 +1084,4 @@ delegate_seat!(State);
 delegate_output!(State);
 delegate_data_device!(State);
 delegate_xdg_activation!(State);
+delegate_pointer_gestures!(State);

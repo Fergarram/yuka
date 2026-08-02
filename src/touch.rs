@@ -273,6 +273,9 @@ pub struct Gesture {
     // to rest, or the gesture turned into a pan. A paused pinch reports a factor of 1.0
     // exactly like a finished one, so the caller cannot tell them apart and needs telling.
     pub zoom_ended: bool,
+    // A pinch has begun. Wayland's gesture protocol is a sequence with a beginning, a
+    // middle and an end, so the beginning has to be an event of its own.
+    pub zoom_started: bool,
     // The two-finger scroll that was running has stopped, because the fingers lifted or the
     // gesture turned into something else. Wayland requires saying so for a finger source: the
     // client cannot see the pad, so an axis sequence that is never ended is one it goes on
@@ -291,6 +294,7 @@ impl Default for Gesture {
             scroll_x: 0.0,
             scroll_y: 0.0,
             pinch: 1.0,
+            zoom_started: false,
             zoom_ended: false,
             scroll_ended: false,
             swipe_up: false,
@@ -912,9 +916,11 @@ fn press_is_right(tp: &Touchpad, set: &Settings) -> bool {
 // a gesture. Reading the mode once, after whichever path was taken, cannot miss one.
 pub fn update(tp: &mut Touchpad, cursor: Option<&mut Cursor>, set: &Settings) -> Gesture {
     let mut out = update_gesture(tp, cursor, set);
+    let was_zooming = tp.zoomed_gesture;
     if tp.mode == GestureMode::Zoom {
         tp.zoomed_gesture = true;
     }
+    out.zoom_started = tp.zoomed_gesture && !was_zooming;
     if tp.mode == GestureMode::Pan {
         tp.panned_gesture = true;
     }

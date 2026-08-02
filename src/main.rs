@@ -26,7 +26,10 @@ use std::time::Instant;
 use smithay::backend::input::{Axis, AxisSource, ButtonState, KeyState};
 use smithay::input::keyboard::{FilterResult, Keycode};
 use smithay::input::pointer::CursorImageStatus;
-use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
+use smithay::input::pointer::{
+    AxisFrame, ButtonEvent, GesturePinchBeginEvent, GesturePinchEndEvent,
+    GesturePinchUpdateEvent, MotionEvent,
+};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::backend::ObjectId;
 use smithay::reexports::wayland_server::Resource;
@@ -597,6 +600,80 @@ fn release_held_keys(
 // pixel value clients expect, finger scroll sends pixels. Our sign convention is
 // positive up and right, Wayland's is positive down and right, so the vertical
 // axes flip back here.
+// Hand a pinch to the window under the pointer, as the sequence the protocol describes
+// rather than as scroll it would have to guess at.
+//
+// A pinch the canvas is not using is currently thrown away: the pad recognises it, the camera
+// ignores it unless Super is held or we are out in the overview, and the client never hears
+// about it. That is a browser unable to zoom a page with two fingers while every other
+// gesture works.
+//
+// A sequence has a beginning, a middle and an end, and the middle carries the scale relative
+// to the beginning rather than to the frame before, so the total is accumulated here. The pad
+// reports a per-frame ratio because that is what the camera wants.
+//
+// active and scale belong to the caller because the sequence outlives a frame.
+#[allow(clippy::too_many_arguments)]
+fn forward_pinch(
+    state: &mut State,
+    started: bool,
+    ended: bool,
+    factor: f32,
+    to_client: bool,
+    active: &mut bool,
+    scale: &mut f64,
+    time_ms: u32,
+) {
+    let pointer = state.pointer.clone();
+    if started && to_client && !*active {
+        *active = true;
+        *scale = 1.0;
+        let serial = SERIAL_COUNTER.next_serial();
+        pointer.gesture_pinch_begin(
+            state,
+            &GesturePinchBeginEvent { serial, time: time_ms, fingers: 2 },
+        );
+    }
+    if !*active {
+        return;
+    }
+    // The pointer leaving the window, or the canvas taking the gesture over, ends the
+    // sequence as cancelled: the client is told it did not finish rather than left waiting.
+    if !to_client {
+        *active = false;
+        let serial = SERIAL_COUNTER.next_serial();
+        pointer.gesture_pinch_end(
+            state,
+            &GesturePinchEndEvent { serial, time: time_ms, cancelled: true },
+        );
+        return;
+    }
+    if factor != 1.0 {
+        *scale *= factor as f64;
+        pointer.gesture_pinch_update(
+            state,
+            &GesturePinchUpdateEvent {
+                time: time_ms,
+                // The centre of the gesture does not move while the pad calls it a pinch:
+                // travel is what makes it a pan instead, and the two are decided apart.
+                delta: (0.0, 0.0).into(),
+                scale: *scale,
+                // Not measured. Two fingers on this pad give a distance and a centre, and
+                // nothing has asked for the angle between them yet.
+                rotation: 0.0,
+            },
+        );
+    }
+    if ended {
+        *active = false;
+        let serial = SERIAL_COUNTER.next_serial();
+        pointer.gesture_pinch_end(
+            state,
+            &GesturePinchEndEvent { serial, time: time_ms, cancelled: false },
+        );
+    }
+}
+
 fn forward_scroll(
     state: &mut State,
     ptr: &input::Pointer,
@@ -1007,6 +1084,10 @@ fn main() {
     // heads for overview_zoom around the middle of the screen, which is what "the centre of
     // the camera" means once it is a screen point.
     let mut zoom_ease: Option<ZoomEase> = None;
+    // A pinch sequence in progress toward a client, and how far it has scaled since it began.
+    // The protocol reports the total rather than the step, and a sequence outlives a frame.
+    let mut pinch_active = false;
+    let mut pinch_scale: f64 = 1.0;
     // Which of the two scales the zoom last settled at, which is the mode. Out here the canvas
     // owns the pointer and no window hears anything; in there they are applications again.
     let mut zoomed_out = false;
@@ -2273,6 +2354,16 @@ fn main() {
             if pointer_on_client || scroll_ended {
                 forward_scroll(&mut state, &ptr, scroll_ended, time_ms, &set);
             }
+            forward_pinch(
+                &mut state,
+                pad.zoom_started,
+                pad.zoom_ended || ptr.pinch_ended,
+                pad.pinch,
+                pointer_on_client,
+                &mut pinch_active,
+                &mut pinch_scale,
+                time_ms,
+            );
         }
         // Outside the mode gate on purpose: xkb state has to follow the keyboard even when
         // no client is listening, or the next client to get focus inherits modifiers that
