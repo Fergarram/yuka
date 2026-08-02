@@ -11,6 +11,7 @@ GOALS:
 ---
 
 BUGS AND IMPROVEMENTS:
+[ ] Sometimes, not always an unfocused window receives the inertia of canvas panning if below the cursor is a window scroll view.
 [ ] Do something about the shadows because they look like crap
 [ ] show false positive 3 finger gesture by sprining back if already in a direction.
 [x] It seems that when zoom is not 1. or on some hover events on windows, it triggers a buffer swap and for some reason one of the buffers seems to not be bilinear or smth else

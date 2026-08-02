@@ -1813,6 +1813,7 @@ fn main() {
         // avoid: the press has to reach the client and its request has to come back.
         let asked_move: Vec<(WlSurface, u32)> = state.move_requests.drain(..).collect();
         let asked_resize: Vec<(WlSurface, i32, i32, u32)> = state.resize_requests.drain(..).collect();
+        let asked_max: Vec<(WlSurface, bool)> = state.maximize_requests.drain(..).collect();
         {
             if let Some((surf, serial)) = asked_move.into_iter().last() {
                 // Anchor to the press the client is quoting. Between that press and this
@@ -1909,6 +1910,79 @@ fn main() {
                         stuck_small: 0,
                         stuck_large: 0,
                     });
+                }
+            }
+
+            // Maximizing, which on an infinite canvas has to be given a meaning rather than
+            // inherited from one. There is no screen for a window to fill and no edges to
+            // stick to: what there is, at any moment, is the part of the canvas you can see.
+            // So maximized means exactly that rectangle, in canvas units, taken once when you
+            // ask for it.
+            //
+            // Fixed in canvas space rather than following the view afterwards, because a
+            // window that re-shaped itself every time you panned would be the one thing on
+            // the canvas that is not a place. Pan away from a maximized window and you leave
+            // it behind, the way you leave everything else behind.
+            //
+            // The zoom is left alone. A maximized window at 0.6 is a window filling a view
+            // you chose to be zoomed out, which is a coherent thing to want, and yanking the
+            // scale to 1:1 would be the canvas deciding it knows better.
+            for (surf, on) in asked_max {
+                if on {
+                    let sw = ray::screen_width() as f32;
+                    let sh = ray::screen_height() as f32;
+                    // The visible rectangle at the z=0 plane, read through the same
+                    // projection the hit tests use, so what fills the view really fills it.
+                    let corners = (
+                        camera::screen_to_plane(cam3d, 0.0, 0.0, 0.0),
+                        camera::screen_to_plane(cam3d, sw, sh, 0.0),
+                    );
+                    let (Some((lx, ty)), Some((rx, by))) = corners else {
+                        continue;
+                    };
+                    // Read before anything moves: this is what unmaximizing gives back.
+                    if let (Some((x, y)), Some((w, h))) = (
+                        render::window_origin(&windows, &surf),
+                        render::geo_size(&windows, &surf),
+                    ) {
+                        render::maximize(&mut windows, &surf, lx, ty, x, y, w, h);
+                    }
+                    // Same housekeeping as a client's own move: an animation still running
+                    // would drag the window back off the shape we are about to give it.
+                    settling.retain(|(s, ..)| s != &surf);
+                    if resize_settle.as_ref().map(|st| &st.surface) == Some(&surf) {
+                        resize_settle = None;
+                    }
+                    render::clear_scale(&mut windows, &surf);
+                    render::settle(&mut windows, &surf);
+                    render::front(&mut windows, &surf);
+                    render::set_window_origin(&mut windows, &surf, lx, ty);
+                    wl::state::maximize_toplevel(
+                        &state,
+                        &surf,
+                        (rx - lx).round() as i32,
+                        (by - ty).round() as i32,
+                        true,
+                    );
+                } else {
+                    // And back to the rectangle it had. A window we never maximized still gets
+                    // an answer, at the size it already is, because a client waiting on a
+                    // configure it asked for is stuck until it arrives.
+                    let restore = render::unmaximize(&mut windows, &surf);
+                    if let Some((x, y, _, _)) = restore {
+                        render::set_window_origin(&mut windows, &surf, x, y);
+                    }
+                    let (w, h) = restore
+                        .map(|(_, _, w, h)| (w, h))
+                        .or_else(|| render::geo_size(&windows, &surf))
+                        .unwrap_or((0.0, 0.0));
+                    wl::state::maximize_toplevel(
+                        &state,
+                        &surf,
+                        w.round() as i32,
+                        h.round() as i32,
+                        false,
+                    );
                 }
             }
         }
@@ -2391,6 +2465,9 @@ fn main() {
         // This used to run before all of that, which meant a window's children were placed
         // from where it was a frame ago. Invisible on a client without subsurfaces, and
         // visible on Chromium as part of the window trailing the rest of it while dragging.
+        // Maximized windows keep their pinned top-left first, so children placed below and
+        // the pixel alignment after both see the corrected position.
+        render::hold_maximized(&mut windows);
         render::sync_children(&mut windows);
 
         // Everything that could move a window has run. Put them all on the pixel grid, then
@@ -2473,7 +2550,7 @@ fn main() {
 
         ray::begin_drawing();
         ray::clear_background(clear);
-        render::draw_windows(&windows, cam3d, shader, alpha_loc, swizzle_loc);
+        render::draw_windows(&windows, cam3d, shader, alpha_loc, swizzle_loc, set.draw_shadows);
         if debug_labels {
             render::draw_debug_labels(&windows, cam3d, cam.zoom, anisotropy);
         }

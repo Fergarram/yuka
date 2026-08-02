@@ -106,6 +106,22 @@ pub struct Windows {
     // a guess that happens to match what the next frame wants means the call is skipped and
     // the texture keeps whatever GL gave it.
     pub filter: Vec<u8>,
+    // Whether this window is maximized, and the rectangle it had before it was. A maximized
+    // window is one that took the shape of the view: the size is the geometry size we asked
+    // the client for, the position is the visible top-left we set, and both are what
+    // unmaximizing gives back. Meaningless while maximized is false.
+    pub maximized: Vec<bool>,
+    // And the canvas point its visible top-left is pinned to while it is. Held every frame
+    // rather than set once, because the offset between a surface and its visible top-left is
+    // the client's to change and it does change on exactly this transition: a client that
+    // believes it is maximized drops the invisible shadow border it was carrying, so the
+    // geometry offset we positioned through is not the one it commits with.
+    pub max_x: Vec<f32>,
+    pub max_y: Vec<f32>,
+    pub restore_x: Vec<f32>,
+    pub restore_y: Vec<f32>,
+    pub restore_w: Vec<f32>,
+    pub restore_h: Vec<f32>,
     // Sampling state of the texture: MIP_NONE until a window is minified enough to
     // want a mip chain, MIP_READY once it has one, MIP_REFUSED for a texture the
     // driver will not build one for (see egl::build_mips). Reset to MIP_NONE on every
@@ -179,6 +195,13 @@ pub fn windows_new() -> Windows {
         scale_x: Vec::new(),
         scale_y: Vec::new(),
         filter: Vec::new(),
+        maximized: Vec::new(),
+        max_x: Vec::new(),
+        max_y: Vec::new(),
+        restore_x: Vec::new(),
+        restore_y: Vec::new(),
+        restore_w: Vec::new(),
+        restore_h: Vec::new(),
         mip: Vec::new(),
         owns: Vec::new(),
         popup: Vec::new(),
@@ -342,6 +365,13 @@ pub fn prune_dead(windows: &mut Windows) {
         windows.scale_x.remove(i);
         windows.scale_y.remove(i);
         windows.filter.remove(i);
+        windows.maximized.remove(i);
+        windows.max_x.remove(i);
+        windows.max_y.remove(i);
+        windows.restore_x.remove(i);
+        windows.restore_y.remove(i);
+        windows.restore_w.remove(i);
+        windows.restore_h.remove(i);
         windows.mip.remove(i);
         windows.owns.remove(i);
         windows.popup.remove(i);
@@ -470,6 +500,67 @@ pub fn set_window_pos(windows: &mut Windows, surface: &WlSurface, x: f32, y: f32
     if let Some(i) = index_of(windows, surface) {
         windows.canvas_x[i] = x;
         windows.canvas_y[i] = y;
+    }
+}
+
+// Take a window's shape and remember the one it had, so unmaximizing can give it back.
+//
+// The rectangle passed in is the one being replaced, read before anything moves: the visible
+// top-left and the geometry size, which are the two things maximizing overwrites.
+pub fn maximize(
+    windows: &mut Windows,
+    surface: &WlSurface,
+    // Where the visible top-left is to sit from now on.
+    px: f32,
+    py: f32,
+    // And the rectangle being replaced, to be given back later.
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) {
+    let Some(i) = index_of(windows, surface) else {
+        return;
+    };
+    windows.max_x[i] = px;
+    windows.max_y[i] = py;
+    // Already maximized: keep the rectangle from the first time. A client that asks twice
+    // without being unmaximized in between would otherwise have the view's own shape recorded
+    // as the one to go back to, and unmaximizing would put it nowhere.
+    if windows.maximized[i] {
+        return;
+    }
+    windows.maximized[i] = true;
+    windows.restore_x[i] = x;
+    windows.restore_y[i] = y;
+    windows.restore_w[i] = w;
+    windows.restore_h[i] = h;
+}
+
+// And give it back, once. None when this window was not maximized, so an unmaximize that
+// answers nothing moves nothing.
+pub fn unmaximize(windows: &mut Windows, surface: &WlSurface) -> Option<(f32, f32, f32, f32)> {
+    let i = index_of(windows, surface)?;
+    if !windows.maximized[i] {
+        return None;
+    }
+    windows.maximized[i] = false;
+    Some((windows.restore_x[i], windows.restore_y[i], windows.restore_w[i], windows.restore_h[i]))
+}
+
+// Hold every maximized window's visible top-left where it was pinned.
+//
+// Run every frame, before children are placed and before positions are aligned, so a client
+// that changes its geometry offset (dropping its shadow border because it now believes it is
+// maximized, most of all) does not slide the window by the difference. Cheap: a maximized
+// window is rare and the arithmetic is two subtractions.
+pub fn hold_maximized(windows: &mut Windows) {
+    for i in 0..windows.surface.len() {
+        if !windows.maximized[i] {
+            continue;
+        }
+        windows.canvas_x[i] = windows.max_x[i] - windows.geo_x[i];
+        windows.canvas_y[i] = windows.max_y[i] - windows.geo_y[i];
     }
 }
 
@@ -1077,6 +1168,13 @@ fn store_entry(
             windows.scale_x.push(1.0);
             windows.scale_y.push(1.0);
             windows.filter.push(FILTER_UNSET);
+            windows.maximized.push(false);
+            windows.max_x.push(0.0);
+            windows.max_y.push(0.0);
+            windows.restore_x.push(0.0);
+            windows.restore_y.push(0.0);
+            windows.restore_w.push(0.0);
+            windows.restore_h.push(0.0);
             windows.mip.push(MIP_NONE);
             windows.owns.push(owns);
             windows.popup.push(popup);
@@ -1368,6 +1466,13 @@ pub fn destroy_owned(windows: &mut Windows) {
     windows.scale_x.clear();
     windows.scale_y.clear();
     windows.filter.clear();
+    windows.maximized.clear();
+    windows.max_x.clear();
+    windows.max_y.clear();
+    windows.restore_x.clear();
+    windows.restore_y.clear();
+    windows.restore_w.clear();
+    windows.restore_h.clear();
     windows.mip.clear();
     windows.owns.clear();
     windows.popup.clear();
@@ -1386,6 +1491,9 @@ pub fn draw_windows(
     shader: Shader,
     alpha_loc: i32,
     swizzle_loc: i32,
+    // Whether to draw what the client padded around its window, which is where its shadow and
+    // its rounded corners live. See the quad below.
+    shadows: bool,
 ) {
     // Painter's order: stack order first, then z within a stack entry. Depth test is off,
     // so what is drawn last wins.
@@ -1414,14 +1522,49 @@ pub fn draw_windows(
     for i in idx {
         let (x, y, w, h) = visible(windows, i);
         let z = windows.z[i];
-        // Texture coordinates cover only the geometry rectangle, so whatever the
-        // client padded around its window is cropped rather than drawn.
         let tw = windows.tex_w[i] as f32;
         let th = windows.tex_h[i] as f32;
-        let u0 = windows.geo_x[i] / tw;
-        let v0 = windows.geo_y[i] / th;
-        let u1 = (windows.geo_x[i] + w) / tw;
-        let v1 = (windows.geo_y[i] + h) / th;
+        // A client draws more than its window. GTK and every toolkit like it commit a surface
+        // wider than the geometry they declare, and the difference is a shadow, and often a
+        // rounded corner cut out of it. We cannot ask them to stop: server-side decorations
+        // are a thing those toolkits do not implement, so the padding is in the buffer whether
+        // we want it or not.
+        //
+        // Cropping to the geometry is the honest reading of the protocol and it looks wrong:
+        // the shadow is sliced off square, and the corners the client rounded are filled back
+        // in with whatever the window's edge pixels were. So draw the whole surface instead.
+        //
+        // Only the drawing changes. Everything that reasons about where a window is, hit
+        // tests, placement, drags, maximizing, still works in the geometry rectangle that
+        // visible() gives, because that is what the window is. The padding is scenery: it can
+        // hang over a neighbour and cannot be clicked.
+        //
+        // The stretch of a resize drag is anchored at the geometry's top-left, so the padding
+        // is scaled about that same point rather than about itself.
+        let (x, y, w, h, u0, v0, u1, v1) = if shadows {
+            let (sx, sy) = (windows.scale_x[i], windows.scale_y[i]);
+            (
+                x - windows.geo_x[i] * sx,
+                y - windows.geo_y[i] * sy,
+                tw * sx,
+                th * sy,
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+            )
+        } else {
+            (
+                x,
+                y,
+                w,
+                h,
+                windows.geo_x[i] / tw,
+                windows.geo_y[i] / th,
+                (windows.geo_x[i] + w) / tw,
+                (windows.geo_y[i] + h) / th,
+            )
+        };
         // Quad on a plane parallel to the canvas, raised by z. Top-left origin.
         let corners = [
             (Vector3 { x, y, z }, u0, v0),

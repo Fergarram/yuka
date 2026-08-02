@@ -18,6 +18,14 @@ void main() {
     // shm uploads raw ARGB8888 bytes (B,G,R,A) as RGBA, so swizzle those back.
     vec4 color = mix(raw, raw.bgra, swizzleBgra);
 
+    // Wayland buffers carry premultiplied alpha, and the blend we draw with expects straight
+    // colour, so undo the multiply. It made no difference while only the opaque middle of a
+    // window was drawn; it makes all of it once the client's own shadow is on screen, which is
+    // a wide gradient of low alpha and would otherwise composite far too dark.
+    if (color.a > 0.0) {
+        color.rgb /= color.a;
+    }
+
     color.a = color.a + alphaBlend * (1.0 - color.a);
     if (color.a == 0.0) {
         discard;

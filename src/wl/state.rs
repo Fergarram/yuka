@@ -149,6 +149,10 @@ pub struct State {
     // that press, and by then the pointer has moved on.
     pub move_requests: Vec<(WlSurface, u32)>,
     pub resize_requests: Vec<(WlSurface, i32, i32, u32)>,
+    // Clients asking to be maximized or unmaximized: the surface, and which of the two. True
+    // is maximize. Queued rather than answered here, because what maximizing means is a
+    // question about the canvas and this is the protocol boundary.
+    pub maximize_requests: Vec<(WlSurface, bool)>,
     // Surfaces a client has asked us to activate with a token we accepted. Drained each frame
     // by the main loop, which is where focus lives.
     pub activation_requests: Vec<WlSurface>,
@@ -285,6 +289,7 @@ pub fn init(
         cursor_image: CursorImageStatus::default_named(),
         move_requests: Vec::new(),
         resize_requests: Vec::new(),
+        maximize_requests: Vec::new(),
         activation_requests: Vec::new(),
         held_dmabufs: Vec::new(),
     };
@@ -399,6 +404,39 @@ pub fn resize_toplevel(state: &State, surface: &WlSurface, w: i32, h: i32, resiz
         }
     });
     toplevel.send_pending_configure();
+}
+
+// Tell a toplevel it is maximized, or that it is not, and what size to be while it is.
+//
+// The state matters as much as the size: a client draws itself differently when it believes it
+// is maximized, squaring its corners and turning its maximize button into a restore one, and
+// it has no other way to know. Sized like a resize, through the client's own declared limits,
+// because a window that refuses to be as large as the view is still entitled to refuse.
+pub fn maximize_toplevel(state: &State, surface: &WlSurface, w: i32, h: i32, maximized: bool) {
+    let Some(toplevel) = state
+        .xdg_state
+        .toplevel_surfaces()
+        .iter()
+        .find(|t| t.wl_surface() == surface)
+    else {
+        return;
+    };
+    let (min, max) = size_limits(surface);
+    let w = clamp_dim(w, min.0, max.0);
+    let h = clamp_dim(h, min.1, max.1);
+    toplevel.with_pending_state(|pending| {
+        pending.size = Some((w, h).into());
+        if maximized {
+            pending.states.set(ToplevelState::Maximized);
+        } else {
+            pending.states.unset(ToplevelState::Maximized);
+        }
+    });
+    // Unconditional, unlike the pending version: a client that asked is owed an answer even
+    // when nothing about its state changed, or it sits waiting on a configure that never comes.
+    if toplevel.send_pending_configure().is_none() {
+        toplevel.send_configure();
+    }
 }
 
 // What the client said it can be. Zero in either direction means it did not say, which
@@ -1011,6 +1049,20 @@ impl XdgShellHandler for State {
         };
         self.resize_requests
             .push((surface.wl_surface().clone(), ex, ey, u32::from(serial)));
+    }
+
+    // A client's own maximize button, and the double click on its titlebar that means the
+    // same thing: the chrome is the client's, so both arrive here as a request rather than as
+    // a click we could see. Queued alongside the move and resize ones and drained in main.
+    //
+    // Nothing is answered here, not even a refusal. The protocol wants a configure either way,
+    // and main sends it: it is the only place that knows what shape the view is.
+    fn maximize_request(&mut self, surface: ToplevelSurface) {
+        self.maximize_requests.push((surface.wl_surface().clone(), true));
+    }
+
+    fn unmaximize_request(&mut self, surface: ToplevelSurface) {
+        self.maximize_requests.push((surface.wl_surface().clone(), false));
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
