@@ -667,11 +667,46 @@ fn forward_pinch(
     }
 }
 
+// Which axes of a finger scroll a client is currently being told about.
+//
+// Two fingers travelling up a pad also wander sideways, by a pixel here and a fraction there,
+// and the canvas is happy to take both: panning diagonally is a thing you do. A client is not
+// the canvas. Libinput locks a touchpad scroll to one axis, and a terminal that scrolls under
+// libinput and sits dead under our own gestures is a terminal being handed a wandering second
+// axis it has to resolve against the first.
+//
+// But a browser and a map do want both, so the lock is a starting position rather than a
+// verdict: whichever axis leads at the start holds the gesture alone, and the moment the other
+// one is doing real work rather than wandering, both are sent for the rest of the gesture. The
+// camera's copy is never locked at all.
+#[derive(Clone, Copy, PartialEq)]
+enum ScrollLock {
+    None,
+    Vertical,
+    Horizontal,
+    Both,
+}
+
+// How much of the recent gesture the axis test remembers. Multiplying the running travel by
+// this once a frame makes it a window of roughly ten frames rather than the whole gesture, so
+// a scroll that turns a corner without lifting is judged on what the fingers are doing now.
+const SCROLL_TRAVEL_DECAY: f32 = 0.9;
+
+// A finger scroll in progress toward a client: which axes it is sending, and how far each has
+// travelled lately. It outlives a frame, so the main loop owns it.
+struct ScrollGesture {
+    lock: ScrollLock,
+    travel_x: f32,
+    travel_y: f32,
+}
+
 fn forward_scroll(
     state: &mut State,
     ptr: &input::Pointer,
     // True on the frame a finger scroll finished, which has to be said out loud.
     scroll_ended: bool,
+    // The gesture in progress: which axes it is sending and how far each has travelled.
+    gesture: &mut ScrollGesture,
     time_ms: u32,
     set: &settings::Settings,
 ) {
@@ -699,15 +734,47 @@ fn forward_scroll(
         // Finger scroll into a window gets its own sensitivity: the same gesture serves
         // the canvas, where one to one is right, and a page, which usually wants more.
         let sens = set.window_scroll_sens;
-        let mut frame = AxisFrame::new(time_ms).source(AxisSource::Finger);
-        if ptr.scroll_y != 0.0 {
-            frame = frame.value(Axis::Vertical, (ptr.scroll_y * scroll_sign * sens) as f64);
+        // What the fingers have been doing lately, on each axis, as a decaying sum.
+        gesture.travel_x = gesture.travel_x * SCROLL_TRAVEL_DECAY + ptr.scroll_x.abs();
+        gesture.travel_y = gesture.travel_y * SCROLL_TRAVEL_DECAY + ptr.scroll_y.abs();
+        // The first frame of a gesture decides which axis holds it. Whichever moved further
+        // wins, and a tie goes to the vertical, which is the one nearly every scroll is.
+        if gesture.lock == ScrollLock::None {
+            gesture.lock = if ptr.scroll_y.abs() >= ptr.scroll_x.abs() {
+                ScrollLock::Vertical
+            } else {
+                ScrollLock::Horizontal
+            };
         }
-        if ptr.scroll_x != 0.0 {
-            frame = frame.value(Axis::Horizontal, (ptr.scroll_x * hscroll_sign * sens) as f64);
+        // And the minor axis takes it back as soon as it is doing real work rather than
+        // wandering. Once both are going they stay going: a gesture that has been diagonal is
+        // a two-dimensional one, and dropping an axis under a hand still moving is worse than
+        // carrying one it has stopped using.
+        let frac = set.scroll_axis_lock_frac;
+        match gesture.lock {
+            ScrollLock::Vertical if gesture.travel_x >= gesture.travel_y * frac => {
+                gesture.lock = ScrollLock::Both;
+            }
+            ScrollLock::Horizontal if gesture.travel_y >= gesture.travel_x * frac => {
+                gesture.lock = ScrollLock::Both;
+            }
+            _ => {}
         }
-        pointer.axis(state, frame);
-        pointer.frame(state);
+        let send_v = gesture.lock == ScrollLock::Vertical || gesture.lock == ScrollLock::Both;
+        let send_h = gesture.lock == ScrollLock::Horizontal || gesture.lock == ScrollLock::Both;
+        let v = if send_v { ptr.scroll_y * scroll_sign * sens } else { 0.0 };
+        let h = if send_h { ptr.scroll_x * hscroll_sign * sens } else { 0.0 };
+        if v != 0.0 || h != 0.0 {
+            let mut frame = AxisFrame::new(time_ms).source(AxisSource::Finger);
+            if v != 0.0 {
+                frame = frame.value(Axis::Vertical, v as f64);
+            }
+            if h != 0.0 {
+                frame = frame.value(Axis::Horizontal, h as f64);
+            }
+            pointer.axis(state, frame);
+            pointer.frame(state);
+        }
     }
     // The end of a finger scroll is an event of its own, and the protocol requires it for
     // this source: a client cannot see the pad, so a sequence never ended is one it goes on
@@ -717,6 +784,9 @@ fn forward_scroll(
     // Both axes, whichever was moving. Stopping one that was not is nothing to a client, and
     // working out which were live is bookkeeping for no gain.
     if scroll_ended {
+        gesture.lock = ScrollLock::None;
+        gesture.travel_x = 0.0;
+        gesture.travel_y = 0.0;
         let frame = AxisFrame::new(time_ms)
             .source(AxisSource::Finger)
             .stop(Axis::Vertical)
@@ -1081,6 +1151,10 @@ fn main() {
     // The protocol reports the total rather than the step, and a sequence outlives a frame.
     let mut pinch_active = false;
     let mut pinch_scale: f64 = 1.0;
+    // And the finger scroll in progress toward a client, which outlives a frame for the same
+    // reason: which axes it is sending, and how far each has travelled lately.
+    let mut scroll_gesture =
+        ScrollGesture { lock: ScrollLock::None, travel_x: 0.0, travel_y: 0.0 };
     // Which of the two scales the zoom last settled at, which is the mode. Out here the canvas
     // owns the pointer and no window hears anything; in there they are applications again.
     // Surface the pointer is currently over, so crossing into another one can
@@ -2334,7 +2408,7 @@ fn main() {
             // client left holding an open sequence is the thing being fixed.
             let scroll_ended = pad.scroll_ended || ptr.scroll_ended;
             if pointer_on_client || scroll_ended {
-                forward_scroll(&mut state, &ptr, scroll_ended, time_ms, &set);
+                forward_scroll(&mut state, &ptr, scroll_ended, &mut scroll_gesture, time_ms, &set);
             }
             forward_pinch(
                 &mut state,
