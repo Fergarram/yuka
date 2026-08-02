@@ -83,6 +83,18 @@ pub struct Settings {
     pub mode_eps_frac: f32,
     // Pinch motion ignored around the current distance, to stop a pan wobbling the zoom.
     pub pinch_deadzone_frac: f32,
+    // How fast the distance a pinch is measured against creeps toward where the fingers
+    // actually are, while they are panning, as a fraction of the gap per frame.
+    //
+    // Two fingers dragged across a pad drift apart on their own, and a reference fixed where
+    // they landed eventually reads that drift as a pinch: the zoom arms, some frame where the
+    // separation leads the travel takes the gesture, and a pan has zoomed a little. Letting
+    // the reference creep forgives drift, because it keeps moving to meet it, while a real
+    // pinch outruns it and still counts.
+    //
+    // 0 never creeps, which is what om_wm did before this existed. 0.05 closes half the drift
+    // in about a fifth of a second. Higher forgives more and demands a brisker pinch.
+    pub zoom_ref_follow: f32,
 
     // Trackpad: how much contact counts as a touch at all, in the raw units the overlay
     // shows (this pad reports 0..2048). Below the first threshold a contact is ignored
@@ -167,6 +179,16 @@ pub struct Settings {
     // distance remaining per second. Only the swipes and Super+Escape send it anywhere; a
     // pinch is never followed by a journey. 0 makes them jump instead of travel.
     pub zoom_ease_rate: f32,
+    // How close to zoom_default a pinch may finish and still be taken the rest of the way, as
+    // a difference in scale. A pinch left at 0.98 or 1.03 costs every window on screen a
+    // resample and shows nothing for it: the pixel grid disengages, text softens, and no hand
+    // was aiming there. Inside this band the zoom eases to zoom_default when the fingers lift,
+    // around wherever the pointer was, so nothing slides. 0 switches it off and a pinch is
+    // left exactly where it was let go, which is what the canvas did before this existed.
+    //
+    // This is a detent, not a mode: it only ever pulls to zoom_default, only from within this
+    // band, and only when a pinch ends. Everywhere else the zoom is still a place you are.
+    pub zoom_detent: f32,
     // How much of each axis the corner a resize started on keeps, while that resize lasts.
     //
     // A drag can change which corner it holds without letting go, decided by which side of
@@ -207,6 +229,7 @@ pub fn defaults() -> Settings {
         mode_bias: 1.6,
         mode_eps_frac: 0.0015,
         pinch_deadzone_frac: 0.0005,
+        zoom_ref_follow: 0.05,
 
 
         touch_min_size: 0.0,
@@ -236,6 +259,7 @@ pub fn defaults() -> Settings {
         overview_zoom: 0.57,
         fov_deg: 40.0,
         zoom_ease_rate: 12.0,
+        zoom_detent: 0.05,
         resize_corner_hold: 0.75,
     }
 }
@@ -350,6 +374,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
         "mode_bias" => f32_key!(mode_bias),
         "mode_eps_frac" => f32_key!(mode_eps_frac),
         "pinch_deadzone_frac" => f32_key!(pinch_deadzone_frac),
+        "zoom_ref_follow" => f32_key!(zoom_ref_follow),
         "touch_min_size" => f32_key!(touch_min_size),
         "touch_drop_size" => f32_key!(touch_drop_size),
         "rest_zone_frac" => f32_key!(rest_zone_frac),
@@ -392,6 +417,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
         "overview_zoom" => f32_key!(overview_zoom),
         "fov_deg" => f32_key!(fov_deg),
         "zoom_ease_rate" => f32_key!(zoom_ease_rate),
+        "zoom_detent" => f32_key!(zoom_detent),
         "resize_corner_hold" => f32_key!(resize_corner_hold),
         "invert_scroll" => match value {
             "true" | "1" | "yes" => set.invert_scroll = true,
@@ -423,6 +449,8 @@ fn sanitise(set: &mut Settings) {
     set.zoom_min = set.zoom_min.max(0.001);
     set.zoom_max = set.zoom_max.max(set.zoom_min * 1.001);
     set.zoom_default = set.zoom_default.clamp(set.zoom_min, set.zoom_max);
+    set.zoom_detent = set.zoom_detent.max(0.0);
+    set.zoom_ref_follow = set.zoom_ref_follow.clamp(0.0, 1.0);
     set.fov_deg = set.fov_deg.clamp(1.0, 170.0);
     set.button_strip = set.button_strip.clamp(0.0, 1.0);
     set.touch_min_size = set.touch_min_size.max(0.0);

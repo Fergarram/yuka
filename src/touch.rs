@@ -1129,6 +1129,11 @@ fn update_gesture(tp: &mut Touchpad, cursor: Option<&mut Cursor>, set: &Settings
             tp.zoom_armed = true;
             tp.prev_dist = Some(dist);
         }
+        // Panning, and the pinch has not been armed: the reference creeps toward the fingers,
+        // so their drift never adds up to a pinch nobody meant.
+        Some(r) if tp.mode == GestureMode::Pan => {
+            tp.zoom_ref = Some(r + (dist - r) * set.zoom_ref_follow);
+        }
         _ => {}
     }
 

@@ -1653,6 +1653,21 @@ fn main() {
                 // settling toward is no longer where we are going.
                 zoom_ease = None;
             }
+            // And a pinch that finishes within a hair of 1:1 goes the rest of the way. Not a
+            // mode coming back: the pull only exists inside that band, only toward
+            // zoom_default, and only when the fingers lift. A scale like 0.98 is a hand that
+            // meant 1.0 and stopped near it, and it costs every window on screen a resample
+            // for a difference nobody can see. Around the pointer, so nothing slides.
+            if (pad.zoom_ended || ptr.pinch_ended) && set.zoom_detent > 0.0 {
+                let off = cam.zoom - set.zoom_default;
+                if off != 0.0 && off.abs() <= set.zoom_detent {
+                    zoom_ease = Some(ZoomEase {
+                        ax: cxp as f32,
+                        ay: cyp as f32,
+                        target: set.zoom_default,
+                    });
+                }
+            }
         }
 
         // Nothing herds the zoom any more. A pinch is left exactly where the fingers left
