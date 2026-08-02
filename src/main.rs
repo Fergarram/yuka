@@ -80,10 +80,16 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 // pointer, which is what a compositor is supposed to do.
 
 // A zoom travelling to a scale, holding one screen point still on the way.
+//
+// Unless it is going somewhere, in which case there is no point to hold: `to` is a canvas
+// position the view's centre travels to alongside the scale, which is what "bring me that
+// window" means. The screen anchor is what the swipes and the detent use, where the scale
+// changes but the view stays where it was pointed.
 struct ZoomEase {
     ax: f32,
     ay: f32,
     target: f32,
+    to: Option<(f32, f32)>,
 }
 
 // A window being dragged: which one, the offset from the cursor to its origin, and whether
@@ -1135,6 +1141,11 @@ fn main() {
     let mut drag_geo: Option<(f32, f32, f32, f32)> = None;
     // When the last middle button press landed, for the double click chord.
     let mut last_middle_ms: u32 = 0;
+    // And the last left click on a window, for the Super + double click that brings one to
+    // you. The surface comes with it, because two clicks on two different windows are two
+    // first clicks rather than a double one.
+    let mut last_left_ms: u32 = 0;
+    let mut last_left_window: Option<WlSurface> = None;
     // Whether Super+S was pressed this frame, and how many shots this run has taken. The
     // number goes in the filename so a second one does not quietly replace the first.
     let mut shot_now = false;
@@ -1715,7 +1726,7 @@ fn main() {
             } else {
                 (ray::screen_width() as f32 * 0.5, ray::screen_height() as f32 * 0.5)
             };
-            zoom_ease = Some(ZoomEase { ax, ay, target });
+            zoom_ease = Some(ZoomEase { ax, ay, target, to: None });
         }
 
         // The detent at 1:1, tested every frame rather than when a pinch ends.
@@ -1735,13 +1746,17 @@ fn main() {
             let off = cam.zoom - set.zoom_default;
             if off != 0.0 && off.abs() <= set.zoom_detent {
                 let (ax, ay) = pointer_xy.unwrap_or((0, 0));
-                zoom_ease =
-                    Some(ZoomEase { ax: ax as f32, ay: ay as f32, target: set.zoom_default });
+                zoom_ease = Some(ZoomEase {
+                    ax: ax as f32,
+                    ay: ay as f32,
+                    target: set.zoom_default,
+                    to: None,
+                });
             }
         }
 
         if let Some(ease) = zoom_ease.as_ref() {
-            let (ax, ay, target) = (ease.ax, ease.ay, ease.target);
+            let (ax, ay, target, to) = (ease.ax, ease.ay, ease.target, ease.to);
             // Close enough that another step would be invisible: land on 1:1 exactly, so the
             // pixel grid engages rather than sitting a hair off it forever.
             const SETTLED: f32 = 0.001;
@@ -1751,22 +1766,48 @@ fn main() {
             } else {
                 cam.zoom + (target - cam.zoom) * t
             };
-            let factor = next / cam.zoom;
-            camera::zoom_at(
-                &mut cam,
-                factor,
-                ax,
-                ay,
-                ray::screen_width() as f32,
-                ray::screen_height() as f32,
-                &set,
-            );
-            // Near the target from either side, not merely past it. Testing for "at least
-            // 1:1" read correctly climbing back from a zoom out and was already true on the
-            // first frame of one coming down from above, which cancelled it after a step too
-            // small to see.
-            if (cam.zoom - target).abs() < SETTLED {
-                zoom_ease = None;
+            match to {
+                // Going somewhere: the centre travels with the scale, at the same rate, so the
+                // two arrive together and the window grows into the middle of the view rather
+                // than sliding across it afterwards. No screen point is held, because the
+                // whole idea is that the view is moving.
+                Some((tx, ty)) => {
+                    cam.zoom = next.clamp(set.zoom_min, set.zoom_max);
+                    cam.cx += (tx - cam.cx) * t;
+                    cam.cy += (ty - cam.cy) * t;
+                    // Arrived when both have. A centre still sliding under a scale that has
+                    // landed is a journey that is not over, and half a canvas unit is well
+                    // under a pixel at any zoom worth easing to.
+                    const HERE: f32 = 0.5;
+                    if (cam.zoom - target).abs() < SETTLED
+                        && (tx - cam.cx).abs() < HERE
+                        && (ty - cam.cy).abs() < HERE
+                    {
+                        cam.cx = tx;
+                        cam.cy = ty;
+                        zoom_ease = None;
+                    }
+                }
+                // Staying where it is pointed, turning around a screen point.
+                None => {
+                    let factor = next / cam.zoom;
+                    camera::zoom_at(
+                        &mut cam,
+                        factor,
+                        ax,
+                        ay,
+                        ray::screen_width() as f32,
+                        ray::screen_height() as f32,
+                        &set,
+                    );
+                    // Near the target from either side, not merely past it. Testing for "at
+                    // least 1:1" read correctly climbing back from a zoom out and was already
+                    // true on the first frame of one coming down from above, which cancelled
+                    // it after a step too small to see.
+                    if (cam.zoom - target).abs() < SETTLED {
+                        zoom_ease = None;
+                    }
+                }
             }
         }
 
@@ -2274,6 +2315,40 @@ fn main() {
             if answered || st.frames >= RESIZE_SETTLE_FRAMES {
                 render::clear_scale(&mut windows, &st.surface);
                 resize_settle = None;
+            }
+        }
+
+        // Super + double click on a window brings it to you: the view travels to its centre
+        // and to 1:1, so the thing you pointed at is the thing in front of you at the scale it
+        // was drawn for. The canvas idiom for "open this", on a desk where opening something
+        // means going to it rather than it coming to the front.
+        //
+        // Ahead of the drag, and it eats the press, so the second click cannot also pick the
+        // window up: a double click wobbles by a pixel or two, and a drag that started on it
+        // would move the window out from under the view on its way there.
+        if pressed && grab_windows && drag.is_none() {
+            if let Some((surf, ..)) = render::window_at(&windows, cam3d, sxp, syp) {
+                let now_ms = start.elapsed().as_millis() as u32;
+                let again = now_ms.saturating_sub(last_left_ms) <= set.double_click_ms
+                    && last_left_window.as_ref() == Some(&surf);
+                if again {
+                    // Consumed, so a third click starts counting again rather than firing.
+                    last_left_ms = 0;
+                    last_left_window = None;
+                    if let Some((wx, wy)) = render::window_center(&windows, &surf) {
+                        render::front(&mut windows, &surf);
+                        zoom_ease = Some(ZoomEase {
+                            ax: 0.0,
+                            ay: 0.0,
+                            target: set.zoom_default,
+                            to: Some((wx, wy)),
+                        });
+                        pressed = false;
+                    }
+                } else {
+                    last_left_ms = now_ms;
+                    last_left_window = Some(surf);
+                }
             }
         }
 
