@@ -838,6 +838,60 @@ fn forward_keys(state: &mut State, kb: &input::Input, time_ms: u32) {
     }
 }
 
+// Dragging a window that is filling the view takes it out of maximized first.
+//
+// Only when it is actually filling it. Maximized here is a size, not a mode that owns a screen,
+// and the window keeps it while you pan, zoom or move it, so a window that is still marked
+// maximized may be sitting in the corner of the view at a third of the size. Dragging that one
+// is just dragging it. The one worth taking apart is the one where a drag would otherwise be
+// meaningless, because there is nowhere for it to go that looks any different.
+//
+// It comes back under your cursor rather than where it used to be: the remembered position is
+// dropped and the remembered size is kept, with the grabbed point held at the same place in the
+// window it was grabbed at. Grab the middle of a full-view window and you are still holding the
+// middle of the small one, which is the mapping that keeps the window under your hand while it
+// changes size.
+fn unmaximize_for_drag(
+    windows: &mut render::Windows,
+    state: &State,
+    surface: &WlSurface,
+    cam3d: ray::Camera3D,
+    // Where the pointer grabbed, in canvas units.
+    gx: f32,
+    gy: f32,
+) -> bool {
+    if !render::is_maximized(windows, surface) {
+        return false;
+    }
+    let sw = ray::screen_width() as f32;
+    let sh = ray::screen_height() as f32;
+    let corners = (
+        camera::screen_to_plane(cam3d, 0.0, 0.0, 0.0),
+        camera::screen_to_plane(cam3d, sw, sh, 0.0),
+    );
+    let (Some((lx, ty)), Some((rx, by))) = corners else {
+        return false;
+    };
+    if !render::covers(windows, surface, lx, ty, rx - lx, by - ty) {
+        return false;
+    }
+    let (Some((x, y)), Some((w, h))) =
+        (render::window_origin(windows, surface), render::geo_size(windows, surface))
+    else {
+        return false;
+    };
+    let Some((_, _, rw, rh)) = render::unmaximize(windows, surface) else {
+        return false;
+    };
+    // Where in the window the grab was, as a fraction of it, so the same point is under the
+    // cursor once it is small again.
+    let fx = if w > 0.0 { (gx - x) / w } else { 0.5 };
+    let fy = if h > 0.0 { (gy - y) / h } else { 0.5 };
+    render::set_window_origin(windows, surface, gx - fx * rw, gy - fy * rh);
+    wl::state::maximize_toplevel(state, surface, rw.round() as i32, rh.round() as i32, false);
+    true
+}
+
 //
 // Entry
 //
@@ -1879,6 +1933,7 @@ fn main() {
                     // offset with set_window_pos, which is in surface coordinates, and a
                     // client's geometry offset sits between the two. Mixing them moved the
                     // window by the client's shadow padding on the first frame.
+                    unmaximize_for_drag(&mut windows, &state, &surf, cam3d, gx, gy);
                     if let Some((ox, oy)) = render::surface_origin(&windows, &surf) {
                         settling.retain(|(s, ..)| s != &surf);
                         if resize_settle.as_ref().map(|st| &st.surface) == Some(&surf) {
@@ -2362,6 +2417,10 @@ fn main() {
                 // on the z=0 plane (constant in world units, independent of z).
                 let (gx, gy) = camera::screen_to_plane(cam3d, sxp, syp, 0.0)
                     .unwrap_or((ox, oy));
+                // Before the offsets are taken, since this can change both the window's size
+                // and where it is.
+                unmaximize_for_drag(&mut windows, &state, &surf, cam3d, gx, gy);
+                let (ox, oy) = render::surface_origin(&windows, &surf).unwrap_or((ox, oy));
                 // In the overview, picking a window up lifts it toward the camera, which is
                 // the canvas idiom for having it in your hand and reads well when you can see
                 // the whole desk. At 1:1 it only comes to the front and stays on the plane: a

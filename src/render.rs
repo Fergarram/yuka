@@ -569,6 +569,26 @@ pub fn unmaximize(windows: &mut Windows, surface: &WlSurface) -> Option<(f32, f3
     Some((windows.restore_x[i], windows.restore_y[i], windows.restore_w[i], windows.restore_h[i]))
 }
 
+pub fn is_maximized(windows: &Windows, surface: &WlSurface) -> bool {
+    index_of(windows, surface).map(|i| windows.maximized[i]).unwrap_or(false)
+}
+
+// Whether a window's visible rectangle covers a canvas rectangle whole, which is the question
+// "is this window filling the view right now" once the view is expressed in canvas units.
+//
+// A window's size and the view's are both changed by things the other does not know about: the
+// window was sized in whole canvas units, the view rectangle is rarely whole, and the zoom has
+// moved since. So a pixel of slack, or a window filling the screen as well as it can would be
+// told that it is not.
+pub fn covers(windows: &Windows, surface: &WlSurface, x: f32, y: f32, w: f32, h: f32) -> bool {
+    let Some(i) = index_of(windows, surface) else {
+        return false;
+    };
+    const SLACK: f32 = 1.0;
+    let (wx, wy, ww, wh) = visible(windows, i);
+    wx <= x + SLACK && wy <= y + SLACK && wx + ww >= x + w - SLACK && wy + wh >= y + h - SLACK
+}
+
 // Hold every maximized window's visible top-left where it was pinned.
 //
 // Run every frame, before children are placed and before positions are aligned, so a client
