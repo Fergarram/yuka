@@ -3,15 +3,15 @@ I am basically at a pretty good point when it comes to canvas controls. It feels
 
 GOALS:
 
-[ ] Be able to tweak the desktop while in the desktop so I don't have to be in TTY mode.
+[x] Be able to tweak the desktop while in the desktop so I don't have to be in TTY mode.
 [ ] Share this build with others so I can test design.
 [ ] Eventually, test an MCP to give control to assistants. 
 
 
 ---
 
-BUGS:
-
+BUGS AND IMPROVEMENTS:
+[ ] show false positive 3 finger gesture by sprining back if already in a direction.
 [x] It seems that when zoom is not 1. or on some hover events on windows, it triggers a buffer swap and for some reason one of the buffers seems to not be bilinear or smth else
 [ ] super+s/p, etc if there is a text field the letters pass through, we should not pass through any letters.
 
@@ -20,7 +20,7 @@ BUGS:
 
 MINIMUM SHIT:
 
-[ ] A lot of polish for trackpad gesture/sensitivity.
+[-] A lot of polish for trackpad gesture/sensitivity.
 [ ] decent cursor for canvas 
 [ ] drag and drop
 [ ] Get audio working

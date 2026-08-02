@@ -179,15 +179,19 @@ pub struct Settings {
     // distance remaining per second. Only the swipes and Super+Escape send it anywhere; a
     // pinch is never followed by a journey. 0 makes them jump instead of travel.
     pub zoom_ease_rate: f32,
-    // How close to zoom_default a pinch may finish and still be taken the rest of the way, as
-    // a difference in scale. A pinch left at 0.98 or 1.03 costs every window on screen a
-    // resample and shows nothing for it: the pixel grid disengages, text softens, and no hand
-    // was aiming there. Inside this band the zoom eases to zoom_default when the fingers lift,
-    // around wherever the pointer was, so nothing slides. 0 switches it off and a pinch is
-    // left exactly where it was let go, which is what the canvas did before this existed.
+    // How close to zoom_default the zoom may sit and still be taken the rest of the way, as a
+    // difference in scale. A zoom of 0.98 or 1.0004 costs every window on screen a resample
+    // and shows nothing for it: the pixel grid disengages, text softens, and nothing was
+    // aiming there. Inside this band the zoom eases to zoom_default, around wherever the
+    // pointer is, so nothing slides. 0 switches it off and the zoom is left exactly where it
+    // was put, which is what the canvas did before this existed.
     //
-    // This is a detent, not a mode: it only ever pulls to zoom_default, only from within this
-    // band, and only when a pinch ends. Everywhere else the zoom is still a place you are.
+    // Tested every frame, whatever moved the zoom: a pinch, the wheel, the keyboard, an ease
+    // that was interrupted. Fingers actively pinching are the exception, since the band is
+    // theirs to move through while they are asking.
+    //
+    // This is a detent, not a mode: it only ever pulls to zoom_default and only from within
+    // this band. Everywhere else the zoom is still a place you are.
     pub zoom_detent: f32,
     // How much of each axis the corner a resize started on keeps, while that resize lasts.
     //

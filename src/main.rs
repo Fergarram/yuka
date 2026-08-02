@@ -1653,21 +1653,6 @@ fn main() {
                 // settling toward is no longer where we are going.
                 zoom_ease = None;
             }
-            // And a pinch that finishes within a hair of 1:1 goes the rest of the way. Not a
-            // mode coming back: the pull only exists inside that band, only toward
-            // zoom_default, and only when the fingers lift. A scale like 0.98 is a hand that
-            // meant 1.0 and stopped near it, and it costs every window on screen a resample
-            // for a difference nobody can see. Around the pointer, so nothing slides.
-            if (pad.zoom_ended || ptr.pinch_ended) && set.zoom_detent > 0.0 {
-                let off = cam.zoom - set.zoom_default;
-                if off != 0.0 && off.abs() <= set.zoom_detent {
-                    zoom_ease = Some(ZoomEase {
-                        ax: cxp as f32,
-                        ay: cyp as f32,
-                        target: set.zoom_default,
-                    });
-                }
-            }
         }
 
         // Nothing herds the zoom any more. A pinch is left exactly where the fingers left
@@ -1727,6 +1712,28 @@ fn main() {
                 ay: ray::screen_height() as f32 * 0.5,
                 target,
             });
+        }
+
+        // The detent at 1:1, tested every frame rather than when a pinch ends.
+        //
+        // A scale like 1.0004 costs every window on screen a resample and shows nothing for
+        // it: the pixel grid disengages and text softens for a difference nobody can see. And
+        // a pinch ending is not the only way to arrive at one. The wheel, the keyboard, a
+        // gesture the canvas only half took, an ease that was interrupted: any of them can
+        // leave the zoom beside 1:1 rather than on it. So the question is asked of the zoom
+        // itself, every frame, whatever put it there.
+        //
+        // Not while a pinch is driving: fingers on the pad own the zoom, and the band is
+        // theirs to move through. The moment they stop asking for a scale, the zoom takes the
+        // rest of the step. And not over an ease already running, which has its own target and
+        // its own anchor, and would otherwise be re-anchored to a moving pointer every frame.
+        if set.zoom_detent > 0.0 && zoom_ease.is_none() && ptr.pinch == 1.0 {
+            let off = cam.zoom - set.zoom_default;
+            if off != 0.0 && off.abs() <= set.zoom_detent {
+                let (ax, ay) = pointer_xy.unwrap_or((0, 0));
+                zoom_ease =
+                    Some(ZoomEase { ax: ax as f32, ay: ay as f32, target: set.zoom_default });
+            }
         }
 
         if let Some(ease) = zoom_ease.as_ref() {
