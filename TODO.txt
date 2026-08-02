@@ -1,21 +1,32 @@
-TODO:
+
+I am basically at a pretty good point when it comes to canvas controls. It feels great currently, for both trackpad and mouse. It could even be great for keyboard users only with the setup I have now.
+
+GOALS:
+
+[ ] Be able to tweak the desktop while in the desktop so I don't have to be in TTY mode.
+[ ] Share this build with others so I can test design.
+[ ] Eventually, test an MCP to give control to assistants. 
+
+
+---
 
 MINIMUM SHIT:
 
+[ ] A lot of polish for trackpad gesture/sensitivity.
 [ ] decent cursor for canvas 
 [ ] drag and drop
 [ ] Get audio working
 [ ] Correct pointer lock behavior
 [ ] Maximize window, minimize
 [ ] Fullscreen mode
-[ ] Pass pinch gestures to windows
+[x] Pass pinch gestures to windows
 
 
 ---
 
 TEST:
 
-[ ] Three finger pan/zoom OR cmd + two finger OR cmd + middle wheel/scroll
+[x] Three finger pan/zoom OR cmd + two finger OR cmd + middle wheel/scroll
 
 ---
 
