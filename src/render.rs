@@ -100,8 +100,11 @@ pub struct Windows {
     // hand at the cost of showing content at a size it was not drawn at.
     pub scale_x: Vec<f32>,
     pub scale_y: Vec<f32>,
-    // What the sampler is set to right now, so the choice is only pushed to GL when it
-    // actually changes rather than every frame.
+    // What we have told GL this texture's sampler is, so the choice is only pushed when it
+    // actually changes rather than every frame. FILTER_UNSET whenever the texture is new and
+    // nothing has been told to it yet, which is the one thing this column must never guess:
+    // a guess that happens to match what the next frame wants means the call is skipped and
+    // the texture keeps whatever GL gave it.
     pub filter: Vec<u8>,
     // Sampling state of the texture: MIP_NONE until a window is minified enough to
     // want a mip chain, MIP_READY once it has one, MIP_REFUSED for a texture the
@@ -194,10 +197,17 @@ pub const MIP_NONE: u8 = 0;
 pub const MIP_READY: u8 = 1;
 pub const MIP_REFUSED: u8 = 2;
 
-// Values for the filter column. Bilinear is where every texture starts.
+// Values for the filter column.
 pub const FILTER_LINEAR: u8 = 0;
 pub const FILTER_NEAREST: u8 = 1;
 pub const FILTER_TRILINEAR: u8 = 2;
+// A texture we have not set the filter on yet, which is every texture the moment we adopt it.
+// This column is a record of what we told GL, and prepare_textures skips a window whose record
+// already matches what it wants, so recording a guess is the same as never setting it: raylib
+// creates textures on GL_NEAREST, and a window that took a new buffer while the zoom happened
+// to want bilinear kept sampling nearest until something else changed its mind. A buffer swap
+// is a new texture with its own state, so the honest record is that we know nothing about it.
+pub const FILTER_UNSET: u8 = 255;
 
 pub fn dmabuf_cache_new() -> DmabufCache {
     DmabufCache {
@@ -1019,9 +1029,9 @@ fn store_entry(
             windows.tex_h[i] = h;
             windows.swizzle[i] = swizzle;
             windows.owns[i] = owns;
-            // New texture, so no chain and nothing learned about this one yet.
+            // New texture, so no chain and nothing set on it yet.
             windows.mip[i] = MIP_NONE;
-            windows.filter[i] = FILTER_LINEAR;
+            windows.filter[i] = FILTER_UNSET;
         }
         None => {
             // Centre new windows on the view, stepped so successive ones do not
@@ -1066,7 +1076,7 @@ fn store_entry(
             windows.swizzle.push(swizzle);
             windows.scale_x.push(1.0);
             windows.scale_y.push(1.0);
-            windows.filter.push(FILTER_LINEAR);
+            windows.filter.push(FILTER_UNSET);
             windows.mip.push(MIP_NONE);
             windows.owns.push(owns);
             windows.popup.push(popup);

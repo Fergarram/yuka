@@ -10,6 +10,14 @@ GOALS:
 
 ---
 
+BUGS:
+
+[x] It seems that when zoom is not 1. or on some hover events on windows, it triggers a buffer swap and for some reason one of the buffers seems to not be bilinear or smth else
+[ ] super+s/p, etc if there is a text field the letters pass through, we should not pass through any letters.
+
+
+---
+
 MINIMUM SHIT:
 
 [ ] A lot of polish for trackpad gesture/sensitivity.
@@ -19,6 +27,7 @@ MINIMUM SHIT:
 [ ] Correct pointer lock behavior
 [ ] Maximize window, minimize
 [ ] Fullscreen mode
+[ ] dont change z order when focusing via click on existing windows.
 [x] Pass pinch gestures to windows
 
 
@@ -36,7 +45,7 @@ TEST:
     fall back to raylib opening the card. OM_WM_CARD=raylib forces the fallback.
     Still direct: the input devices, which could go through libseat too.
 
-[ ] Add multimonitor support.
+[-] Add multimonitor support.
     Needs the KMS loop to be ours: raylib's DRM platform is one connector, one
     CRTC, one blocking modeset per frame, so two screens means owning the flips
     (atomic commit per CRTC, page flip events, a wl_output each, hotplug on udev
