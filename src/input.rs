@@ -124,6 +124,9 @@ pub struct Pointer {
     // True on the frame libinput says the pinch is over. Same edge touch.rs reports for the
     // custom path, so nothing downstream has to know which one is driving.
     pub pinch_ended: bool,
+    // And the frame it says the finger scroll is over, which libinput spells as a scroll
+    // event carrying zero rather than as an event of its own.
+    pub scroll_ended: bool,
     pub left_pressed: bool,
     pub left_released: bool,
     pub right_pressed: bool,
@@ -153,6 +156,7 @@ impl Default for Pointer {
             scroll_y: 0.0,
             pinch: 1.0,
             pinch_ended: false,
+            scroll_ended: false,
             left_pressed: false,
             left_released: false,
             right_pressed: false,
@@ -478,11 +482,21 @@ fn pointer_event(inp: &mut Input, p: &mut Pointer, event: PointerEvent) {
             }
         }
         PointerEvent::ScrollFinger(e) => {
+            // Zero on an axis is libinput saying the fingers have lifted, not a scroll of no
+            // distance, and it is the only notice the client will get that the sequence ended.
+            let mut moved = false;
             if e.has_axis(Axis::Horizontal) {
-                p.scroll_x += e.scroll_value(Axis::Horizontal) as f32;
+                let v = e.scroll_value(Axis::Horizontal) as f32;
+                p.scroll_x += v;
+                moved |= v != 0.0;
             }
             if e.has_axis(Axis::Vertical) {
-                p.scroll_y -= e.scroll_value(Axis::Vertical) as f32;
+                let v = e.scroll_value(Axis::Vertical) as f32;
+                p.scroll_y -= v;
+                moved |= v != 0.0;
+            }
+            if !moved {
+                p.scroll_ended = true;
             }
         }
         PointerEvent::ScrollContinuous(e) => {

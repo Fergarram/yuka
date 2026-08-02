@@ -600,6 +600,8 @@ fn release_held_keys(
 fn forward_scroll(
     state: &mut State,
     ptr: &input::Pointer,
+    // True on the frame a finger scroll finished, which has to be said out loud.
+    scroll_ended: bool,
     time_ms: u32,
     set: &settings::Settings,
 ) {
@@ -634,6 +636,21 @@ fn forward_scroll(
         if ptr.scroll_x != 0.0 {
             frame = frame.value(Axis::Horizontal, (ptr.scroll_x * hscroll_sign * sens) as f64);
         }
+        pointer.axis(state, frame);
+        pointer.frame(state);
+    }
+    // The end of a finger scroll is an event of its own, and the protocol requires it for
+    // this source: a client cannot see the pad, so a sequence never ended is one it goes on
+    // believing is running. Firefox is the one that showed it, by ignoring scrolls that came
+    // after a sequence it thought was still open.
+    //
+    // Both axes, whichever was moving. Stopping one that was not is nothing to a client, and
+    // working out which were live is bookkeeping for no gain.
+    if scroll_ended {
+        let frame = AxisFrame::new(time_ms)
+            .source(AxisSource::Finger)
+            .stop(Axis::Vertical)
+            .stop(Axis::Horizontal);
         pointer.axis(state, frame);
         pointer.frame(state);
     }
@@ -2250,8 +2267,11 @@ fn main() {
                 time_ms,
                 frame,
             );
-            if pointer_on_client {
-                forward_scroll(&mut state, &ptr, time_ms, &set);
+            // The stop goes even when the pointer has wandered off the window, because a
+            // client left holding an open sequence is the thing being fixed.
+            let scroll_ended = pad.scroll_ended || ptr.scroll_ended;
+            if pointer_on_client || scroll_ended {
+                forward_scroll(&mut state, &ptr, scroll_ended, time_ms, &set);
             }
         }
         // Outside the mode gate on purpose: xkb state has to follow the keyboard even when

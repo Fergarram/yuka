@@ -167,11 +167,12 @@ pub struct Touchpad {
     // as a swipe. Latched so a hand that keeps travelling only fires once.
     swipe_ref: Option<(f32, f32)>,
     swiped: bool,
-    // Whether the two-finger gesture now in progress has zoomed at any point, so that the
-    // end of the gesture can be reported as the end of a pinch. Not simply the previous
+    // Whether the two-finger gesture now in progress has zoomed, or panned, at any point, so
+    // that the end of the gesture can be reported as the end of each. Not simply the previous
     // frame's mode: a gesture is allowed to move between panning and zooming while the
-    // fingers stay down, and the pinch is not over until they lift.
+    // fingers stay down, and neither is over until they lift.
     zoomed_gesture: bool,
+    panned_gesture: bool,
     // Centroid and finger distance when the current two-finger gesture began, and
     // whether each has travelled far enough from there to pan or to zoom.
     pan_ref: Option<(f32, f32)>,
@@ -272,6 +273,11 @@ pub struct Gesture {
     // to rest, or the gesture turned into a pan. A paused pinch reports a factor of 1.0
     // exactly like a finished one, so the caller cannot tell them apart and needs telling.
     pub zoom_ended: bool,
+    // The two-finger scroll that was running has stopped, because the fingers lifted or the
+    // gesture turned into something else. Wayland requires saying so for a finger source: the
+    // client cannot see the pad, so an axis sequence that is never ended is one it goes on
+    // believing is in progress.
+    pub scroll_ended: bool,
     // Three fingers went up, or down. Fires once, on the frame the travel passes the
     // threshold, and says nothing else: an instruction rather than a motion to follow.
     pub swipe_up: bool,
@@ -286,6 +292,7 @@ impl Default for Gesture {
             scroll_y: 0.0,
             pinch: 1.0,
             zoom_ended: false,
+            scroll_ended: false,
             swipe_up: false,
             swipe_down: false,
         }
@@ -392,6 +399,7 @@ pub fn open(path: &str, set: &Settings) -> Option<Touchpad> {
         swipe_ref: None,
         swiped: false,
         zoomed_gesture: false,
+        panned_gesture: false,
         pan_ref: None,
         pan_armed: false,
         zoom_ref: None,
@@ -907,12 +915,19 @@ pub fn update(tp: &mut Touchpad, cursor: Option<&mut Cursor>, set: &Settings) ->
     if tp.mode == GestureMode::Zoom {
         tp.zoomed_gesture = true;
     }
+    if tp.mode == GestureMode::Pan {
+        tp.panned_gesture = true;
+    }
     // Fires once the gesture has stopped altogether, not merely stopped zooming. Turning a
     // pinch into a pan without lifting is one gesture, and springing the zoom back while
     // two fingers are still moving would pull the canvas out from under them.
     out.zoom_ended = tp.zoomed_gesture && tp.mode == GestureMode::None;
     if out.zoom_ended {
         tp.zoomed_gesture = false;
+    }
+    out.scroll_ended = tp.panned_gesture && tp.mode == GestureMode::None;
+    if out.scroll_ended {
+        tp.panned_gesture = false;
     }
     out
 }
