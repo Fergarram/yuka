@@ -18,7 +18,12 @@ IMPROVEMENTS OR TESTS:
 
 [ ] New windows should not start maximized.
 [ ] design three-finger gesture to grab windows when not in focus and be able to lift and resize with one hand
-[ ] three-finger double tap to focus center on window like cmd+dblclick
+[x] three-finger double tap to focus center on window like cmd+dblclick
+    Same journey as super+dblclick. Tap detection had to be written, only its comments
+    survived in touch.rs. A tap gets its own drift allowance (tap_move_frac): the pan's
+    was 81 units and real three-finger taps drift up to 316, while swipes start at 960.
+    debug_taps and debug_jumps are conf keys now, so the pad can be watched live without
+    restarting om_wm.
 [ ] show false positive 3 finger gesture by sprining back if already in a direction.
 [ ] dont change z order when focusing via click on existing windows.
 

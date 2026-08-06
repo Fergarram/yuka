@@ -192,16 +192,18 @@ pub struct Touchpad {
     // ever had, and the furthest any of them travelled.
     down: usize,
     contact_max: usize,
+    // When the current contact began, and the furthest any of its fingers has travelled from
+    // where it landed. Both on the device's own clock and in device units, so neither the frame
+    // rate nor the zoom can change what counts as a tap.
+    contact_start: f64,
+    contact_moved: f32,
+    // When the last three-finger tap completed, and whether a second one has landed inside the
+    // double window and is waiting for update to hand it over.
+    last_tap3: f64,
+    tap3_double: bool,
     // When the last completed tap happened, and whether a double tap is waiting
     // to be consumed by update.
-    // OM_WM_DEBUG_TAP=1: report every contact and why it did or did not count as
-    // a tap. Trackpad thresholds are hard to guess at, and this turns tuning them
-    // into reading numbers.
-    debug_taps: bool,
-    // Report any single frame that moves the cursor further than a hand could have, with the
-    // state that produced it. For the teleport that only happens sometimes: it has to be caught
-    // in the act, because everything about it looks ordinary a frame later.
-    debug_jumps: bool,
+
     // Pointer tracking: which slot drives the cursor, its previous pos, and the
     // fractional remainder for slow motion.
     primary_slot: Option<usize>,
@@ -300,6 +302,9 @@ pub struct Gesture {
     pub fingers: usize,
     // Three fingers went up, or down. Fires once, on the frame the travel passes the
     // threshold, and says nothing else: an instruction rather than a motion to follow.
+    // Three fingers tapped twice, quickly, without travelling: bring the window under the cursor
+    // to me. The same journey Super with a double click makes, asked for with one hand.
+    pub three_finger_double_tap: bool,
     pub swipe_up: bool,
     pub swipe_down: bool,
 }
@@ -315,6 +320,7 @@ impl Default for Gesture {
             zoom_ended: false,
             scroll_ended: false,
             fingers: 0,
+            three_finger_double_tap: false,
             swipe_up: false,
             swipe_down: false,
         }
@@ -429,8 +435,11 @@ pub fn open(path: &str, set: &Settings) -> Option<Touchpad> {
         zoom_armed: false,
         down: 0,
         contact_max: 0,
-        debug_taps: std::env::var("OM_WM_DEBUG_TAP").is_ok(),
-        debug_jumps: std::env::var("OM_WM_DEBUG_JUMP").is_ok(),
+        contact_start: TAP_NEVER,
+        contact_moved: 0.0,
+        last_tap3: TAP_NEVER,
+        tap3_double: false,
+
         primary_slot: None,
         prev_single: None,
         ptr_accum_x: 0.0,
@@ -685,7 +694,11 @@ fn read_events(tp: &mut Touchpad, set: &Settings) {
                     // A replacement is a landing and a lift at once, so the count is unchanged.
                     if !was {
                         if tp.down == 0 {
+                            // First finger of a new contact: everything a tap is judged on
+                            // starts here.
                             tp.contact_max = 0;
+                            tp.contact_start = time;
+                            tp.contact_moved = 0.0;
                         }
                         tp.down += 1;
                         tp.contact_max = tp.contact_max.max(tp.down);
@@ -712,6 +725,38 @@ fn read_events(tp: &mut Touchpad, set: &Settings) {
                 }
                 if was && !now {
                     tp.down = tp.down.saturating_sub(1);
+                    if tp.down == 0 {
+                        // The last finger left, so the contact is over and can be judged. Three
+                        // fingers, down briefly, and none of them travelling: that is a tap. Two
+                        // of those inside the double window is the gesture.
+                        //
+                        // The travel test is what tells a tap from a swipe, and it is the same
+                        // threshold a pan arms at, so a contact either moved the canvas or stayed
+                        // a tap and never both.
+                        let held = time - tp.contact_start;
+                        let still = tp.contact_moved <= tp.span * set.tap_move_frac;
+                        let tapped = tp.contact_max == 3 && held <= set.tap_max_secs && still;
+                        if set.debug_taps {
+                            println!(
+                                "om_wm: contact of {} finger(s) for {held:.3}s, moved {:.0} of {:.0} -> {}",
+                                tp.contact_max,
+                                tp.contact_moved,
+                                tp.span * set.tap_move_frac,
+                                if tapped { "tap" } else { "not a tap" }
+                            );
+                        }
+                        if tapped {
+                            let gap = time - tp.last_tap3;
+                            if gap <= set.double_click_ms as f64 / 1000.0 {
+                                tp.tap3_double = true;
+                                // Consumed, so a third tap begins a new pair rather than firing
+                                // again off the second.
+                                tp.last_tap3 = TAP_NEVER;
+                            } else {
+                                tp.last_tap3 = time;
+                            }
+                        }
+                    }
                 }
             }
             (EV_ABS, ABS_MT_POSITION_X) => {
@@ -727,6 +772,16 @@ fn read_events(tp: &mut Touchpad, set: &Settings) {
                 }
                 tp.slots[tp.cur].y = value;
                 let slot = tp.slots[tp.cur];
+                if slot.start_set {
+                    // How far this finger is from where it landed, kept as the furthest any
+                    // finger of this contact has been. A tap is a contact where that stays small.
+                    let dx = (slot.x - slot.start_x) as f32;
+                    let dy = (slot.y - slot.start_y) as f32;
+                    let moved = (dx * dx + dy * dy).sqrt();
+                    if moved > tp.contact_moved {
+                        tp.contact_moved = moved;
+                    }
+                }
                 if !slot.start_set {
                     tp.slots[tp.cur].start_x = slot.x;
                     tp.slots[tp.cur].start_y = slot.y;
@@ -936,7 +991,7 @@ fn press_is_right(tp: &Touchpad, set: &Settings) -> bool {
     let fy = (y as f32 - tp.y_min) / tp.y_span;
     let fx = (x as f32 - tp.x_min) / tp.x_span;
     let right = fy >= 1.0 - set.button_strip && fx >= set.button_split;
-    if tp.debug_taps {
+    if set.debug_taps {
         eprintln!(
             "om_wm: touchpad click at {fx:.2},{fy:.2} of the surface -> {}",
             if right { "right" } else { "left" }
@@ -983,6 +1038,8 @@ pub fn update(tp: &mut Touchpad, cursor: Option<&mut Cursor>, set: &Settings) ->
         tp.panned_gesture = false;
     }
     out.fingers = tp.down;
+    out.three_finger_double_tap = tp.tap3_double;
+    tp.tap3_double = false;
     out
 }
 
@@ -1037,7 +1094,7 @@ fn update_gesture(tp: &mut Touchpad, cursor: Option<&mut Cursor>, set: &Settings
             _ => pointer_slot(tp, set),
         };
         if primary != tp.primary_slot {
-            if tp.debug_jumps {
+            if set.debug_jumps {
                 let at = |o: Option<usize>| match o {
                     Some(i) => format!("slot {i} at {},{}", tp.slots[i].x, tp.slots[i].y),
                     None => "none".to_string(),
@@ -1087,7 +1144,7 @@ fn update_gesture(tp: &mut Touchpad, cursor: Option<&mut Cursor>, set: &Settings
                     // baseline that belongs to a different contact than the position being
                     // measured. Report everything that went into it.
                     const JUMP_PX: f32 = 30.0;
-                    if tp.debug_jumps && (idx.abs() >= JUMP_PX || idy.abs() >= JUMP_PX) {
+                    if set.debug_jumps && (idx.abs() >= JUMP_PX || idy.abs() >= JUMP_PX) {
                         println!(
                             "om_wm: pointer jump {idx},{idy} from slot {p} \
                              finger {fx},{fy} prev {px},{py} count {count} \

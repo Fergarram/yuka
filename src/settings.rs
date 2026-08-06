@@ -50,6 +50,22 @@ pub struct Settings {
     pub pointer_start_frac: f32,
     // How long the cursor stays parked either side of a click, in seconds.
     pub press_freeze_secs: f64,
+    // How long every finger may stay on the pad and still count as a tap rather than a gesture,
+    // in seconds. How far they may travel is move_start_frac, which a tap shares with the pan
+    // threshold: a contact either pans or stays eligible as a tap, never both.
+    //
+    // Only the three-finger double tap uses this today, which is "bring me the window under the
+    // cursor". A tap is a deliberate, quick thing, so this wants to be short: too long and a hand
+    // that lands, hesitates and lifts starts moving your view around.
+    pub tap_max_secs: f64,
+    // And how far its fingers may drift and still be a tap, as a fraction of the pad.
+    //
+    // Its own allowance rather than move_start_frac, which is a two-finger pan threshold and far
+    // too tight for three fingers: measured on this pad, real three-finger taps drift 35 to 316
+    // units while swipes start around 960, so the two are separated by a factor of seven and the
+    // pan's 81 sat in the middle of the taps. A hand landing three fingers rolls the outer two,
+    // and the worst of the three is what this is measured against.
+    pub tap_move_frac: f32,
 
     // Trackpad: two-finger gestures.
     // Canvas units panned per device unit of centroid travel.
@@ -141,6 +157,16 @@ pub struct Settings {
     pub wheel_step_px: f32,
     // Gap within which a second middle click counts as a double click, milliseconds.
     pub double_click_ms: u32,
+
+    // Debugging, as settings rather than as environment variables, so they can be turned on
+    // while om_wm is running and turned off again without restarting it. What they report is our
+    // own reading of the pad, which is the thing worth seeing: raw events say what the kernel
+    // sent, these say what we made of it and why.
+    //
+    // debug_taps reports every contact and whether it counted as a tap. debug_jumps reports any
+    // frame that moves the cursor further than a hand could have, with every slot's state.
+    pub debug_taps: bool,
+    pub debug_jumps: bool,
 
     // Windows.
     // Smallest a Super+right-drag will ask a window to be, in canvas units, for clients
@@ -249,6 +275,8 @@ pub fn defaults() -> Settings {
         pointer_sens: 0.25,
         pointer_start_frac: 0.008,
         press_freeze_secs: 0.12,
+        tap_max_secs: 0.25,
+        tap_move_frac: 0.06,
 
         pan_sens: 0.12,
         window_scroll_sens: 1.0,
@@ -278,6 +306,8 @@ pub fn defaults() -> Settings {
         wheel_step_px: 15.0,
         double_click_ms: 400,
 
+        debug_taps: false,
+        debug_jumps: false,
         resize_min_px: 120.0,
         resize_stretch: false,
         resize_wait_frames: 8,
@@ -397,6 +427,8 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
         "pointer_sens" => f32_key!(pointer_sens),
         "pointer_start_frac" => f32_key!(pointer_start_frac),
         "press_freeze_secs" => f64_key!(press_freeze_secs),
+        "tap_max_secs" => f64_key!(tap_max_secs),
+        "tap_move_frac" => f32_key!(tap_move_frac),
         "pan_sens" => f32_key!(pan_sens),
         "window_scroll_sens" => f32_key!(window_scroll_sens),
         "scroll_axis_lock_frac" => f32_key!(scroll_axis_lock_frac),
@@ -469,6 +501,22 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
                 return false;
             }
         },
+        "debug_taps" => match value {
+            "true" | "1" | "yes" => set.debug_taps = true,
+            "false" | "0" | "no" => set.debug_taps = false,
+            _ => {
+                eprintln!("om_wm: settings: {path}:{line}: debug_taps wants true or false");
+                return false;
+            }
+        },
+        "debug_jumps" => match value {
+            "true" | "1" | "yes" => set.debug_jumps = true,
+            "false" | "0" | "no" => set.debug_jumps = false,
+            _ => {
+                eprintln!("om_wm: settings: {path}:{line}: debug_jumps wants true or false");
+                return false;
+            }
+        },
         "invert_scroll" => match value {
             "true" | "1" | "yes" => set.invert_scroll = true,
             "false" | "0" | "no" => set.invert_scroll = false,
@@ -520,6 +568,8 @@ fn sanitise(set: &mut Settings) {
     set.window_scroll_sens = set.window_scroll_sens.max(0.0);
     set.scroll_axis_lock_frac = set.scroll_axis_lock_frac.max(0.0);
     set.press_freeze_secs = set.press_freeze_secs.max(0.0);
+    set.tap_max_secs = set.tap_max_secs.max(0.0);
+    set.tap_move_frac = set.tap_move_frac.max(0.0);
 }
 
 //

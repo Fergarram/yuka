@@ -2548,6 +2548,24 @@ fn main() {
             }
         }
 
+        // Three fingers tapped twice brings the window under the cursor to you, which is the
+        // journey Super with a double click makes. One hand, no keyboard, and no click: a tap is
+        // fingers landing and leaving without travelling, so it cannot be confused with the
+        // three-finger swipes, which are the same fingers going somewhere.
+        if pad.three_finger_double_tap {
+            if let Some((surf, ..)) = render::window_at(&windows, cam3d, sxp, syp) {
+                if let Some((wx, wy)) = render::window_center(&windows, &surf) {
+                    render::front(&mut windows, &surf);
+                    zoom_ease = Some(ZoomEase {
+                        ax: 0.0,
+                        ay: 0.0,
+                        target: set.zoom_default,
+                        to: Some((wx, wy)),
+                    });
+                }
+            }
+        }
+
         if pressed && grab_windows && drag.is_none() {
             if let Some((surf, ox, oy)) =
                 render::window_at(&windows, cam3d, sxp, syp)
