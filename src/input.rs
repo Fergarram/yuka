@@ -78,8 +78,6 @@ pub const KEY_F11: u16 = 87;
 pub const KEY_F12: u16 = 88;
 pub const KEY_RIGHTCTRL: u16 = 97;
 pub const KEY_RIGHTALT: u16 = 100;
-pub const KEY_LEFT: u16 = 105;
-pub const KEY_RIGHT: u16 = 106;
 pub const KEY_LEFTMETA: u16 = 125;
 pub const KEY_RIGHTMETA: u16 = 126;
 

@@ -489,27 +489,25 @@ fn read_state(tty_fd: i32) -> Option<VtStat> {
 // Chord decoding
 //
 
-// Decode a VT switch request from this frame's key press edges. The console does
-// not act on these itself while our VT is in K_OFF, so they are ours to
-// implement: ctrl+alt+F1..F12 picks a VT directly, alt+left / alt+right step to
-// the previous/next VT in use, the way the console would.
-pub fn chord(s: &Seat, events: &[(u16, bool)], ctrl: bool, alt: bool) -> Option<u16> {
-    if !alt {
+// Decode a VT switch request from this frame's key press edges. The console does not act on
+// these itself while our VT is in K_OFF, so they are ours to implement: ctrl+alt+F1..F12 picks a
+// VT directly.
+//
+// Alt+left and alt+right used to step to the previous and next VT in use, the way the console
+// does. They are not ours to take. Alt with an arrow is back and forward in a browser, and word
+// motion in an editor, and a compositor that swallows it to change VT is taking a chord people
+// use constantly to do something they meant once a week. Ctrl+alt+Fn is the deliberate one and
+// it is enough.
+pub fn chord(_s: &Seat, events: &[(u16, bool)], ctrl: bool, alt: bool) -> Option<u16> {
+    if !alt || !ctrl {
         return None;
     }
     for &(code, pressed) in events {
         if !pressed {
             continue;
         }
-        if ctrl {
-            if let Some(n) = fkey_vt(code) {
-                return Some(n);
-            }
-        }
-        match code {
-            input::KEY_LEFT => return step(s, -1),
-            input::KEY_RIGHT => return step(s, 1),
-            _ => {}
+        if let Some(n) = fkey_vt(code) {
+            return Some(n);
         }
     }
     None
@@ -522,30 +520,6 @@ fn fkey_vt(code: u16) -> Option<u16> {
         input::KEY_F12 => Some(12),
         _ => None,
     }
-}
-
-// The next VT in use, walking in dir from ours and wrapping around. With no VT
-// node to ask, step by one and let the kernel allocate what is not there.
-fn step(s: &Seat, dir: i32) -> Option<u16> {
-    let mask = if s.tty_fd >= 0 {
-        read_state(s.tty_fd).map(|st| st.v_state).unwrap_or(0)
-    } else {
-        0
-    };
-    let mut n = s.our_vt as i32;
-    for _ in 0..MAX_VT {
-        n += dir;
-        if n < 1 {
-            n = MAX_VT as i32;
-        }
-        if n > MAX_VT as i32 {
-            n = 1;
-        }
-        if mask == 0 || mask & (1 << n) != 0 {
-            return Some(n as u16);
-        }
-    }
-    None
 }
 
 //
