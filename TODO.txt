@@ -11,6 +11,8 @@ GOALS:
 ---
 
 BUGS AND IMPROVEMENTS:
+[ ] three-finger double tap to focus center on window like cmd+dblclick
+[ ] It seems that weston terminal (and maybe others) get a larger cursor size and the position for the cursor origin is also wrong. but other programs like sublime text work fine.
 [ ] Sometimes, not always an unfocused window receives the inertia of canvas panning if below the cursor is a window scroll view.
 [ ] Do something about the shadows because they look like crap
 [ ] show false positive 3 finger gesture by sprining back if already in a direction.

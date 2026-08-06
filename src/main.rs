@@ -92,6 +92,25 @@ struct ZoomEase {
     to: Option<(f32, f32)>,
 }
 
+// A cursor image a client has committed, and where the pointer is inside it.
+//
+// The hotspot is ours rather than the client's copy, because the two are in different
+// coordinate systems. set_cursor gives one in surface coordinates and wl_surface.attach moves
+// the buffer around inside that surface, so what the plane needs, the hotspot in buffer pixels,
+// is the client's minus everything the attaches have moved. Kept per surface: a client reuses
+// one cursor surface for every shape it shows.
+struct CursorImage {
+    id: ObjectId,
+    w: i32,
+    h: i32,
+    pixels: Vec<u32>,
+    // In buffer pixels, which is what the plane is armed with.
+    hot: (i32, i32),
+    // And the last hotspot set_cursor gave us, so a new one can be told from the old. A fresh
+    // set_cursor is the client stating the hotspot outright, which resets the accumulation.
+    set: (i32, i32),
+}
+
 // A window being dragged: which one, the offset from the cursor to its origin, and whether
 // the client started it.
 //
@@ -1187,10 +1206,13 @@ fn main() {
     // time, which is why it never showed it.
     //
     // Keyed by surface, capped, and only for surfaces small enough to be a cursor.
-    let mut cursor_images: Vec<(ObjectId, i32, i32, Vec<u32>)> = Vec::new();
+    let mut cursor_images: Vec<CursorImage> = Vec::new();
     // What we last handed the plane: surface and hotspot, so an unchanged cursor is not
     // rebuilt every frame.
     let mut cursor_key: Option<(ObjectId, i32, i32)> = None;
+    // Cursor surfaces that committed this frame are handled before the plane is told anything,
+    // so an attach and the set_cursor that follows it in the same batch resolve in that order.
+    let mut cursor_moved: Vec<(ObjectId, i32, i32)> = Vec::new();
     // The dragged window's geometry as last seen, to notice the client changing it.
     let mut drag_geo: Option<(f32, f32, f32, f32)> = None;
     // When the last middle button press landed, for the double click chord.
@@ -1332,6 +1354,16 @@ fn main() {
                 continue;
             }
             let id = surface.id();
+            // Where the client moved the buffer inside the surface, this commit. Recorded
+            // whether or not new pixels came with it, and applied below once the surface is
+            // known to be the cursor's.
+            let (dx, dy) = wl::state::cursor_attach_delta(surface);
+            // Once per surface per frame, whatever the number of commits. Smithay's current
+            // state holds only the last attach, so a surface that committed twice offers the
+            // same delta twice and counting both walks the hotspot out of the image.
+            if (dx != 0 || dy != 0) && !cursor_moved.iter().any(|(k, ..)| *k == id) {
+                cursor_moved.push((id.clone(), dx, dy));
+            }
             let mut taken: Option<(i32, i32, Vec<u32>)> = None;
             wl::state::with_cursor_pixels(surface, |w, h, stride, ptr| {
                 if w <= 0 || h <= 0 || w > 64 || h > 64 {
@@ -1349,15 +1381,26 @@ fn main() {
                 if debug_input {
                     println!("om_wm: cursor image {w}x{h} cached");
                 }
-                if let Some(slot) = cursor_images.iter_mut().find(|(k, ..)| *k == id) {
-                    *slot = (id, w, h, pixels);
+                if let Some(slot) = cursor_images.iter_mut().find(|c| c.id == id) {
+                    // New pixels for a surface we know: its hotspot bookkeeping carries over,
+                    // because the surface is the same surface and the attaches accumulate.
+                    slot.w = w;
+                    slot.h = h;
+                    slot.pixels = pixels;
                 } else {
                     // A client has a handful of shapes; a cap keeps a misbehaving one from
                     // growing this without bound.
                     if cursor_images.len() >= 32 {
                         cursor_images.remove(0);
                     }
-                    cursor_images.push((id, w, h, pixels));
+                    cursor_images.push(CursorImage {
+                        id,
+                        w,
+                        h,
+                        pixels,
+                        hot: (0, 0),
+                        set: (i32::MIN, i32::MIN),
+                    });
                 }
                 cursor_key = None;
             }
@@ -2540,25 +2583,51 @@ fn main() {
         // Hand the plane whatever the client is currently asking for, from the cache. The
         // hotspot is read live, because set_cursor can change it without the surface
         // committing anything.
+        // Every attach from this frame first, then whatever set_cursor said, in that order:
+        // a client that moves its buffer and then states a hotspot outright means the second.
+        for (id, dx, dy) in cursor_moved.drain(..) {
+            if let Some(img) = cursor_images.iter_mut().find(|c| c.id == id) {
+                // Clamped into the image, because a pointer tip outside its own cursor is not a
+                // thing a client can mean. Without this, a client that restates one hotspot
+                // while its attaches keep moving the buffer walks the tip off the picture: seen
+                // reaching 63,7 inside a 30x30 cursor, which is 33 pixels of nothing.
+                img.hot.0 = (img.hot.0 - dx).clamp(0, img.w.max(1) - 1);
+                img.hot.1 = (img.hot.1 - dy).clamp(0, img.h.max(1) - 1);
+                cursor_key = None;
+            }
+        }
         if let (Some(cur), CursorImageStatus::Surface(surf)) = (cursor.as_mut(), &state.cursor_image)
         {
             let id = surf.id();
             let (hx, hy) = wl::state::cursor_hotspot(surf);
-            if cursor_key.as_ref() != Some(&(id.clone(), hx, hy)) {
-                if let Some((_, w, h, pixels)) = cursor_images.iter().find(|(k, ..)| *k == id) {
+            if let Some(img) = cursor_images.iter_mut().find(|c| c.id == id) {
+                // A hotspot we have not been told before is a fresh set_cursor, which states
+                // where the pointer is in the surface and so ends any accumulation.
+                if img.set != (hx, hy) {
+                    img.set = (hx, hy);
+                    img.hot = (hx, hy);
+                    cursor_key = None;
+                }
+            }
+            if let Some(img) = cursor_images.iter().find(|c| c.id == id) {
+                let (w, h) = (img.w, img.h);
+                let (ox, oy) = img.hot;
+                if cursor_key.as_ref() != Some(&(id.clone(), ox, oy)) {
                     if debug_input {
-                        println!("om_wm: cursor now {w}x{h} hotspot {hx},{hy}");
+                        println!(
+                            "om_wm: cursor now {w}x{h} hotspot {ox},{oy} (client said {hx},{hy})"
+                        );
                     }
                     cursor::store_client_image(
                         cur,
-                        *w,
-                        *h,
+                        w,
+                        h,
                         w * 4,
-                        pixels.as_ptr() as *const u8,
-                        hx,
-                        hy,
+                        img.pixels.as_ptr() as *const u8,
+                        ox,
+                        oy,
                     );
-                    cursor_key = Some((id, hx, hy));
+                    cursor_key = Some((id, ox, oy));
                 }
             }
         }

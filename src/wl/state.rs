@@ -653,6 +653,26 @@ pub fn is_window_like(state: &State, surface: &WlSurface) -> bool {
 // like any other, but it is not a window: nothing else in om_wm will take its buffer, and
 // the buffer has to stay put because a cursor is uploaded again every time it moves shape
 // rather than every frame. So this borrows the current buffer and leaves it attached.
+// Where a client just moved its cursor buffer, if it moved it at all.
+//
+// wl_surface.attach carries a position for the new buffer's top-left, relative to the previous
+// one, in surface coordinates. A hotspot from set_cursor is in those same surface coordinates,
+// so the hotspot inside the buffer is the one we were told minus what the attaches have moved
+// it. Smithay hands over the per-commit delta and stores the hotspot verbatim, so the running
+// sum is the compositor's to keep.
+//
+// Almost every toolkit attaches at 0,0 and this is always zero for them. Weston's own clients
+// do not, which is the whole reason it exists: their cursors sat a dozen pixels off the pointer.
+pub fn cursor_attach_delta(surface: &WlSurface) -> (i32, i32) {
+    with_states(surface, |data| {
+        let mut guard = data.cached_state.get::<SurfaceAttributes>();
+        match guard.current().buffer_delta {
+            Some(d) => (d.x, d.y),
+            None => (0, 0),
+        }
+    })
+}
+
 pub fn with_cursor_pixels<F>(surface: &WlSurface, mut f: F) -> bool
 where
     F: FnMut(i32, i32, i32, *const u8),
