@@ -208,6 +208,16 @@ pub struct Settings {
     pub dmabuf_mode: DmabufMode,
 
     // Camera.
+    // Breathing room around a window the view is being fitted to, in screen pixels per side.
+    //
+    // Only the camera moves: the window is never resized and never told anything. It is how tight
+    // the fit is when you send the view to a window, either because the window is maximized or
+    // because it is too big for the screen at 1:1.
+    //
+    // 0 fits exactly, edge to edge, which is what om_wm did before this existed. Anything above
+    // that leaves a margin, which is worth having now that we draw the shadow a client puts around
+    // itself: an exact fit crops that shadow against the screen edge.
+    pub fit_padding_px: f32,
     // Keyboard zoom rate, for Super with plus or minus.
     pub zoom_rate_per_sec: f32,
     // Zoom limits, and the scale the resets return to.
@@ -314,6 +324,7 @@ pub fn defaults() -> Settings {
         draw_shadows: true,
         dmabuf_mode: DmabufMode::Hold,
 
+        fit_padding_px: 0.0,
         zoom_rate_per_sec: 2.0,
         zoom_min: 0.1,
         zoom_max: 8.0,
@@ -474,6 +485,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
                 return false;
             }
         },
+        "fit_padding_px" => f32_key!(fit_padding_px),
         "zoom_rate_per_sec" => f32_key!(zoom_rate_per_sec),
         "zoom_min" => f32_key!(zoom_min),
         "zoom_max" => f32_key!(zoom_max),
@@ -544,6 +556,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
 // Clamped rather than rejected: a file with one silly number should still load, and a
 // zoom range of zero would divide by it.
 fn sanitise(set: &mut Settings) {
+    set.fit_padding_px = set.fit_padding_px.max(0.0);
     set.zoom_min = set.zoom_min.max(0.001);
     set.zoom_max = set.zoom_max.max(set.zoom_min * 1.001);
     set.zoom_default = set.zoom_default.clamp(set.zoom_min, set.zoom_max);

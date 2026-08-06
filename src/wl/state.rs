@@ -439,6 +439,30 @@ pub fn maximize_toplevel(state: &State, surface: &WlSurface, w: i32, h: i32, max
     }
 }
 
+// Tell a toplevel it is not maximized, and that its size is its own business.
+//
+// For refusing a request rather than answering one. A configure carrying 0x0 is the protocol's way
+// of saying "you choose", which is the only honest thing to send a window we have never seen: it
+// has no size yet for us to clamp against, and running it through the usual path would hand it its
+// own declared minimum, which is a refusal that also shrinks it to nothing.
+pub fn decline_maximize(state: &State, surface: &WlSurface) {
+    let Some(toplevel) = state
+        .xdg_state
+        .toplevel_surfaces()
+        .iter()
+        .find(|t| t.wl_surface() == surface)
+    else {
+        return;
+    };
+    toplevel.with_pending_state(|pending| {
+        pending.size = Some((0, 0).into());
+        pending.states.unset(ToplevelState::Maximized);
+    });
+    if toplevel.send_pending_configure().is_none() {
+        toplevel.send_configure();
+    }
+}
+
 // What the client said it can be. Zero in either direction means it did not say, which
 // Wayland spells as "no limit".
 pub fn size_limits(surface: &WlSurface) -> ((i32, i32), (i32, i32)) {

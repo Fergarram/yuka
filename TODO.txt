@@ -16,7 +16,16 @@ BUGS:
 
 IMPROVEMENTS OR TESTS:
 
-[ ] New windows should not start maximized.
+[x] New windows should not start maximized.
+    A maximize asked for before the window has ever been drawn is refused, with a
+    configure carrying 0x0 so the client picks its own size and is not left waiting.
+    A client that maps first and asks a moment later is not covered; if one turns up
+    doing that, the refusal needs a grace period after the window appears.
+[x] Focus-centering a window fits the view to it when it does not fit at 1:1.
+    Super+dblclick and the three-finger double tap both go through zoom_for_window:
+    a maximized window gets the shape of the view back, a window too big for the
+    screen makes the view go out until it fits, and anything else lands at 1:1. Only
+    ever out, never in. fit_padding_px is the margin, camera side only, hot-reloading.
 [ ] design three-finger gesture to grab windows when not in focus and be able to lift and resize with one hand
 [x] three-finger double tap to focus center on window like cmd+dblclick
     Same journey as super+dblclick. Tap detection had to be written, only its comments

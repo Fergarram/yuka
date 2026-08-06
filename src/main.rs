@@ -920,6 +920,49 @@ fn forward_keys(
     }
 }
 
+// Where the view has to be for a window to look the way it asks to look, when you send the view
+// to it.
+//
+// 1:1 for an ordinary window that fits, which is its own pixel size and what it was drawn for.
+//
+// Two things pull away from that.
+//
+// A maximized window took the shape of the view at the moment you asked for it, so 1:1 would show
+// that rectangle at some other scale than the one that made it, which is the single arrangement
+// where it is not filling anything. The view fits to it instead and it fills the screen again.
+//
+// And a window too big for the screen does not fit at 1:1 by definition: sending the view to it
+// would put you in the middle of it with its edges off both sides, which is not being shown a
+// window, it is being dropped into one. So the view goes out far enough to hold it. Only out,
+// never in: a small window is left at its own size rather than blown up to fill a screen it was
+// never drawn for.
+//
+// The fit is the smaller of the two ratios, so the whole window is in view rather than cropped on
+// one axis.
+fn zoom_for_window(
+    windows: &render::Windows,
+    surface: &WlSurface,
+    set: &settings::Settings,
+) -> f32 {
+    let Some((w, h)) = render::geo_size(windows, surface) else {
+        return set.zoom_default;
+    };
+    if w <= 0.0 || h <= 0.0 {
+        return set.zoom_default;
+    }
+    // The screen, less the margin asked for on each side. Floored at one pixel, so a padding
+    // larger than the screen leaves a view rather than an inverted one.
+    let sw = (ray::screen_width() as f32 - set.fit_padding_px * 2.0).max(1.0);
+    let sh = (ray::screen_height() as f32 - set.fit_padding_px * 2.0).max(1.0);
+    let fit = (sw / w).min(sh / h);
+    let zoom = if render::is_maximized(windows, surface) {
+        fit
+    } else {
+        set.zoom_default.min(fit)
+    };
+    zoom.clamp(set.zoom_min, set.zoom_max)
+}
+
 // Dragging a window that is filling the view takes it out of maximized first.
 //
 // Only when it is actually filling it. Maximized here is a size, not a mode that owns a screen,
@@ -2165,6 +2208,19 @@ fn main() {
             // you chose to be zoomed out, which is a coherent thing to want, and yanking the
             // scale to 1:1 would be the canvas deciding it knows better.
             for (surf, on) in asked_max {
+                // Never at map time. A client that asks to be maximized before it has appeared is
+                // asking to open filling the screen, and that is not a state to open in here: the
+                // view is a place you are, and a window that seizes it on launch moves you
+                // somewhere you did not go. New windows arrive at the size they chose, where the
+                // cascade puts them, and can be maximized afterwards by whoever is looking.
+                //
+                // Refused rather than ignored, because a client that asked is owed a configure and
+                // sits waiting for one otherwise. It gets 0x0, which is the protocol's "your size
+                // is your own business".
+                if on && render::geo_size(&windows, &surf).is_none() {
+                    wl::state::decline_maximize(&state, &surf);
+                    continue;
+                }
                 if on {
                     let sw = ray::screen_width() as f32;
                     let sh = ray::screen_height() as f32;
@@ -2536,7 +2592,7 @@ fn main() {
                         zoom_ease = Some(ZoomEase {
                             ax: 0.0,
                             ay: 0.0,
-                            target: set.zoom_default,
+                            target: zoom_for_window(&windows, &surf, &set),
                             to: Some((wx, wy)),
                         });
                         pressed = false;
@@ -2559,7 +2615,7 @@ fn main() {
                     zoom_ease = Some(ZoomEase {
                         ax: 0.0,
                         ay: 0.0,
-                        target: set.zoom_default,
+                        target: zoom_for_window(&windows, &surf, &set),
                         to: Some((wx, wy)),
                     });
                 }
