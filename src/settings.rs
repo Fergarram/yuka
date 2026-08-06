@@ -208,15 +208,18 @@ pub struct Settings {
     pub dmabuf_mode: DmabufMode,
 
     // Camera.
-    // Breathing room around a window the view is being fitted to, in screen pixels per side.
+    // Breathing room around a window the view is fitted to, in screen pixels per side.
     //
-    // Only the camera moves: the window is never resized and never told anything. It is how tight
-    // the fit is when you send the view to a window, either because the window is maximized or
-    // because it is too big for the screen at 1:1.
+    // Only the camera moves: the window is never resized and never told anything.
     //
-    // 0 fits exactly, edge to edge, which is what om_wm did before this existed. Anything above
-    // that leaves a margin, which is worth having now that we draw the shadow a client puts around
-    // itself: an exact fit crops that shadow against the screen edge.
+    // Only for a window too big for the screen, where the fit is ours rather than the window's:
+    // nothing about that window says it should touch the edges, and the room is what makes it read
+    // as a window rather than as a wall. A maximized window is fitted exactly, margin or no margin,
+    // because it was given the shape of the screen and one with a gap around it is not maximized.
+    //
+    // 0 fits exactly either way, which is what om_wm did before this existed. A margin is worth
+    // having now that we draw the shadow a client puts around itself: an exact fit crops it
+    // against the screen edge.
     pub fit_padding_px: f32,
     // Keyboard zoom rate, for Super with plus or minus.
     pub zoom_rate_per_sec: f32,

@@ -950,15 +950,19 @@ fn zoom_for_window(
     if w <= 0.0 || h <= 0.0 {
         return set.zoom_default;
     }
-    // The screen, less the margin asked for on each side. Floored at one pixel, so a padding
-    // larger than the screen leaves a view rather than an inverted one.
-    let sw = (ray::screen_width() as f32 - set.fit_padding_px * 2.0).max(1.0);
-    let sh = (ray::screen_height() as f32 - set.fit_padding_px * 2.0).max(1.0);
-    let fit = (sw / w).min(sh / h);
+    let (sw, sh) = (ray::screen_width() as f32, ray::screen_height() as f32);
     let zoom = if render::is_maximized(windows, surface) {
-        fit
+        // Exactly the view, with no margin. Maximized means it was given the shape of the screen,
+        // and a maximized window with a gap around it is not maximized, it is a large window.
+        (sw / w).min(sh / h)
     } else {
-        set.zoom_default.min(fit)
+        // A window too big for the screen gets the margin, because here the fit is ours rather
+        // than the window's: nothing about the window says it should touch the edges, and the
+        // room is what makes it read as a window rather than as a wall. Floored at a pixel, so a
+        // silly padding cannot invert the fit.
+        let pw = (sw - set.fit_padding_px * 2.0).max(1.0);
+        let ph = (sh - set.fit_padding_px * 2.0).max(1.0);
+        set.zoom_default.min((pw / w).min(ph / h))
     };
     zoom.clamp(set.zoom_min, set.zoom_max)
 }
@@ -1342,6 +1346,18 @@ fn main() {
     // heads for overview_zoom around the middle of the screen, which is what "the centre of
     // the camera" means once it is a screen point.
     let mut zoom_ease: Option<ZoomEase> = None;
+    // A scale the view was deliberately sent to, when it is not zoom_default: the fit of a window
+    // it was told to go to. Remembered so the 1:1 detent leaves it alone.
+    //
+    // The two disagree otherwise, and it looks like a bug because it is one. Fitting a maximized
+    // window with a margin lands near 1:1 by construction, since the window is the size of the
+    // screen and the margin is small, and the detent then reads that as a zoom that drifted and
+    // pulls it the rest of the way, throwing the margin away in a second journey. A drift is what
+    // the detent is for; a fit is not a drift.
+    //
+    // Only while the zoom is still sitting where it was put. Move it by any means, by a hair, and
+    // this stops matching and the detent goes back to work.
+    let mut zoom_placed: Option<f32> = None;
     // A pinch sequence in progress toward a client, and how far it has scaled since it began.
     // The protocol reports the total rather than the step, and a sequence outlives a frame.
     let mut pinch_active = false;
@@ -1980,7 +1996,9 @@ fn main() {
         // theirs to move through. The moment they stop asking for a scale, the zoom takes the
         // rest of the step. And not over an ease already running, which has its own target and
         // its own anchor, and would otherwise be re-anchored to a moving pointer every frame.
-        if set.zoom_detent > 0.0 && zoom_ease.is_none() && ptr.pinch == 1.0 {
+        const PLACED: f32 = 0.001;
+        let sits_where_placed = zoom_placed.map_or(false, |z| (cam.zoom - z).abs() < PLACED);
+        if set.zoom_detent > 0.0 && zoom_ease.is_none() && ptr.pinch == 1.0 && !sits_where_placed {
             let off = cam.zoom - set.zoom_default;
             if off != 0.0 && off.abs() <= set.zoom_detent {
                 let (ax, ay) = pointer_xy.unwrap_or((0, 0));
@@ -2589,12 +2607,9 @@ fn main() {
                     last_left_window = None;
                     if let Some((wx, wy)) = render::window_center(&windows, &surf) {
                         render::front(&mut windows, &surf);
-                        zoom_ease = Some(ZoomEase {
-                            ax: 0.0,
-                            ay: 0.0,
-                            target: zoom_for_window(&windows, &surf, &set),
-                            to: Some((wx, wy)),
-                        });
+                        let target = zoom_for_window(&windows, &surf, &set);
+                        zoom_placed = (target != set.zoom_default).then_some(target);
+                        zoom_ease = Some(ZoomEase { ax: 0.0, ay: 0.0, target, to: Some((wx, wy)) });
                         pressed = false;
                     }
                 } else {
@@ -2612,12 +2627,9 @@ fn main() {
             if let Some((surf, ..)) = render::window_at(&windows, cam3d, sxp, syp) {
                 if let Some((wx, wy)) = render::window_center(&windows, &surf) {
                     render::front(&mut windows, &surf);
-                    zoom_ease = Some(ZoomEase {
-                        ax: 0.0,
-                        ay: 0.0,
-                        target: zoom_for_window(&windows, &surf, &set),
-                        to: Some((wx, wy)),
-                    });
+                    let target = zoom_for_window(&windows, &surf, &set);
+                    zoom_placed = (target != set.zoom_default).then_some(target);
+                    zoom_ease = Some(ZoomEase { ax: 0.0, ay: 0.0, target, to: Some((wx, wy)) });
                 }
             }
         }
