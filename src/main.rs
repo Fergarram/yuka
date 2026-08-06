@@ -2607,6 +2607,10 @@ fn main() {
                     last_left_window = None;
                     if let Some((wx, wy)) = render::window_center(&windows, &surf) {
                         render::front(&mut windows, &surf);
+                        // The press that would have focused this is eaten below, so the focus is
+                        // given here instead: being sent to a window is choosing it.
+                        let window = wl::state::window_root(&state, &surf);
+                        focus_window(&mut state, &mut focused, Some(window));
                         let target = zoom_for_window(&windows, &surf, &set);
                         zoom_placed = (target != set.zoom_default).then_some(target);
                         zoom_ease = Some(ZoomEase { ax: 0.0, ay: 0.0, target, to: Some((wx, wy)) });
@@ -2627,6 +2631,11 @@ fn main() {
             if let Some((surf, ..)) = render::window_at(&windows, cam3d, sxp, syp) {
                 if let Some((wx, wy)) = render::window_center(&windows, &surf) {
                     render::front(&mut windows, &surf);
+                    // Being sent to a window is choosing it, so it takes the keyboard too. The
+                    // toplevel rather than whatever surface was under the cursor, which is the
+                    // rule a click follows: focus never goes to a popup or a subsurface.
+                    let window = wl::state::window_root(&state, &surf);
+                    focus_window(&mut state, &mut focused, Some(window));
                     let target = zoom_for_window(&windows, &surf, &set);
                     zoom_placed = (target != set.zoom_default).then_some(target);
                     zoom_ease = Some(ZoomEase { ax: 0.0, ay: 0.0, target, to: Some((wx, wy)) });
