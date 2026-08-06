@@ -11,26 +11,12 @@ GOALS:
 
 BUGS:
 
-[x] Disable alt+arrow keys to swtich TTY (only leave ctrl+alt+fn)
-    It was ours, not the kernel's: seat::chord implemented alt+left/right as VT
-    stepping. Gone, ctrl+alt+Fn is the only VT chord now.
-[ ] Sometimes, when multiple fingers on trackpad, there is a sudden cursor position teleport.
-    Still happens. First attempt was the slot identity case: protocol B can hand a slot
-    a new tracking id without passing through -1, one finger replaced by another in
-    place, and nothing reset. That is a real bug and worth keeping, but it was not this
-    one. Next suspect is the primary slot changing which finger drives the pointer.
-[x] Sometimes, not always an unfocused window receives the inertia of canvas panning if below the cursor is a window scroll view.
-    The destination was re-decided every frame, so letting go of Super mid-pan handed
-    the rest of the gesture to whatever was under the cursor. Latched per gesture now.
-[x] super+s/p, etc if there is a text field the letters pass through, we should not pass through any letters.
-    While Super is down nothing typed reaches a client. Modifiers still go, and a
-    release only goes where its press went, so no key can stick down.
-
 
 ---
 
 IMPROVEMENTS OR TESTS:
 
+[ ] New windows should not start maximized.
 [ ] design three-finger gesture to grab windows when not in focus and be able to lift and resize with one hand
 [ ] three-finger double tap to focus center on window like cmd+dblclick
 [ ] show false positive 3 finger gesture by sprining back if already in a direction.
@@ -43,7 +29,6 @@ MINIMUM SHIT:
 [-] A lot of polish for trackpad gesture/sensitivity.
 [ ] decent cursor for canvas 
 [ ] drag and drop
-[ ] Get audio working
 [ ] Correct pointer lock behavior
 [ ] Minimize window design
 [ ] Fullscreen mode
