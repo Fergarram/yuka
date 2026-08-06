@@ -56,6 +56,10 @@ const EVIOCGRAB: libc::c_ulong = 0x4004_4590;
 const V120_PER_NOTCH: f32 = 120.0;
 
 // Linux evdev codes (input-event-codes.h) we care about.
+// One past the highest keycode evdev will report, which is what an array indexed by keycode
+// has to be long enough for.
+pub const KEY_CODES: usize = 768;
+
 pub const KEY_ESC: u16 = 1;
 pub const KEY_0: u16 = 11;
 pub const KEY_MINUS: u16 = 12;
@@ -68,7 +72,10 @@ pub const KEY_F: u16 = 33;
 pub const KEY_LEFTCTRL: u16 = 29;
 pub const KEY_A: u16 = 30;
 pub const KEY_S: u16 = 31;
+pub const KEY_LEFTSHIFT: u16 = 42;
+pub const KEY_RIGHTSHIFT: u16 = 54;
 pub const KEY_LEFTALT: u16 = 56;
+pub const KEY_CAPSLOCK: u16 = 58;
 pub const KEY_SPACE: u16 = 57;
 pub const KEY_F1: u16 = 59;
 pub const KEY_F10: u16 = 68;
@@ -661,6 +668,26 @@ pub fn keys(inp: &Input) -> &[bool] {
 
 pub fn super_down(inp: &Input) -> bool {
     down(inp, KEY_LEFTMETA) || down(inp, KEY_RIGHTMETA)
+}
+
+// Whether a keycode is a modifier rather than something you type.
+//
+// The distinction matters when the compositor keeps a chord to itself: the letter must not reach
+// the client, but the modifier still has to, or xkb's idea of what is held drifts from the
+// keyboard and the next client to take focus inherits modifiers nobody is pressing.
+pub fn is_modifier(code: u16) -> bool {
+    matches!(
+        code,
+        KEY_LEFTCTRL
+            | KEY_RIGHTCTRL
+            | KEY_LEFTALT
+            | KEY_RIGHTALT
+            | KEY_LEFTMETA
+            | KEY_RIGHTMETA
+            | KEY_LEFTSHIFT
+            | KEY_RIGHTSHIFT
+            | KEY_CAPSLOCK
+    )
 }
 
 pub fn ctrl_down(inp: &Input) -> bool {

@@ -831,13 +831,43 @@ fn forward_scroll(
 // went on believing the key was held. A stuck Ctrl turns typing "a" into select-all, which
 // is how this was found. Delivery is Smithay's business: with no focus it updates state and
 // sends nothing, which is exactly what an empty canvas wants.
-fn forward_keys(state: &mut State, kb: &input::Input, time_ms: u32) {
+// Forward keys to the focused client, minus the ones Super is holding.
+//
+// Super is the compositor's modifier: every chord behind it is ours, and a client hearing the
+// letter as well means Super+S both takes a screenshot and types an s into whatever has focus.
+// Two of them were filtered by name, which only ever covered the two that had been noticed.
+// So the rule is the general one: while Super is down nothing you type reaches a client.
+//
+// Modifiers themselves still go. They are not typing, and xkb's idea of what is held has to
+// follow the keyboard or the next client to take focus inherits modifiers nobody is pressing.
+//
+// sent is what we have told the client is down, so a release only goes where its press went.
+// Without it, holding a letter, then pressing Super, then letting the letter go leaves the
+// client believing that key is still held: it never hears the release, because by then Super
+// was down. That is a key repeating forever in someone's editor.
+fn forward_keys(
+    state: &mut State,
+    kb: &input::Input,
+    sent: &mut [bool; input::KEY_CODES],
+    time_ms: u32,
+) {
     let keyboard = state.keyboard.clone();
     for &(code, pressed) in input::events(kb) {
-        let chord = input::super_down(kb)
-            && (code == input::KEY_ESC || code == input::KEY_0);
-        if chord {
-            continue;
+        let i = code as usize;
+        if !input::is_modifier(code) {
+            if pressed {
+                if input::super_down(kb) {
+                    continue;
+                }
+                if i < sent.len() {
+                    sent[i] = true;
+                }
+            } else if i < sent.len() {
+                if !sent[i] {
+                    continue;
+                }
+                sent[i] = false;
+            }
         }
         let key_state = if pressed {
             KeyState::Pressed
@@ -1220,6 +1250,8 @@ fn main() {
     // And the last left click on a window, for the Super + double click that brings one to
     // you. The surface comes with it, because two clicks on two different windows are two
     // first clicks rather than a double one.
+    // Which keycodes a client has been told are down, so a release always follows its press.
+    let mut keys_sent = [false; input::KEY_CODES];
     let mut last_left_ms: u32 = 0;
     let mut last_left_window: Option<WlSurface> = None;
     // Whether Super+S was pressed this frame, and how many shots this run has taken. The
@@ -2731,7 +2763,7 @@ fn main() {
         // no client is listening, or the next client to get focus inherits modifiers that
         // nobody is holding.
         if let Some(i) = inp.as_ref() {
-            forward_keys(&mut state, i, time_ms);
+            forward_keys(&mut state, i, &mut keys_sent, time_ms);
         }
 
         // Everything routed this frame goes out now, not on the next iteration.
