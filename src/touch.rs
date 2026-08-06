@@ -281,6 +281,12 @@ pub struct Gesture {
     // client cannot see the pad, so an axis sequence that is never ended is one it goes on
     // believing is in progress.
     pub scroll_ended: bool,
+    // How many contacts are on the pad at all, faint and parked included. Not what a gesture
+    // is made of: what it means is "is the hand still there". A scroll's destination is decided
+    // once and has to hold for the whole gesture, and scroll_ended above cannot answer that
+    // question, since it fires the moment the pan stops leading, which is what a swipe does as
+    // it slows down before lifting.
+    pub fingers: usize,
     // Three fingers went up, or down. Fires once, on the frame the travel passes the
     // threshold, and says nothing else: an instruction rather than a motion to follow.
     pub swipe_up: bool,
@@ -297,6 +303,7 @@ impl Default for Gesture {
             zoom_started: false,
             zoom_ended: false,
             scroll_ended: false,
+            fingers: 0,
             swipe_up: false,
             swipe_down: false,
         }
@@ -935,6 +942,7 @@ pub fn update(tp: &mut Touchpad, cursor: Option<&mut Cursor>, set: &Settings) ->
     if out.scroll_ended {
         tp.panned_gesture = false;
     }
+    out.fingers = tp.down;
     out
 }
 

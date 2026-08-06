@@ -3,22 +3,38 @@ I am basically at a pretty good point when it comes to canvas controls. It feels
 
 GOALS:
 
-[x] Be able to tweak the desktop while in the desktop so I don't have to be in TTY mode.
 [ ] Share this build with others so I can test design.
-[ ] Eventually, test an MCP to give control to assistants. 
+[ ] Eventually, test an MCP to give control to assistants.
+[ ] Modability: the part of this system that behaves like a game engine or video game
+
+---
+
+BUGS:
+
+[x] Disable alt+arrow keys to swtich TTY (only leave ctrl+alt+fn)
+    It was ours, not the kernel's: seat::chord implemented alt+left/right as VT
+    stepping. Gone, ctrl+alt+Fn is the only VT chord now.
+[ ] Sometimes, when multiple fingers on trackpad, there is a sudden cursor position teleport.
+    Still happens. First attempt was the slot identity case: protocol B can hand a slot
+    a new tracking id without passing through -1, one finger replaced by another in
+    place, and nothing reset. That is a real bug and worth keeping, but it was not this
+    one. Next suspect is the primary slot changing which finger drives the pointer.
+[x] Sometimes, not always an unfocused window receives the inertia of canvas panning if below the cursor is a window scroll view.
+    The destination was re-decided every frame, so letting go of Super mid-pan handed
+    the rest of the gesture to whatever was under the cursor. Latched per gesture now.
+[x] super+s/p, etc if there is a text field the letters pass through, we should not pass through any letters.
+    While Super is down nothing typed reaches a client. Modifiers still go, and a
+    release only goes where its press went, so no key can stick down.
 
 
 ---
 
-BUGS AND IMPROVEMENTS:
-[ ] three-finger double tap to focus center on window like cmd+dblclick
-[ ] It seems that weston terminal (and maybe others) get a larger cursor size and the position for the cursor origin is also wrong. but other programs like sublime text work fine.
-[ ] Sometimes, not always an unfocused window receives the inertia of canvas panning if below the cursor is a window scroll view.
-[ ] Do something about the shadows because they look like crap
-[ ] show false positive 3 finger gesture by sprining back if already in a direction.
-[x] It seems that when zoom is not 1. or on some hover events on windows, it triggers a buffer swap and for some reason one of the buffers seems to not be bilinear or smth else
-[ ] super+s/p, etc if there is a text field the letters pass through, we should not pass through any letters.
+IMPROVEMENTS OR TESTS:
 
+[ ] design three-finger gesture to grab windows when not in focus and be able to lift and resize with one hand
+[ ] three-finger double tap to focus center on window like cmd+dblclick
+[ ] show false positive 3 finger gesture by sprining back if already in a direction.
+[ ] dont change z order when focusing via click on existing windows.
 
 ---
 
@@ -29,26 +45,8 @@ MINIMUM SHIT:
 [ ] drag and drop
 [ ] Get audio working
 [ ] Correct pointer lock behavior
-[ ] Maximize window, minimize
+[ ] Minimize window design
 [ ] Fullscreen mode
-[ ] dont change z order when focusing via click on existing windows.
-[x] Pass pinch gestures to windows
-
-
----
-
-TEST:
-
-[x] Three finger pan/zoom OR cmd + two finger OR cmd + middle wheel/scroll
-
----
-
-[x] Update raylib so we can hand an fd, basically it's currently too manual or some shit.
-    SetGraphicDeviceFd patch in rcore_drm.c, so logind opens the card through
-    libseat and raylib takes our fd. build.rs detects the patch; without it we
-    fall back to raylib opening the card. OM_WM_CARD=raylib forces the fallback.
-    Still direct: the input devices, which could go through libseat too.
-
 [-] Add multimonitor support.
     Needs the KMS loop to be ours: raylib's DRM platform is one connector, one
     CRTC, one blocking modeset per frame, so two screens means owning the flips
@@ -62,10 +60,4 @@ TEST:
     immediately, i.e. tearing, since that would explain the feel and would make
     vsync versus async flips a deliberate per-output switch rather than a
     regression.
-
-EVENTUALLY:
-
-[x] Have a window mode for quicker development (not all devs will start in tty)
-    cargo build --features windowed, run inside another compositor. Host input
-    comes through raylib; the custom trackpad path is DRM only.
-[ ] Have a way to run this as mac app, would basically abstract setup into a canvas engine.
+[ ] Window mode we did is kinda weird? I haven't tested it as such

@@ -723,11 +723,34 @@ struct ScrollGesture {
     lock: ScrollLock,
     travel_x: f32,
     travel_y: f32,
+    // Whether the fingers are moving at all, and where what they are doing is going. Both are
+    // decided on the frame a gesture starts and held until it ends.
+    //
+    // Held, because otherwise the destination is re-decided every frame from things the gesture
+    // does not control. Let go of Super halfway through panning the canvas and the rest of the
+    // gesture goes to whatever the cursor happens to be over: the canvas stops, and an
+    // unfocused window's scroll view takes the tail of your pan. Which is what "the inertia
+    // lands in the wrong window" was.
+    active: bool,
+    to_client: bool,
+    // Whether we have actually sent this client axis values during this gesture, so an axis
+    // sequence is open toward it.
+    //
+    // The stop is what closes one. A client that received no values has nothing open, and telling
+    // it a sequence ended anyway is not harmless: GTK takes the end of a scroll as the moment to
+    // release its kinetic scrolling, so an unfocused window that heard nothing all gesture still
+    // runs the inertia it was holding the instant we say stop. Which is a canvas pan leaking into
+    // a window that was never scrolled.
+    opened: bool,
 }
 
 fn forward_scroll(
     state: &mut State,
     ptr: &input::Pointer,
+    // Whether the wheel belongs to the client. Asked per event, because a notch is whole.
+    wheel_to_client: bool,
+    // And whether the finger scroll does, which is the latched answer for the whole gesture.
+    fingers_to_client: bool,
     // True on the frame a finger scroll finished, which has to be said out loud.
     scroll_ended: bool,
     // The gesture in progress: which axes it is sending and how far each has travelled.
@@ -738,7 +761,7 @@ fn forward_scroll(
     let pointer = state.pointer.clone();
     let scroll_sign = settings::client_scroll_sign(set);
     let hscroll_sign = settings::client_hscroll_sign(set);
-    if ptr.wheel != 0.0 || ptr.hwheel != 0.0 {
+    if wheel_to_client && (ptr.wheel != 0.0 || ptr.hwheel != 0.0) {
         let mut frame = AxisFrame::new(time_ms).source(AxisSource::Wheel);
         if ptr.wheel != 0.0 {
             let v = ptr.wheel * scroll_sign;
@@ -755,7 +778,11 @@ fn forward_scroll(
         pointer.axis(state, frame);
         pointer.frame(state);
     }
-    if ptr.scroll_x != 0.0 || ptr.scroll_y != 0.0 {
+    // Values only for the side that owns the gesture. The stop below is sent either way, and
+    // this frame can be both the last of a canvas pan and the frame the stop goes out on: without
+    // this test the tail of a pan the canvas owned lands in the window under the cursor, which is
+    // the whole bug this latch exists for, arriving one frame later than before.
+    if fingers_to_client && (ptr.scroll_x != 0.0 || ptr.scroll_y != 0.0) {
         // Finger scroll into a window gets its own sensitivity: the same gesture serves
         // the canvas, where one to one is right, and a page, which usually wants more.
         let sens = set.window_scroll_sens;
@@ -799,6 +826,7 @@ fn forward_scroll(
             }
             pointer.axis(state, frame);
             pointer.frame(state);
+            gesture.opened = true;
         }
     }
     // The end of a finger scroll is an event of its own, and the protocol requires it for
@@ -806,18 +834,23 @@ fn forward_scroll(
     // believing is running. Firefox is the one that showed it, by ignoring scrolls that came
     // after a sequence it thought was still open.
     //
+    // Only for a sequence we opened, though. See ScrollGesture::opened.
+    //
     // Both axes, whichever was moving. Stopping one that was not is nothing to a client, and
     // working out which were live is bookkeeping for no gain.
     if scroll_ended {
         gesture.lock = ScrollLock::None;
         gesture.travel_x = 0.0;
         gesture.travel_y = 0.0;
-        let frame = AxisFrame::new(time_ms)
-            .source(AxisSource::Finger)
-            .stop(Axis::Vertical)
-            .stop(Axis::Horizontal);
-        pointer.axis(state, frame);
-        pointer.frame(state);
+        if gesture.opened {
+            gesture.opened = false;
+            let frame = AxisFrame::new(time_ms)
+                .source(AxisSource::Finger)
+                .stop(Axis::Vertical)
+                .stop(Axis::Horizontal);
+            pointer.axis(state, frame);
+            pointer.frame(state);
+        }
     }
 }
 
@@ -1272,8 +1305,14 @@ fn main() {
     let mut pinch_scale: f64 = 1.0;
     // And the finger scroll in progress toward a client, which outlives a frame for the same
     // reason: which axes it is sending, and how far each has travelled lately.
-    let mut scroll_gesture =
-        ScrollGesture { lock: ScrollLock::None, travel_x: 0.0, travel_y: 0.0 };
+    let mut scroll_gesture = ScrollGesture {
+        lock: ScrollLock::None,
+        travel_x: 0.0,
+        travel_y: 0.0,
+        active: false,
+        to_client: false,
+        opened: false,
+    };
     // Which of the two scales the zoom last settled at, which is the mode. Out here the canvas
     // owns the pointer and no window hears anything; in there they are applications again.
     // Surface the pointer is currently over, so crossing into another one can
@@ -1655,6 +1694,29 @@ fn main() {
         // the canvas and the same two fingers move the canvas.
         let pointer_on_client =
             !super_down && focused.is_some() && hovered.is_some();
+        // A finger scroll's destination is that answer taken once, on the frame the fingers
+        // start moving, and kept until they lift. The wheel is not latched: a notch is a whole
+        // event with nothing to be halfway through.
+        let scrolling = ptr.scroll_x != 0.0 || ptr.scroll_y != 0.0;
+        let scroll_ended = pad.scroll_ended || ptr.scroll_ended;
+        if scrolling && !scroll_gesture.active {
+            scroll_gesture.active = true;
+            scroll_gesture.to_client = pointer_on_client;
+        }
+        // The gesture is over when the fingers that made it are no longer both there, or when
+        // libinput says they lifted.
+        //
+        // Not on pad.scroll_ended. That fires as soon as the pan stops leading, which is what a
+        // swipe does as it slows down before letting go, and clearing the latch there let the last
+        // drift of the same swipe be re-decided against a Super that had already been released.
+        // Not on the whole hand leaving either: a two-finger scroll ends when one of the two does,
+        // and a palm left on the pad must not keep a finished gesture's destination alive.
+        let pad_driving = set.trackpad_mode == input::TrackpadMode::Custom;
+        if ptr.scroll_ended || (pad_driving && pad.fingers < 2) {
+            scroll_gesture.active = false;
+        }
+        let scroll_to_client = scroll_gesture.active && scroll_gesture.to_client;
+        let scroll_to_canvas = scroll_gesture.active && !scroll_gesture.to_client;
         if let Some(cur) = cursor.as_mut() {
             cursor::move_by(cur, ptr.dx as i32, ptr.dy as i32);
         }
@@ -1772,13 +1834,6 @@ fn main() {
                 let hwheel = if set.invert_scroll { -ptr.hwheel } else { ptr.hwheel };
                 cam.cx += hwheel * set.hwheel_pan / cam.zoom;
             }
-            // Finger scroll pans, pinch zooms at the cursor. The camera moves
-            // against the fingers so the canvas travels with them, matching
-            // touch.rs.
-            if ptr.scroll_x != 0.0 || ptr.scroll_y != 0.0 {
-                cam.cx -= ptr.scroll_x / cam.zoom;
-                cam.cy += ptr.scroll_y / cam.zoom;
-            }
             if ptr.pinch != 1.0 {
                 camera::zoom_at(
                     &mut cam,
@@ -1793,6 +1848,17 @@ fn main() {
                 // settling toward is no longer where we are going.
                 zoom_ease = None;
             }
+        }
+
+        // Finger scroll pans the canvas when the gesture belongs to the canvas, whatever the
+        // keyboard has done since it started. The camera moves against the fingers so the canvas
+        // travels with them, matching touch.rs.
+        //
+        // Outside the Super test on purpose: that test decided the destination, once, above. A
+        // gesture that began on the canvas finishes on the canvas.
+        if scroll_to_canvas {
+            cam.cx -= ptr.scroll_x / cam.zoom;
+            cam.cy += ptr.scroll_y / cam.zoom;
         }
 
         // Nothing herds the zoom any more. A pinch is left exactly where the fingers left
@@ -2744,9 +2810,17 @@ fn main() {
             );
             // The stop goes even when the pointer has wandered off the window, because a
             // client left holding an open sequence is the thing being fixed.
-            let scroll_ended = pad.scroll_ended || ptr.scroll_ended;
-            if pointer_on_client || scroll_ended {
-                forward_scroll(&mut state, &ptr, scroll_ended, &mut scroll_gesture, time_ms, &set);
+            if pointer_on_client || scroll_to_client || scroll_ended {
+                forward_scroll(
+                    &mut state,
+                    &ptr,
+                    pointer_on_client,
+                    scroll_to_client,
+                    scroll_ended,
+                    &mut scroll_gesture,
+                    time_ms,
+                    &set,
+                );
             }
             forward_pinch(
                 &mut state,
