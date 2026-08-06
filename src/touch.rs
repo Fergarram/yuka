@@ -94,6 +94,13 @@ const TAP_NEVER: f64 = -1000.0;
 #[derive(Clone, Copy)]
 struct Slot {
     active: bool,
+    // The kernel's id for the finger in this slot, or -1 for empty.
+    //
+    // Kept because active is not enough to tell one finger from another. Multitouch protocol B
+    // may hand a slot a new tracking id without passing through -1, which is one finger leaving
+    // and another arriving in the same breath, and everything measured from where "this slot"
+    // was a frame ago is measured from the wrong finger.
+    id: i32,
     x: i32,
     y: i32,
     // When this finger landed, counted rather than timed: the pointer picks the
@@ -191,6 +198,10 @@ pub struct Touchpad {
     // a tap. Trackpad thresholds are hard to guess at, and this turns tuning them
     // into reading numbers.
     debug_taps: bool,
+    // Report any single frame that moves the cursor further than a hand could have, with the
+    // state that produced it. For the teleport that only happens sometimes: it has to be caught
+    // in the act, because everything about it looks ordinary a frame later.
+    debug_jumps: bool,
     // Pointer tracking: which slot drives the cursor, its previous pos, and the
     // fractional remainder for slow motion.
     primary_slot: Option<usize>,
@@ -388,6 +399,7 @@ pub fn open(path: &str, set: &Settings) -> Option<Touchpad> {
         load: 0,
         slots: [Slot {
             active: false,
+            id: -1,
             x: 0,
             y: 0,
             seq: 0,
@@ -418,6 +430,7 @@ pub fn open(path: &str, set: &Settings) -> Option<Touchpad> {
         down: 0,
         contact_max: 0,
         debug_taps: std::env::var("OM_WM_DEBUG_TAP").is_ok(),
+        debug_jumps: std::env::var("OM_WM_DEBUG_JUMP").is_ok(),
         primary_slot: None,
         prev_single: None,
         ptr_accum_x: 0.0,
@@ -512,6 +525,7 @@ pub fn reset(tp: &mut Touchpad, set: &Settings) {
     read_events(tp, set);
     tp.slots = [Slot {
         active: false,
+        id: -1,
         x: 0,
         y: 0,
         seq: 0,
@@ -655,8 +669,12 @@ fn read_events(tp: &mut Touchpad, set: &Settings) {
                 }
                 let was = tp.slots[tp.cur].active;
                 let now = value != -1;
+                // One finger swapped for another in the same slot, with no -1 in between. The
+                // slot is as new as one that just landed, even though it never went empty.
+                let replaced = was && now && tp.slots[tp.cur].id != value;
                 tp.slots[tp.cur].active = now;
-                if now && !was {
+                tp.slots[tp.cur].id = value;
+                if now && (!was || replaced) {
                     tp.slots[tp.cur].start_set = false;
                     tp.slots[tp.cur].seq = tp.seq_next;
                     tp.seq_next = tp.seq_next.wrapping_add(1);
@@ -664,11 +682,33 @@ fn read_events(tp: &mut Touchpad, set: &Settings) {
                     tp.slots[tp.cur].still_x = tp.slots[tp.cur].x;
                     tp.slots[tp.cur].still_y = tp.slots[tp.cur].y;
                     tp.slots[tp.cur].resting = false;
-                    if tp.down == 0 {
-                        tp.contact_max = 0;
+                    // A replacement is a landing and a lift at once, so the count is unchanged.
+                    if !was {
+                        if tp.down == 0 {
+                            tp.contact_max = 0;
+                        }
+                        tp.down += 1;
+                        tp.contact_max = tp.contact_max.max(tp.down);
                     }
-                    tp.down += 1;
-                    tp.contact_max = tp.contact_max.max(tp.down);
+                }
+                if replaced {
+                    // Everything measured from where a finger was is now measured from a
+                    // different finger. The pointer would step by the gap between the two, which
+                    // is the cursor teleporting across the screen, and the centroid would take
+                    // the canvas with it. Drop the baselines and let them be retaken: the
+                    // pointer re-arms after its usual travel, so nothing moves until you mean it.
+                    if tp.primary_slot == Some(tp.cur) {
+                        tp.prev_single = None;
+                        tp.ptr_ref = None;
+                        tp.ptr_armed = false;
+                    }
+                    tp.prev_centroid = None;
+                    tp.prev_dist = None;
+                    tp.pan_ref = None;
+                    tp.pan_armed = false;
+                    tp.zoom_ref = None;
+                    tp.zoom_armed = false;
+                    tp.swipe_ref = None;
                 }
                 if was && !now {
                     tp.down = tp.down.saturating_sub(1);
@@ -997,6 +1037,18 @@ fn update_gesture(tp: &mut Touchpad, cursor: Option<&mut Cursor>, set: &Settings
             _ => pointer_slot(tp, set),
         };
         if primary != tp.primary_slot {
+            if tp.debug_jumps {
+                let at = |o: Option<usize>| match o {
+                    Some(i) => format!("slot {i} at {},{}", tp.slots[i].x, tp.slots[i].y),
+                    None => "none".to_string(),
+                };
+                println!(
+                    "om_wm: pointer primary {} -> {} (count {count}, btn {})",
+                    at(tp.primary_slot),
+                    at(primary),
+                    tp.btn_down
+                );
+            }
             tp.primary_slot = primary;
             tp.prev_single = None;
             // A different finger is driving: park until it has moved deliberately.
@@ -1031,6 +1083,21 @@ fn update_gesture(tp: &mut Touchpad, cursor: Option<&mut Cursor>, set: &Settings
                     let idy = tp.ptr_accum_y.trunc();
                     tp.ptr_accum_x -= idx;
                     tp.ptr_accum_y -= idy;
+                    // A frame that moves the cursor this far is not a finger moving, it is a
+                    // baseline that belongs to a different contact than the position being
+                    // measured. Report everything that went into it.
+                    const JUMP_PX: f32 = 30.0;
+                    if tp.debug_jumps && (idx.abs() >= JUMP_PX || idy.abs() >= JUMP_PX) {
+                        println!(
+                            "om_wm: pointer jump {idx},{idy} from slot {p} \
+                             finger {fx},{fy} prev {px},{py} count {count} \
+                             ids {:?} active {:?} resting {:?} faint {:?}",
+                            tp.slots.iter().map(|s| s.id).collect::<Vec<_>>(),
+                            tp.slots.iter().map(|s| s.active).collect::<Vec<_>>(),
+                            tp.slots.iter().map(|s| s.resting).collect::<Vec<_>>(),
+                            tp.slots.iter().map(|s| s.faint).collect::<Vec<_>>(),
+                        );
+                    }
                     cursor::move_by(cur, idx as i32, idy as i32);
                 }
                 tp.prev_single = Some((fx, fy));
