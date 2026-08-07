@@ -255,15 +255,24 @@ pub struct Settings {
     // Perspective field of view in degrees. Larger means more parallax on a lifted
     // window.
     pub fov_deg: f32,
-    // How fast the view travels when something sends it somewhere: the three-finger swipes, the
-    // 1:1 detent, and being sent to a window by Super with a double click or a three-finger double
-    // tap. A pinch is never followed by a journey, and neither is Super+Escape.
+    // The spring that carries the view when something sends it somewhere: the three-finger swipes,
+    // the 1:1 detent, and being sent to a window by Super with a double click or a three-finger
+    // double tap. A pinch is never followed by a journey, and neither is Super+Escape.
     //
-    // A rate rather than a duration: the fraction of the distance still to go that is covered each
-    // second, so every journey has the same shape and the long ones take longer. What is left
-    // after t seconds is about e^(-rate * t), so 12 arrives in about a quarter of a second and 6 in
-    // about half of one. 0 makes them jump instead of travel.
-    pub zoom_ease_rate: f32,
+    // Stated as a frequency and a damping ratio rather than as a stiffness and a friction, because
+    // those two are what you can feel. spring_hz is how fast it wants to move, roughly how many
+    // round trips a second it would make with no damping at all. spring_damping is how much of
+    // that oscillation survives:
+    //
+    //   1.0   critically damped, the fastest arrival with no overshoot at all
+    //   0.8   a small overshoot and settle, which reads as weight
+    //   0.5   a visible bounce
+    //   1.5   heavy and slow, arriving from one side
+    //
+    // The two together set the duration; there is no separate number for it. A journey is over
+    // when the spring is within a hair of its destination and has stopped moving.
+    pub spring_hz: f32,
+    pub spring_damping: f32,
     // How close to zoom_default the zoom may sit and still be taken the rest of the way, as a
     // difference in scale. A zoom of 0.98 or 1.0004 costs every window on screen a resample
     // and shows nothing for it: the pixel grid disengages, text softens, and nothing was
@@ -356,7 +365,8 @@ pub fn defaults() -> Settings {
         zoom_default: 1.0,
         overview_zoom: 0.57,
         fov_deg: 40.0,
-        zoom_ease_rate: 12.0,
+        spring_hz: 2.5,
+        spring_damping: 0.85,
         zoom_detent: 0.05,
         resize_corner_hold: 0.75,
     }
@@ -519,7 +529,8 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
         "zoom_default" => f32_key!(zoom_default),
         "overview_zoom" => f32_key!(overview_zoom),
         "fov_deg" => f32_key!(fov_deg),
-        "zoom_ease_rate" => f32_key!(zoom_ease_rate),
+        "spring_hz" => f32_key!(spring_hz),
+        "spring_damping" => f32_key!(spring_damping),
         "zoom_detent" => f32_key!(zoom_detent),
         "resize_corner_hold" => f32_key!(resize_corner_hold),
         "swipe_zoom_at_cursor" => match value {

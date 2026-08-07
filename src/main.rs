@@ -79,17 +79,49 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 // a window and a right drag resizes it. Released, everything belongs to whatever is under the
 // pointer, which is what a compositor is supposed to do.
 
-// A zoom travelling to a scale, holding one screen point still on the way.
+// A journey the view is on, and the spring carrying it.
 //
-// Unless it is going somewhere, in which case there is no point to hold: `to` is a canvas
-// position the view's centre travels to alongside the scale, which is what "bring me that
-// window" means. The screen anchor is what the swipes and the detent use, where the scale
-// changes but the view stays where it was pointed.
-struct ZoomEase {
-    ax: f32,
-    ay: f32,
+// The spring drives a progress from 0 to 1 rather than the zoom and the centre themselves, and
+// both are read off that progress. Which is the whole reason it is built this way: one spring
+// cannot fall out of step with itself, so the scale and the pan arrive together, and when it
+// overshoots they overshoot together and come back together. Two springs, one per half, would
+// have to be kept in agreement about where "past the end" is.
+//
+// `to` is a canvas position the centre travels to, which is what "bring me that window" means.
+// Without it the journey turns around a fixed screen point, ax and ay, which is what the swipes
+// and the 1:1 detent do: the scale changes and the view stays where it was pointed.
+struct Journey {
+    // The scale it left and the one it is going to. Read geometrically: scale is not perceived
+    // linearly, so halfway along is the geometric mean rather than the arithmetic one.
+    from_zoom: f32,
     target: f32,
     to: Option<(f32, f32)>,
+    // How far the centre was from its destination when it started, in screen pixels. Screen
+    // rather than canvas, because what you watch is the canvas distance times the zoom and the
+    // zoom is moving: eased in canvas units the view barely moves at first and then slides at the
+    // end, which is a pan and a zoom disagreeing about how far along they are.
+    from_off: (f32, f32),
+    ax: f32,
+    ay: f32,
+    // The spring itself: where it is between the two ends, and how fast. Progress can pass 1 and
+    // come back, which is the overshoot.
+    p: f32,
+    v: f32,
+}
+
+// Start one from where the view is now.
+fn journey_to(
+    cam: &camera::Camera,
+    target: f32,
+    to: Option<(f32, f32)>,
+    ax: f32,
+    ay: f32,
+) -> Journey {
+    let from_off = match to {
+        Some((tx, ty)) => ((tx - cam.cx) * cam.zoom, (ty - cam.cy) * cam.zoom),
+        None => (0.0, 0.0),
+    };
+    Journey { from_zoom: cam.zoom, target, to, from_off, ax, ay, p: 0.0, v: 0.0 }
 }
 
 // A cursor image a client has committed, and where the pointer is inside it.
@@ -1345,7 +1377,7 @@ fn main() {
     // Two things use it. A released pinch heads for 1:1 around the fingers, and the overview
     // heads for overview_zoom around the middle of the screen, which is what "the centre of
     // the camera" means once it is a screen point.
-    let mut zoom_ease: Option<ZoomEase> = None;
+    let mut zoom_ease: Option<Journey> = None;
     // A scale the view was deliberately sent to, when it is not zoom_default: the fit of a window
     // it was told to go to. Remembered so the 1:1 detent leaves it alone.
     //
@@ -1981,7 +2013,7 @@ fn main() {
             } else {
                 (ray::screen_width() as f32 * 0.5, ray::screen_height() as f32 * 0.5)
             };
-            zoom_ease = Some(ZoomEase { ax, ay, target, to: None });
+            zoom_ease = Some(journey_to(&cam, target, None, ax, ay));
         }
 
         // The detent at 1:1, tested every frame rather than when a pinch ends.
@@ -2003,70 +2035,65 @@ fn main() {
             let off = cam.zoom - set.zoom_default;
             if off != 0.0 && off.abs() <= set.zoom_detent {
                 let (ax, ay) = pointer_xy.unwrap_or((0, 0));
-                zoom_ease = Some(ZoomEase {
-                    ax: ax as f32,
-                    ay: ay as f32,
-                    target: set.zoom_default,
-                    to: None,
-                });
+                zoom_ease = Some(journey_to(&cam, set.zoom_default, None, ax as f32, ay as f32));
             }
         }
 
-        if let Some(ease) = zoom_ease.as_ref() {
-            let (ax, ay, target, to) = (ease.ax, ease.ay, ease.target, ease.to);
-            // Close enough that another step would be invisible: land on 1:1 exactly, so the
-            // pixel grid engages rather than sitting a hair off it forever.
-            const SETTLED: f32 = 0.001;
-            let t = (set.zoom_ease_rate * ray::frame_time()).min(1.0);
+        if let Some(j) = zoom_ease.as_mut() {
+            // Advance the spring. Stiffness and friction from the frequency and damping ratio in
+            // the settings, which is the same spring written in the units you can feel: an
+            // undamped spring at spring_hz would make that many round trips a second, and the
+            // damping says how much of that survives.
+            //
+            // dt is capped, because a frame that took a long time is a stall rather than a slow
+            // moment, and integrating one whole would fling the spring somewhere absurd.
+            let dt = ray::frame_time().min(0.05);
+            let w = std::f32::consts::TAU * set.spring_hz;
+            let k = w * w;
+            let c = 2.0 * set.spring_damping * w;
+            j.v += (k * (1.0 - j.p) - c * j.v) * dt;
+            j.p += j.v * dt;
+
+            let (ax, ay, target, to, p) = (j.ax, j.ay, j.target, j.to, j.p);
+            // Arrived when the spring is at rest at its destination, not merely passing through
+            // it: an underdamped spring crosses the target several times on the way to stopping,
+            // and cutting it off at the first crossing is what makes a bounce look like a glitch.
+            let landed = (p - 1.0).abs() < 0.001 && j.v.abs() < 0.01;
+            // Where the scale is at this progress. Geometric, so halfway is the geometric mean:
+            // half of a linear ease from 0.1 to 1.0 is 0.55, which is most of the way there to
+            // the eye and a tenth of the way there to the maths.
+            let want = if j.from_zoom > 0.0 && target > 0.0 {
+                (j.from_zoom * (target / j.from_zoom).powf(p)).clamp(set.zoom_min, set.zoom_max)
+            } else {
+                target
+            };
+            let from_off = j.from_off;
             match to {
                 // Going somewhere: the centre travels with the scale, at the same rate, so the
                 // two arrive together and the window grows into the middle of the view rather
                 // than sliding across it afterwards. No screen point is held, because the
                 // whole idea is that the view is moving.
+                // Going somewhere. The screen offset it started with shrinks by the same
+                // progress, and the centre is whatever puts that offset on screen at the scale
+                // this progress asks for, so the window closes on the middle of the view at a
+                // steady rate rather than sliding into place after the zoom has finished.
                 Some((tx, ty)) => {
-                    let prev = cam.zoom;
-                    // Geometrically rather than linearly, because scale is not perceived
-                    // linearly: half of a linear ease from 0.1 to 1.0 is 0.55, which is most of
-                    // the way there to the eye and a tenth of the way there to the maths. Stepping
-                    // by a constant ratio makes the view close at a steady rate however far out it
-                    // starts, which is what "flying to" a window should look like.
-                    cam.zoom = if (target - prev).abs() < SETTLED {
-                        target
-                    } else {
-                        (prev * (target / prev).powf(t)).clamp(set.zoom_min, set.zoom_max)
-                    };
-                    // And the pan is eased on screen rather than on the canvas. The distance left
-                    // is in canvas units, but what you watch is that distance times the zoom, and
-                    // the zoom is climbing: easing the canvas offset at a steady rate means the
-                    // thing on screen barely moves at first and then slides at the end, which is
-                    // the arriving-then-centring this is fixing. Taking the zoom's own step out of
-                    // the offset leaves the screen distance closing steadily instead.
-                    let ratio = if cam.zoom > 0.0 { prev / cam.zoom } else { 1.0 };
-                    cam.cx = tx - (tx - cam.cx) * (1.0 - t) * ratio;
-                    cam.cy = ty - (ty - cam.cy) * (1.0 - t) * ratio;
-                    // Arrived when both have. A centre still sliding under a scale that has
-                    // landed is a journey that is not over, and half a screen pixel is under
-                    // anything anyone can see, at whatever zoom it lands at.
-                    let here = 0.5 / cam.zoom.max(0.001);
-                    if (cam.zoom - target).abs() < SETTLED
-                        && (tx - cam.cx).abs() < here
-                        && (ty - cam.cy).abs() < here
-                    {
+                    cam.zoom = want;
+                    let left = 1.0 - p;
+                    cam.cx = tx - from_off.0 * left / cam.zoom;
+                    cam.cy = ty - from_off.1 * left / cam.zoom;
+                    if landed {
+                        cam.zoom = target;
                         cam.cx = tx;
                         cam.cy = ty;
                         zoom_ease = None;
                     }
                 }
-                // Staying where it is pointed, turning around a screen point. Linear in scale,
-                // unchanged: these are the swipes and the 1:1 detent, journeys between two scales
-                // that are already close together, where the difference does not show.
+                // Staying where it is pointed, turning around a screen point: the swipes and the
+                // 1:1 detent. Applied as this frame's factor so the anchor is held by the same
+                // arithmetic a pinch uses.
                 None => {
-                    let next = if (target - cam.zoom).abs() < SETTLED {
-                        target
-                    } else {
-                        cam.zoom + (target - cam.zoom) * t
-                    };
-                    let factor = next / cam.zoom;
+                    let factor = if cam.zoom > 0.0 { want / cam.zoom } else { 1.0 };
                     camera::zoom_at(
                         &mut cam,
                         factor,
@@ -2076,11 +2103,17 @@ fn main() {
                         ray::screen_height() as f32,
                         &set,
                     );
-                    // Near the target from either side, not merely past it. Testing for "at
-                    // least 1:1" read correctly climbing back from a zoom out and was already
-                    // true on the first frame of one coming down from above, which cancelled
-                    // it after a step too small to see.
-                    if (cam.zoom - target).abs() < SETTLED {
+                    if landed {
+                        let factor = if cam.zoom > 0.0 { target / cam.zoom } else { 1.0 };
+                        camera::zoom_at(
+                            &mut cam,
+                            factor,
+                            ax,
+                            ay,
+                            ray::screen_width() as f32,
+                            ray::screen_height() as f32,
+                            &set,
+                        );
                         zoom_ease = None;
                     }
                 }
@@ -2633,7 +2666,7 @@ fn main() {
                         focus_window(&mut state, &mut focused, Some(window));
                         let target = zoom_for_window(&windows, &surf, &set);
                         zoom_placed = (target != set.zoom_default).then_some(target);
-                        zoom_ease = Some(ZoomEase { ax: 0.0, ay: 0.0, target, to: Some((wx, wy)) });
+                        zoom_ease = Some(journey_to(&cam, target, Some((wx, wy)), 0.0, 0.0));
                         pressed = false;
                     }
                 } else {
@@ -2658,7 +2691,7 @@ fn main() {
                     focus_window(&mut state, &mut focused, Some(window));
                     let target = zoom_for_window(&windows, &surf, &set);
                     zoom_placed = (target != set.zoom_default).then_some(target);
-                    zoom_ease = Some(ZoomEase { ax: 0.0, ay: 0.0, target, to: Some((wx, wy)) });
+                    zoom_ease = Some(journey_to(&cam, target, Some((wx, wy)), 0.0, 0.0));
                 }
             }
         }
