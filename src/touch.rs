@@ -173,7 +173,16 @@ pub struct Touchpad {
     // Where three fingers were when they landed, and whether they have already been counted
     // as a swipe. Latched so a hand that keeps travelling only fires once.
     swipe_ref: Option<(f32, f32)>,
-    swiped: bool,
+    // A three-finger gesture in progress: whether the fingers are down, and how far they have
+    // gone from where they landed, up positive, with the sideways travel alongside it.
+    //
+    // Kept rather than latched at the threshold, because the swipe fires when the fingers lift
+    // rather than when they cross it. Crossing a line is not something a hand can feel; letting go
+    // is, and it also means going further than the threshold is allowed instead of being the
+    // moment the gesture is snatched away.
+    swipe_live: bool,
+    swipe_travel: f32,
+    swipe_across: f32,
     // Whether the two-finger gesture now in progress has zoomed, or panned, at any point, so
     // that the end of the gesture can be reported as the end of each. Not simply the previous
     // frame's mode: a gesture is allowed to move between panning and zooming while the
@@ -308,6 +317,13 @@ pub struct Gesture {
     // Three fingers tapped twice, quickly, without travelling: bring the window under the cursor
     // to me. The same journey Super with a double click makes, asked for with one hand.
     pub three_finger_double_tap: bool,
+    // Three fingers are on the pad. What they are doing is the fields below; this is only that a
+    // gesture is in progress, which is what tells a preview when to start and when to be taken
+    // back.
+    pub swiping: bool,
+    // How far the swipe has travelled toward firing, signed: positive up, negative down, 1 at the
+    // trigger. Zero once it has fired, or while the travel is mostly sideways.
+    pub swipe_progress: f32,
     pub swipe_up: bool,
     pub swipe_down: bool,
 }
@@ -324,6 +340,8 @@ impl Default for Gesture {
             scroll_ended: false,
             fingers: 0,
             three_finger_double_tap: false,
+            swiping: false,
+            swipe_progress: 0.0,
             swipe_up: false,
             swipe_down: false,
         }
@@ -429,7 +447,9 @@ pub fn open(path: &str, set: &Settings) -> Option<Touchpad> {
         prev_dist: None,
         mode: GestureMode::None,
         swipe_ref: None,
-        swiped: false,
+        swipe_live: false,
+        swipe_travel: 0.0,
+        swipe_across: 0.0,
         zoomed_gesture: false,
         panned_gesture: false,
         pan_ref: None,
@@ -558,7 +578,9 @@ pub fn reset(tp: &mut Touchpad, set: &Settings) {
     tp.prev_dist = None;
     tp.mode = GestureMode::None;
     tp.swipe_ref = None;
-    tp.swiped = false;
+    tp.swipe_live = false;
+    tp.swipe_travel = 0.0;
+    tp.swipe_across = 0.0;
     tp.pan_ref = None;
     tp.pan_armed = false;
     tp.zoom_ref = None;
@@ -1071,8 +1093,25 @@ fn update_gesture(tp: &mut Touchpad, cursor: Option<&mut Cursor>, set: &Settings
     }
 
     if count != 3 {
+        // The fingers left, so this is where a swipe fires. Not at the threshold: crossing a line
+        // is not something a hand can feel, and firing there ends the gesture while your hand is
+        // still making it. Going past the threshold is allowed and simply pulls the view further,
+        // and letting go is what commits it.
+        if tp.swipe_live {
+            let threshold = tp.span * set.swipe_frac;
+            let far = tp.swipe_travel.abs();
+            if threshold > 0.0 && far >= threshold && far > tp.swipe_across {
+                if tp.swipe_travel > 0.0 {
+                    out.swipe_up = true;
+                } else {
+                    out.swipe_down = true;
+                }
+            }
+        }
         tp.swipe_ref = None;
-        tp.swiped = false;
+        tp.swipe_live = false;
+        tp.swipe_travel = 0.0;
+        tp.swipe_across = 0.0;
     }
 
     // Pointer motion is one finger's job: two fingers are a gesture, wherever that gesture
@@ -1208,24 +1247,34 @@ fn update_gesture(tp: &mut Touchpad, cursor: Option<&mut Cursor>, set: &Settings
             (pts[0].0 + pts[1].0 + pts[2].0) / 3.0,
             (pts[0].1 + pts[1].1 + pts[2].1) / 3.0,
         );
+        // Three fingers are on the pad, whatever they are doing with them. The caller uses this
+        // to know a gesture is being made rather than having been made: a swipe that has not
+        // reached its threshold is still worth showing, and one that never reaches it has to be
+        // taken back.
+        out.swiping = true;
+        tp.swipe_live = true;
         match tp.swipe_ref {
             None => tp.swipe_ref = Some(centroid),
-            Some(r) if !tp.swiped => {
+            Some(r) => {
                 // Up is y decreasing, the same direction the scroll convention calls
                 // positive. Whichever way it went has to lead the sideways travel, or a
                 // diagonal drag across the pad would count as one.
                 let up = r.1 - centroid.1;
                 let across = (centroid.0 - r.0).abs();
-                if up.abs() >= tp.span * set.swipe_frac && up.abs() > across {
-                    tp.swiped = true;
-                    if up > 0.0 {
-                        out.swipe_up = true;
-                    } else {
-                        out.swipe_down = true;
-                    }
+                tp.swipe_travel = up;
+                tp.swipe_across = across;
+                let threshold = tp.span * set.swipe_frac;
+                // How far along the gesture is, as a signed fraction of what it takes to fire:
+                // positive up, negative down, 1 at the trigger. Reported every frame and not
+                // clamped anywhere near the trigger: a hand that keeps going should keep being
+                // answered, and how much it is answered by is the caller's business rather than
+                // this one's. The bound is only against a pad reporting something impossible. A
+                // drag that is mostly sideways reports nothing, on the same test that stops it
+                // firing.
+                if threshold > 0.0 && up.abs() > across {
+                    out.swipe_progress = (up / threshold).clamp(-8.0, 8.0);
                 }
             }
-            _ => {}
         }
     }
 

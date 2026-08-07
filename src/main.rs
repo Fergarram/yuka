@@ -107,6 +107,11 @@ struct Journey {
     // come back, which is the overshoot.
     p: f32,
     v: f32,
+    // Which pair of spring numbers carries it. A swipe wants a different character from a journey
+    // to a window: the fingers already made the motion, so the spring is only finishing it, and
+    // bounce there reads as the view arguing with the hand that just let go. Read per frame rather
+    // than copied in, so both pairs stay live to a reload.
+    swipe: bool,
 }
 
 // Start one from where the view is now.
@@ -116,12 +121,13 @@ fn journey_to(
     to: Option<(f32, f32)>,
     ax: f32,
     ay: f32,
+    swipe: bool,
 ) -> Journey {
     let from_off = match to {
         Some((tx, ty)) => ((tx - cam.cx) * cam.zoom, (ty - cam.cy) * cam.zoom),
         None => (0.0, 0.0),
     };
-    Journey { from_zoom: cam.zoom, target, to, from_off, ax, ay, p: 0.0, v: 0.0 }
+    Journey { from_zoom: cam.zoom, target, to, from_off, ax, ay, p: 0.0, v: 0.0, swipe }
 }
 
 // A cursor image a client has committed, and where the pointer is inside it.
@@ -1390,6 +1396,19 @@ fn main() {
     // Only while the zoom is still sitting where it was put. Move it by any means, by a hair, and
     // this stops matching and the detent goes back to work.
     let mut zoom_placed: Option<f32> = None;
+    // A three-finger swipe being made rather than having been made: where the view was when the
+    // fingers landed, what each direction would do from there, and where the scale is turned
+    // around. Held for as long as the fingers are down.
+    struct SwipePreview {
+        from_zoom: f32,
+        ax: f32,
+        ay: f32,
+        // What a full swipe each way reaches. Either a real destination, or a small pull for a
+        // direction that has nowhere to go.
+        up: f32,
+        down: f32,
+    }
+    let mut swipe_preview: Option<SwipePreview> = None;
     // A pinch sequence in progress toward a client, and how far it has scaled since it began.
     // The protocol reports the total rather than the step, and a sequence outlives a frame.
     let mut pinch_active = false;
@@ -1994,6 +2013,85 @@ fn main() {
         // cannot say where to go, and made to guess it moved the canvas out from under work
         // that only wanted the keyboard back.
         const NEAR: f32 = 0.001;
+
+        // The swipe, shown while it is being made.
+        //
+        // The destinations are worked out once, when the fingers land, and held: deciding them
+        // per frame would mean the preview chasing a target that the preview itself is moving.
+        // A direction with nowhere to go gets a small pull instead, in the direction of the
+        // gesture, which is what a dry swipe gives way by before springing back.
+        if pad.swiping {
+            let anchor = if set.swipe_zoom_at_cursor {
+                let (px, py) = pointer_xy.unwrap_or((0, 0));
+                (px as f32, py as f32)
+            } else {
+                (ray::screen_width() as f32 * 0.5, ray::screen_height() as f32 * 0.5)
+            };
+            let preview = swipe_preview.get_or_insert_with(|| {
+                let dry = set.swipe_dry_frac;
+                SwipePreview {
+                    from_zoom: cam.zoom,
+                    ax: anchor.0,
+                    ay: anchor.1,
+                    up: if (cam.zoom - set.overview_zoom).abs() > NEAR {
+                        set.overview_zoom
+                    } else {
+                        cam.zoom * (1.0 - dry)
+                    },
+                    down: if (cam.zoom - set.zoom_default).abs() > NEAR {
+                        set.zoom_default
+                    } else {
+                        cam.zoom * (1.0 + dry)
+                    },
+                }
+            });
+            // How far along the view goes for how far the fingers went.
+            //
+            // Up to the trigger it is a straight fraction of the travel, so the gesture feels
+            // attached to the hand and lifting early can take it back. Past the trigger it becomes
+            // a rubber band: each further millimetre buys less than the one before, approaching
+            // 1 + swipe_stretch_frac and never reaching it. Never a wall, because a hand that keeps
+            // pulling and gets nothing back stops feeling connected to anything, which is the one
+            // thing this whole preview exists to avoid.
+            //
+            // The two pieces meet at the trigger with the same slope, so there is no step where
+            // the resistance begins.
+            let p = pad.swipe_progress.abs();
+            let base = set.swipe_preview_frac;
+            let travel = if p <= 1.0 {
+                base * p
+            } else {
+                // Past the goal, two things are being asked separately. How far it can ever be
+                // pulled is swipe_stretch_frac, which sets where this curve flattens out. How hard
+                // it fights getting there is swipe_resist, which divides the rate it gives at.
+                let room = (1.0 + set.swipe_stretch_frac - base).max(0.0001);
+                let give = base / set.swipe_resist;
+                base + room * (1.0 - 1.0 / (1.0 + (p - 1.0) * give / room))
+            };
+            if travel > 0.0 {
+                let dest = if pad.swipe_progress > 0.0 { preview.up } else { preview.down };
+                let want = if preview.from_zoom > 0.0 && dest > 0.0 {
+                    (preview.from_zoom * (dest / preview.from_zoom).powf(travel))
+                        .clamp(set.zoom_min, set.zoom_max)
+                } else {
+                    cam.zoom
+                };
+                let factor = if cam.zoom > 0.0 { want / cam.zoom } else { 1.0 };
+                camera::zoom_at(
+                    &mut cam,
+                    factor,
+                    preview.ax,
+                    preview.ay,
+                    ray::screen_width() as f32,
+                    ray::screen_height() as f32,
+                    &set,
+                );
+                // The fingers own the view while they are on the pad, so anything the view was
+                // still travelling toward is no longer where it is going.
+                zoom_ease = None;
+            }
+        }
+
         let target = if pad.swipe_up {
             ((cam.zoom - set.overview_zoom).abs() > NEAR).then_some(set.overview_zoom)
         } else if pad.swipe_down {
@@ -2013,7 +2111,23 @@ fn main() {
             } else {
                 (ray::screen_width() as f32 * 0.5, ray::screen_height() as f32 * 0.5)
             };
-            zoom_ease = Some(journey_to(&cam, target, None, ax, ay));
+            zoom_ease = Some(journey_to(&cam, target, None, ax, ay, true));
+        }
+        // It fired, so the preview is spent rather than mistaken: the journey it just started
+        // carries on from wherever the fingers had got the view to, and nothing is taken back.
+        if pad.swipe_up || pad.swipe_down {
+            swipe_preview = None;
+        }
+        // And the fingers left without it firing, or with nothing for it to do. Back to where the
+        // view was when they landed, on the same spring as everything else, which is what makes a
+        // dry gesture read as an answer rather than as nothing happening.
+        if !pad.swiping {
+            if let Some(preview) = swipe_preview.take() {
+                if (cam.zoom - preview.from_zoom).abs() > NEAR {
+                    zoom_ease =
+                        Some(journey_to(&cam, preview.from_zoom, None, preview.ax, preview.ay, true));
+                }
+            }
         }
 
         // The detent at 1:1, tested every frame rather than when a pinch ends.
@@ -2031,11 +2145,16 @@ fn main() {
         // its own anchor, and would otherwise be re-anchored to a moving pointer every frame.
         const PLACED: f32 = 0.001;
         let sits_where_placed = zoom_placed.map_or(false, |z| (cam.zoom - z).abs() < PLACED);
-        if set.zoom_detent > 0.0 && zoom_ease.is_none() && ptr.pinch == 1.0 && !sits_where_placed {
+        if set.zoom_detent > 0.0
+            && zoom_ease.is_none()
+            && ptr.pinch == 1.0
+            && !pad.swiping
+            && !sits_where_placed
+        {
             let off = cam.zoom - set.zoom_default;
             if off != 0.0 && off.abs() <= set.zoom_detent {
                 let (ax, ay) = pointer_xy.unwrap_or((0, 0));
-                zoom_ease = Some(journey_to(&cam, set.zoom_default, None, ax as f32, ay as f32));
+                zoom_ease = Some(journey_to(&cam, set.zoom_default, None, ax as f32, ay as f32, false));
             }
         }
 
@@ -2048,9 +2167,14 @@ fn main() {
             // dt is capped, because a frame that took a long time is a stall rather than a slow
             // moment, and integrating one whole would fling the spring somewhere absurd.
             let dt = ray::frame_time().min(0.05);
-            let w = std::f32::consts::TAU * set.spring_hz;
+            let (hz, damping) = if j.swipe {
+                (set.swipe_spring_hz, set.swipe_spring_damping)
+            } else {
+                (set.spring_hz, set.spring_damping)
+            };
+            let w = std::f32::consts::TAU * hz;
             let k = w * w;
-            let c = 2.0 * set.spring_damping * w;
+            let c = 2.0 * damping * w;
             j.v += (k * (1.0 - j.p) - c * j.v) * dt;
             j.p += j.v * dt;
 
@@ -2666,7 +2790,7 @@ fn main() {
                         focus_window(&mut state, &mut focused, Some(window));
                         let target = zoom_for_window(&windows, &surf, &set);
                         zoom_placed = (target != set.zoom_default).then_some(target);
-                        zoom_ease = Some(journey_to(&cam, target, Some((wx, wy)), 0.0, 0.0));
+                        zoom_ease = Some(journey_to(&cam, target, Some((wx, wy)), 0.0, 0.0, false));
                         pressed = false;
                     }
                 } else {
@@ -2691,7 +2815,7 @@ fn main() {
                     focus_window(&mut state, &mut focused, Some(window));
                     let target = zoom_for_window(&windows, &surf, &set);
                     zoom_placed = (target != set.zoom_default).then_some(target);
-                    zoom_ease = Some(journey_to(&cam, target, Some((wx, wy)), 0.0, 0.0));
+                    zoom_ease = Some(journey_to(&cam, target, Some((wx, wy)), 0.0, 0.0, false));
                 }
             }
         }

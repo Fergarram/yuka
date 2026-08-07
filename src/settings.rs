@@ -273,6 +273,54 @@ pub struct Settings {
     // when the spring is within a hair of its destination and has stopped moving.
     pub spring_hz: f32,
     pub spring_damping: f32,
+    // And the same pair for the three-finger swipes, which want a different character.
+    //
+    // A swipe already had its motion: your fingers made it, and the spring only finishes what
+    // they started or takes it back. Bounce there reads as the view arguing with your hand. Being
+    // sent to a window is the opposite, a motion the view makes on its own, and a little overshoot
+    // is what gives that weight.
+    //
+    // Same units as above. The 1:1 detent stays on the pair above, since it is a correction rather
+    // than either of these.
+    pub swipe_spring_hz: f32,
+    pub swipe_spring_damping: f32,
+    // How much of the way to its destination a three-finger swipe shows you while your fingers
+    // are still moving, as a fraction, and how hard a swipe with nowhere to go pulls before it
+    // comes back.
+    //
+    // A gesture that only happens at the end is a gesture you cannot aim. Showing the travel makes
+    // the threshold visible: you can see how much further it needs, and you can change your mind
+    // and take it back. Under 1 on purpose, so crossing the trigger still has somewhere to spring
+    // to and the commit is something you feel rather than a motion that merely stops.
+    //
+    // The dry pull is what a swipe does when the view is already where that swipe would send it.
+    // It gives way a little and springs back, which answers the gesture without lying about
+    // having done something. As a fraction of the current scale.
+    pub swipe_preview_frac: f32,
+    pub swipe_dry_frac: f32,
+    // How far past its destination a swipe can be pulled, as a fraction of the distance to it.
+    //
+    // The end of a rubber band rather than a wall. Up to the threshold the view follows your
+    // fingers at swipe_preview_frac of their travel; past it, every further millimetre buys less
+    // than the one before, approaching this and never reaching it. So a hand that keeps going is
+    // always answered by something, which is what makes it feel attached rather than clamped, and
+    // there is no distance at which the gesture stops responding.
+    pub swipe_stretch_frac: f32,
+    // How hard it fights on the way there, past the goal. 1.0 gives at the same rate it did before
+    // the goal and eases off from there, which is the smooth version and what this did when there
+    // was only one curve. Higher resists sooner:
+    //
+    //   1.0   no change in feel at the goal, only the slow approach to the limit
+    //   2.0   the give halves the moment you pass it, which you can feel
+    //   5.0   a firm step into resistance, close to the old wall but never quite one
+    //
+    // Independent of swipe_stretch_frac on purpose. That says how far it can ever be pulled, this
+    // says how much work the pulling is. Together they are the difference between a long soft
+    // stretch and a short stiff one, and before this you could only ask for the first.
+    //
+    // The change in give at the goal is deliberate rather than a seam to be smoothed away: a
+    // detent you can feel is how a hand knows it has passed something without looking.
+    pub swipe_resist: f32,
     // How close to zoom_default the zoom may sit and still be taken the rest of the way, as a
     // difference in scale. A zoom of 0.98 or 1.0004 costs every window on screen a resample
     // and shows nothing for it: the pixel grid disengages, text softens, and nothing was
@@ -367,6 +415,12 @@ pub fn defaults() -> Settings {
         fov_deg: 40.0,
         spring_hz: 2.5,
         spring_damping: 0.85,
+        swipe_spring_hz: 4.0,
+        swipe_spring_damping: 1.0,
+        swipe_preview_frac: 0.7,
+        swipe_dry_frac: 0.06,
+        swipe_stretch_frac: 0.35,
+        swipe_resist: 2.0,
         zoom_detent: 0.05,
         resize_corner_hold: 0.75,
     }
@@ -531,6 +585,12 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
         "fov_deg" => f32_key!(fov_deg),
         "spring_hz" => f32_key!(spring_hz),
         "spring_damping" => f32_key!(spring_damping),
+        "swipe_spring_hz" => f32_key!(swipe_spring_hz),
+        "swipe_spring_damping" => f32_key!(swipe_spring_damping),
+        "swipe_preview_frac" => f32_key!(swipe_preview_frac),
+        "swipe_dry_frac" => f32_key!(swipe_dry_frac),
+        "swipe_stretch_frac" => f32_key!(swipe_stretch_frac),
+        "swipe_resist" => f32_key!(swipe_resist),
         "zoom_detent" => f32_key!(zoom_detent),
         "resize_corner_hold" => f32_key!(resize_corner_hold),
         "swipe_zoom_at_cursor" => match value {
