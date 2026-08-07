@@ -1943,12 +1943,19 @@ fn main() {
         // stops rather than a toggle, so the same gesture repeated walks in one direction and
         // then does nothing more.
         //
-        // Up steps out, and only from 1:1 or closer: zoomed in it comes back to 1:1, at 1:1
-        // it goes to the overview, and anywhere already out it moves nothing. A view you have
-        // pinched to some scale of your own is a place you chose, and yanking it to the
-        // overview because you asked to let go of the windows is the canvas deciding it knows
-        // better. Down comes straight home from anywhere out, and does nothing when you are
-        // already in.
+        // Two destinations rather than two steppers. Up goes to the overview and down comes home
+        // to 1:1, from wherever you are, and each does nothing only when you are already there.
+        //
+        // Both used to be conditional, and each was missing the case you most want it in. Down
+        // answered only from out past 1:1, so zoomed in it did nothing, which is exactly where
+        // there is nothing on screen to aim a pinch at. Up was a two-step, in to 1:1 and then out
+        // to the overview, so from a scale of your own it took two gestures to see the desk, and
+        // from just inside the overview it took two to get out.
+        //
+        // The reasoning for the old up was that a view you pinched to is a place you chose, and
+        // that a gesture should not overrule it. But that is what the gesture is for: it says show
+        // me everything, and the answer to it cannot depend on where you happened to be standing.
+        // One gesture that always means the same thing beats one that means it half the time.
         //
         // Super+Escape moves nothing. It lets go of every window and leaves the view exactly
         // where you had put it, which is the whole of what it is for: a key with no direction
@@ -1956,15 +1963,9 @@ fn main() {
         // that only wanted the keyboard back.
         const NEAR: f32 = 0.001;
         let target = if pad.swipe_up {
-            if cam.zoom > set.zoom_default + NEAR {
-                Some(set.zoom_default)
-            } else if cam.zoom > set.zoom_default - NEAR {
-                Some(set.overview_zoom)
-            } else {
-                None
-            }
+            ((cam.zoom - set.overview_zoom).abs() > NEAR).then_some(set.overview_zoom)
         } else if pad.swipe_down {
-            (cam.zoom < set.zoom_default - NEAR).then_some(set.zoom_default)
+            ((cam.zoom - set.zoom_default).abs() > NEAR).then_some(set.zoom_default)
         } else {
             None
         };

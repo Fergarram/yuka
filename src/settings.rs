@@ -255,9 +255,14 @@ pub struct Settings {
     // Perspective field of view in degrees. Larger means more parallax on a lifted
     // window.
     pub fov_deg: f32,
-    // How fast the view travels when a gesture sends it somewhere, as a fraction of the
-    // distance remaining per second. Only the swipes and Super+Escape send it anywhere; a
-    // pinch is never followed by a journey. 0 makes them jump instead of travel.
+    // How fast the view travels when something sends it somewhere: the three-finger swipes, the
+    // 1:1 detent, and being sent to a window by Super with a double click or a three-finger double
+    // tap. A pinch is never followed by a journey, and neither is Super+Escape.
+    //
+    // A rate rather than a duration: the fraction of the distance still to go that is covered each
+    // second, so every journey has the same shape and the long ones take longer. What is left
+    // after t seconds is about e^(-rate * t), so 12 arrives in about a quarter of a second and 6 in
+    // about half of one. 0 makes them jump instead of travel.
     pub zoom_ease_rate: f32,
     // How close to zoom_default the zoom may sit and still be taken the rest of the way, as a
     // difference in scale. A zoom of 0.98 or 1.0004 costs every window on screen a resample
