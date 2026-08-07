@@ -2017,35 +2017,54 @@ fn main() {
             // pixel grid engages rather than sitting a hair off it forever.
             const SETTLED: f32 = 0.001;
             let t = (set.zoom_ease_rate * ray::frame_time()).min(1.0);
-            let next = if (target - cam.zoom).abs() < SETTLED {
-                target
-            } else {
-                cam.zoom + (target - cam.zoom) * t
-            };
             match to {
                 // Going somewhere: the centre travels with the scale, at the same rate, so the
                 // two arrive together and the window grows into the middle of the view rather
                 // than sliding across it afterwards. No screen point is held, because the
                 // whole idea is that the view is moving.
                 Some((tx, ty)) => {
-                    cam.zoom = next.clamp(set.zoom_min, set.zoom_max);
-                    cam.cx += (tx - cam.cx) * t;
-                    cam.cy += (ty - cam.cy) * t;
+                    let prev = cam.zoom;
+                    // Geometrically rather than linearly, because scale is not perceived
+                    // linearly: half of a linear ease from 0.1 to 1.0 is 0.55, which is most of
+                    // the way there to the eye and a tenth of the way there to the maths. Stepping
+                    // by a constant ratio makes the view close at a steady rate however far out it
+                    // starts, which is what "flying to" a window should look like.
+                    cam.zoom = if (target - prev).abs() < SETTLED {
+                        target
+                    } else {
+                        (prev * (target / prev).powf(t)).clamp(set.zoom_min, set.zoom_max)
+                    };
+                    // And the pan is eased on screen rather than on the canvas. The distance left
+                    // is in canvas units, but what you watch is that distance times the zoom, and
+                    // the zoom is climbing: easing the canvas offset at a steady rate means the
+                    // thing on screen barely moves at first and then slides at the end, which is
+                    // the arriving-then-centring this is fixing. Taking the zoom's own step out of
+                    // the offset leaves the screen distance closing steadily instead.
+                    let ratio = if cam.zoom > 0.0 { prev / cam.zoom } else { 1.0 };
+                    cam.cx = tx - (tx - cam.cx) * (1.0 - t) * ratio;
+                    cam.cy = ty - (ty - cam.cy) * (1.0 - t) * ratio;
                     // Arrived when both have. A centre still sliding under a scale that has
-                    // landed is a journey that is not over, and half a canvas unit is well
-                    // under a pixel at any zoom worth easing to.
-                    const HERE: f32 = 0.5;
+                    // landed is a journey that is not over, and half a screen pixel is under
+                    // anything anyone can see, at whatever zoom it lands at.
+                    let here = 0.5 / cam.zoom.max(0.001);
                     if (cam.zoom - target).abs() < SETTLED
-                        && (tx - cam.cx).abs() < HERE
-                        && (ty - cam.cy).abs() < HERE
+                        && (tx - cam.cx).abs() < here
+                        && (ty - cam.cy).abs() < here
                     {
                         cam.cx = tx;
                         cam.cy = ty;
                         zoom_ease = None;
                     }
                 }
-                // Staying where it is pointed, turning around a screen point.
+                // Staying where it is pointed, turning around a screen point. Linear in scale,
+                // unchanged: these are the swipes and the 1:1 detent, journeys between two scales
+                // that are already close together, where the difference does not show.
                 None => {
+                    let next = if (target - cam.zoom).abs() < SETTLED {
+                        target
+                    } else {
+                        cam.zoom + (target - cam.zoom) * t
+                    };
                     let factor = next / cam.zoom;
                     camera::zoom_at(
                         &mut cam,

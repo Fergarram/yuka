@@ -48,6 +48,21 @@ pub struct Settings {
     // How far a finger must travel from where it landed, or from a click, before it
     // moves the cursor at all. A fraction of the pad's shorter axis.
     pub pointer_start_frac: f32,
+    // Pointer acceleration, as the two ends of a ramp.
+    //
+    // A single sensitivity has to serve two jobs that want opposite things: crossing the screen,
+    // where the finger should cover ground, and landing on something small, where it should not.
+    // Tuned for the first, the second overshoots; tuned for the second, your hand runs out of pad.
+    //
+    // So the gain follows how fast the finger is going. pointer_slow_factor is what it is
+    // multiplied by when the finger is barely moving, and pointer_full_speed_frac is the speed at
+    // which it reaches full sensitivity, in pad widths per second. Between the two it ramps
+    // linearly.
+    //
+    // The ceiling is pointer_sens itself: this only ever slows the cursor down, never speeds it
+    // past what you tuned. 1.0 for the factor switches the whole thing off.
+    pub pointer_slow_factor: f32,
+    pub pointer_full_speed_frac: f32,
     // How long the cursor stays parked either side of a click, in seconds.
     pub press_freeze_secs: f64,
     // How long every finger may stay on the pad and still count as a tap rather than a gesture,
@@ -287,6 +302,8 @@ pub fn defaults() -> Settings {
 
         pointer_sens: 0.25,
         pointer_start_frac: 0.008,
+        pointer_slow_factor: 0.5,
+        pointer_full_speed_frac: 1.0,
         press_freeze_secs: 0.12,
         tap_max_secs: 0.25,
         tap_move_frac: 0.06,
@@ -440,6 +457,8 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
         },
         "pointer_sens" => f32_key!(pointer_sens),
         "pointer_start_frac" => f32_key!(pointer_start_frac),
+        "pointer_slow_factor" => f32_key!(pointer_slow_factor),
+        "pointer_full_speed_frac" => f32_key!(pointer_full_speed_frac),
         "press_freeze_secs" => f64_key!(press_freeze_secs),
         "tap_max_secs" => f64_key!(tap_max_secs),
         "tap_move_frac" => f32_key!(tap_move_frac),
@@ -581,6 +600,8 @@ fn sanitise(set: &mut Settings) {
     set.resize_min_px = set.resize_min_px.max(1.0);
     set.button_split = set.button_split.clamp(0.0, 1.0);
     set.pointer_start_frac = set.pointer_start_frac.max(0.0);
+    set.pointer_slow_factor = set.pointer_slow_factor.clamp(0.0, 1.0);
+    set.pointer_full_speed_frac = set.pointer_full_speed_frac.max(0.0);
     set.window_scroll_sens = set.window_scroll_sens.max(0.0);
     set.scroll_axis_lock_frac = set.scroll_axis_lock_frac.max(0.0);
     set.press_freeze_secs = set.press_freeze_secs.max(0.0);

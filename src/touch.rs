@@ -204,6 +204,9 @@ pub struct Touchpad {
     // When the last completed tap happened, and whether a double tap is waiting
     // to be consumed by update.
 
+    // When the pointer last stepped, on the device clock, so the speed it is going can be had
+    // from the step it just took. Acceleration needs a speed and a delta is not one.
+    prev_move_time: f64,
     // Pointer tracking: which slot drives the cursor, its previous pos, and the
     // fractional remainder for slow motion.
     primary_slot: Option<usize>,
@@ -440,6 +443,7 @@ pub fn open(path: &str, set: &Settings) -> Option<Touchpad> {
         last_tap3: TAP_NEVER,
         tap3_double: false,
 
+        prev_move_time: 0.0,
         primary_slot: None,
         prev_single: None,
         ptr_accum_x: 0.0,
@@ -1134,8 +1138,20 @@ fn update_gesture(tp: &mut Touchpad, cursor: Option<&mut Cursor>, set: &Settings
             }
             if tp.ptr_armed {
                 if let (Some((px, py)), Some(cur)) = (tp.prev_single, cursor) {
-                    tp.ptr_accum_x += (fx - px) * set.pointer_sens;
-                    tp.ptr_accum_y += (fy - py) * set.pointer_sens;
+                    // How fast the finger is going, in device units a second, from the step it
+                    // just took. Clamped either side: a frame that took no time at all would
+                    // report an infinite speed, and one that took a long time is a finger that
+                    // stopped rather than a slow one.
+                    let (dx, dy) = (fx - px, fy - py);
+                    let dt = (tp.now - tp.prev_move_time).clamp(0.001, 0.1) as f32;
+                    let speed = (dx * dx + dy * dy).sqrt() / dt;
+                    // Along the ramp: 0 where the finger is barely moving, 1 at full speed.
+                    let full = tp.span * set.pointer_full_speed_frac;
+                    let t = if full > 0.0 { (speed / full).clamp(0.0, 1.0) } else { 1.0 };
+                    let gain = set.pointer_sens
+                        * (set.pointer_slow_factor + (1.0 - set.pointer_slow_factor) * t);
+                    tp.ptr_accum_x += dx * gain;
+                    tp.ptr_accum_y += dy * gain;
                     let idx = tp.ptr_accum_x.trunc();
                     let idy = tp.ptr_accum_y.trunc();
                     tp.ptr_accum_x -= idx;
@@ -1158,6 +1174,7 @@ fn update_gesture(tp: &mut Touchpad, cursor: Option<&mut Cursor>, set: &Settings
                     cursor::move_by(cur, idx as i32, idy as i32);
                 }
                 tp.prev_single = Some((fx, fy));
+                tp.prev_move_time = tp.now;
             }
         }
         tp.prev_centroid = None;
