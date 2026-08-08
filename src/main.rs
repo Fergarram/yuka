@@ -1403,10 +1403,14 @@ fn main() {
         from_zoom: f32,
         ax: f32,
         ay: f32,
-        // What a full swipe each way reaches. Either a real destination, or a small pull for a
-        // direction that has nowhere to go.
-        up: f32,
-        down: f32,
+        // Where a full swipe each way would land, or None for a direction with nowhere to go.
+        //
+        // Decided when the fingers land and held for the whole gesture. Deciding it at release
+        // instead would read it off a view the gesture itself has been moving: pull up past the
+        // overview and the answer to "should this go to the overview" flips from yes to no
+        // halfway through your own swipe.
+        up: Option<f32>,
+        down: Option<f32>,
     }
     let mut swipe_preview: Option<SwipePreview> = None;
     // A pinch sequence in progress toward a client, and how far it has scaled since it began.
@@ -2027,23 +2031,18 @@ fn main() {
             } else {
                 (ray::screen_width() as f32 * 0.5, ray::screen_height() as f32 * 0.5)
             };
-            let preview = swipe_preview.get_or_insert_with(|| {
-                let dry = set.swipe_dry_frac;
-                SwipePreview {
-                    from_zoom: cam.zoom,
-                    ax: anchor.0,
-                    ay: anchor.1,
-                    up: if (cam.zoom - set.overview_zoom).abs() > NEAR {
-                        set.overview_zoom
-                    } else {
-                        cam.zoom * (1.0 - dry)
-                    },
-                    down: if (cam.zoom - set.zoom_default).abs() > NEAR {
-                        set.zoom_default
-                    } else {
-                        cam.zoom * (1.0 + dry)
-                    },
-                }
+            let preview = swipe_preview.get_or_insert_with(|| SwipePreview {
+                from_zoom: cam.zoom,
+                ax: anchor.0,
+                ay: anchor.1,
+                // Up is "show me more", so it has somewhere to go only from closer in than the
+                // overview. Already out there, or further out than it by your own pinch, and
+                // there is no more to show: pulling the view back in would be the gesture doing
+                // the opposite of what it means.
+                up: (cam.zoom > set.overview_zoom + NEAR).then_some(set.overview_zoom),
+                // Down is "put me back", and 1:1 is home from either side, whether you are
+                // zoomed past it or out beyond it.
+                down: ((cam.zoom - set.zoom_default).abs() > NEAR).then_some(set.zoom_default),
             });
             // How far along the view goes for how far the fingers went.
             //
@@ -2058,6 +2057,7 @@ fn main() {
             // the resistance begins.
             let p = pad.swipe_progress.abs();
             let base = set.swipe_preview_frac;
+            let dry = set.swipe_dry_frac;
             let travel = if p <= 1.0 {
                 base * p
             } else {
@@ -2069,7 +2069,13 @@ fn main() {
                 base + room * (1.0 - 1.0 / (1.0 + (p - 1.0) * give / room))
             };
             if travel > 0.0 {
-                let dest = if pad.swipe_progress > 0.0 { preview.up } else { preview.down };
+                // A direction with nowhere to go still gives way, by a little, in the direction
+                // you pulled. That is the dry answer: the gesture is felt and nothing is claimed.
+                let dest = if pad.swipe_progress > 0.0 {
+                    preview.up.unwrap_or(preview.from_zoom * (1.0 - dry))
+                } else {
+                    preview.down.unwrap_or(preview.from_zoom * (1.0 + dry))
+                };
                 let want = if preview.from_zoom > 0.0 && dest > 0.0 {
                     (preview.from_zoom * (dest / preview.from_zoom).powf(travel))
                         .clamp(set.zoom_min, set.zoom_max)
@@ -2092,10 +2098,15 @@ fn main() {
             }
         }
 
-        let target = if pad.swipe_up {
-            ((cam.zoom - set.overview_zoom).abs() > NEAR).then_some(set.overview_zoom)
-        } else if pad.swipe_down {
-            ((cam.zoom - set.zoom_default).abs() > NEAR).then_some(set.zoom_default)
+        // Where the gesture is sending the view, read off the answer taken when the fingers landed.
+        // A direction with nowhere to go sends it back to where it started, which is the bounce:
+        // the swipe still happened, and still lets go of every window, it simply had no distance
+        // to cover.
+        let target = if pad.swipe_up || pad.swipe_down {
+            swipe_preview.as_ref().map(|pv| {
+                let dest = if pad.swipe_up { pv.up } else { pv.down };
+                dest.unwrap_or(pv.from_zoom)
+            })
         } else {
             None
         };
@@ -2105,11 +2116,15 @@ fn main() {
         // about. swipe_zoom_at_cursor takes the pinch's rule instead and holds whatever you
         // are pointing at still while the scale changes around it.
         if let Some(target) = target {
-            let (ax, ay) = if set.swipe_zoom_at_cursor {
-                let (px, py) = pointer_xy.unwrap_or((0, 0));
-                (px as f32, py as f32)
-            } else {
-                (ray::screen_width() as f32 * 0.5, ray::screen_height() as f32 * 0.5)
+            // Around the point the preview was turning around, so the commit continues the motion
+            // your fingers were making rather than starting a new one somewhere else.
+            let (ax, ay) = match swipe_preview.as_ref() {
+                Some(pv) => (pv.ax, pv.ay),
+                None if set.swipe_zoom_at_cursor => {
+                    let (px, py) = pointer_xy.unwrap_or((0, 0));
+                    (px as f32, py as f32)
+                }
+                None => (ray::screen_width() as f32 * 0.5, ray::screen_height() as f32 * 0.5),
             };
             zoom_ease = Some(journey_to(&cam, target, None, ax, ay, true));
         }

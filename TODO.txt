@@ -18,11 +18,7 @@ IMPROVEMENTS OR TESTS:
 
 [ ] design three-finger gesture to grab windows when not in focus and be able to lift and resize with one hand
 
-[x] three finger swipe down should ALWAYS get us to zoom 1.
-    And up always goes to overview_zoom. Both were conditional and each missed the
-    case you most want it in: down did nothing while zoomed in, up was a two-step so
-    seeing the desk from your own scale took two gestures. Two destinations now, each
-    doing nothing only when you are already there.
+[ ] Spawning new windows should get an option to spawn non-covering and find nearest empty space
 [ ] show false positive 3 finger gesture by sprining back if already in a direction.
 
 [ ] dont change z order when focusing via click on existing windows.
