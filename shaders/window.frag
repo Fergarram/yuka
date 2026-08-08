@@ -13,6 +13,12 @@ uniform float alphaBlend;
 // 1.0 for shm buffers (BGRA in memory), 0.0 for dmabuf (correct RGBA via EGL)
 uniform float swizzleBgra;
 
+// How opaque this window is drawn, 1.0 for all of them until something says otherwise. A window
+// covering the one you are working in is faded so you can see through it, which is a property of
+// the arrangement rather than of the window, so it is a uniform rather than anything the client
+// knows about.
+uniform float windowAlpha;
+
 void main() {
     vec4 raw = texture2D(texture0, frag_uv);
     // shm uploads raw ARGB8888 bytes (B,G,R,A) as RGBA, so swizzle those back.
@@ -32,4 +38,7 @@ void main() {
     }
 
     gl_FragColor = color * frag_color * colDiffuse;
+    // After the un-premultiply above, so this is straight alpha and a plain multiply is the whole
+    // of fading: the blend does the rest.
+    gl_FragColor.a *= windowAlpha;
 }

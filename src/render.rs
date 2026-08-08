@@ -108,6 +108,11 @@ pub struct Windows {
     // window is one that took the shape of the view: the size is the geometry size we asked
     // the client for, the position is the visible top-left we set, and both are what
     // unmaximizing gives back. Meaningless while maximized is false.
+    // How opaque this window is drawn right now, and where it is heading. A window covering the
+    // focused one fades, and eases rather than snapping: the arrangement changes as you click
+    // around and as windows move, and a hard cut on every change reads as flicker.
+    pub alpha: Vec<f32>,
+    pub alpha_to: Vec<f32>,
     pub maximized: Vec<bool>,
     // And the canvas point its visible top-left is pinned to while it is. Held every frame
     // rather than set once, because the offset between a surface and its visible top-left is
@@ -193,6 +198,8 @@ pub fn windows_new() -> Windows {
         scale_x: Vec::new(),
         scale_y: Vec::new(),
         filter: Vec::new(),
+        alpha: Vec::new(),
+        alpha_to: Vec::new(),
         maximized: Vec::new(),
         max_x: Vec::new(),
         max_y: Vec::new(),
@@ -369,6 +376,8 @@ pub fn prune_dead(windows: &mut Windows) {
         windows.scale_x.remove(i);
         windows.scale_y.remove(i);
         windows.filter.remove(i);
+        windows.alpha.remove(i);
+        windows.alpha_to.remove(i);
         windows.maximized.remove(i);
         windows.max_x.remove(i);
         windows.max_y.remove(i);
@@ -606,6 +615,42 @@ pub fn hold_maximized(windows: &mut Windows) {
         }
         windows.canvas_x[i] = windows.max_x[i] - windows.geo_x[i];
         windows.canvas_y[i] = windows.max_y[i] - windows.geo_y[i];
+    }
+}
+
+// Fade whatever is covering the window you are working in.
+//
+// Above it and overlapping it, both. Above, because a window behind the focused one hides nothing;
+// overlapping, because one off to the side is not in the way however it is stacked. Everything else
+// goes back to opaque.
+//
+// Eased rather than switched, since the answer changes whenever you click, drag or pan, and a hard
+// cut on each of those reads as flicker rather than as an answer.
+pub fn fade_covers(windows: &mut Windows, focused: Option<&WlSurface>, opacity: f32, dt: f32) {
+    // How fast a window fades to where it is going, as a fraction of the gap per second. Fast
+    // enough to feel immediate, slow enough that a click does not blink.
+    const RATE: f32 = 14.0;
+
+    let front = focused.and_then(|surface| index_of(windows, surface));
+    for i in 0..windows.surface.len() {
+        windows.alpha_to[i] = 1.0;
+        let Some(f) = front else { continue };
+        if i == f || windows.order[i] <= windows.order[f] {
+            continue;
+        }
+        let (ax, ay, aw, ah) = visible(windows, i);
+        let (bx, by, bw, bh) = visible(windows, f);
+        let overlaps = ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah;
+        if overlaps {
+            windows.alpha_to[i] = opacity;
+        }
+    }
+    let t = (RATE * dt).min(1.0);
+    for i in 0..windows.surface.len() {
+        windows.alpha[i] += (windows.alpha_to[i] - windows.alpha[i]) * t;
+        if (windows.alpha_to[i] - windows.alpha[i]).abs() < 0.002 {
+            windows.alpha[i] = windows.alpha_to[i];
+        }
     }
 }
 
@@ -1254,6 +1299,8 @@ fn store_entry(
             windows.scale_x.push(1.0);
             windows.scale_y.push(1.0);
             windows.filter.push(FILTER_UNSET);
+            windows.alpha.push(1.0);
+            windows.alpha_to.push(1.0);
             windows.maximized.push(false);
             windows.max_x.push(0.0);
             windows.max_y.push(0.0);
@@ -1552,6 +1599,8 @@ pub fn destroy_owned(windows: &mut Windows) {
     windows.scale_x.clear();
     windows.scale_y.clear();
     windows.filter.clear();
+    windows.alpha.clear();
+    windows.alpha_to.clear();
     windows.maximized.clear();
     windows.max_x.clear();
     windows.max_y.clear();
@@ -1577,6 +1626,7 @@ pub fn draw_windows(
     shader: Shader,
     alpha_loc: i32,
     swizzle_loc: i32,
+    fade_loc: i32,
     // Whether to draw what the client padded around its window, which is where its shadow and
     // its rounded corners live. See the quad below.
     shadows: bool,
@@ -1661,6 +1711,7 @@ pub fn draw_windows(
         ray::begin_shader_mode(shader);
         ray::set_shader_float(shader, alpha_loc, 0.0);
         ray::set_shader_float(shader, swizzle_loc, windows.swizzle[i]);
+        ray::set_shader_float(shader, fade_loc, windows.alpha[i]);
         ray::draw_textured_quad(windows.tex_id[i], corners);
         ray::end_shader_mode();
     }

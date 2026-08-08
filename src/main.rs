@@ -1231,6 +1231,7 @@ fn main() {
     let shader = ray::load_shader("shaders/window.vert", "shaders/window.frag");
     let alpha_loc = ray::shader_location(shader, "alphaBlend");
     let swizzle_loc = ray::shader_location(shader, "swizzleBgra");
+    let fade_loc = ray::shader_location(shader, "windowAlpha");
 
     let (mut server, mut state) =
         wl::state::init(
@@ -2373,9 +2374,11 @@ fn main() {
                             resize_settle = None;
                         }
                         render::clear_scale(&mut windows, &surf);
-                        // No lift for a client's own titlebar drag: it asked to be moved,
-                        // not picked up, so bring it to the front and leave it on the plane.
-                        render::front(&mut windows, &surf);
+                        // Neither lifted nor raised. The client asked to be moved, not picked up,
+                        // and a drag from inside a window is the same kind of act as a click in
+                        // one: it says where the window goes, not what is in front of what. The
+                        // lift belongs to a Super+drag, where you did take hold of it, and the
+                        // stack should follow the same rule as the animation rather than one each.
                         drag = Some(Drag {
                             surface: surf,
                             off_x: ox - gx,
@@ -3125,6 +3128,14 @@ fn main() {
         // visible on Chromium as part of the window trailing the rest of it while dragging.
         // Maximized windows keep their pinned top-left first, so children placed below and
         // the pixel alignment after both see the corrected position.
+        // What is covering the window you are working in, faded so you can see through it. After
+        // the drag and the settle, so it judges where things are now rather than where they were.
+        render::fade_covers(
+            &mut windows,
+            focused.as_ref(),
+            set.cover_opacity,
+            ray::frame_time().min(0.05),
+        );
         render::hold_maximized(&mut windows);
         render::sync_children(&mut windows);
 
@@ -3226,7 +3237,15 @@ fn main() {
 
         ray::begin_drawing();
         ray::clear_background(clear);
-        render::draw_windows(&windows, cam3d, shader, alpha_loc, swizzle_loc, set.draw_shadows);
+        render::draw_windows(
+            &windows,
+            cam3d,
+            shader,
+            alpha_loc,
+            swizzle_loc,
+            fade_loc,
+            set.draw_shadows,
+        );
         if debug_labels {
             render::draw_debug_labels(&windows, cam3d, cam.zoom, anisotropy);
         }

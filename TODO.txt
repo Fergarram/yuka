@@ -22,6 +22,12 @@ BUGS:
 
 IMPROVEMENTS OR TESTS:
 
+[x] Fade windows that cover the focused one, so you can see through what is in the way.
+    cover_opacity in the conf, eased rather than switched. Above it in the stack and
+    actually overlapping it, both conditions.
+[x] A drag from inside a window no longer raises it either, so the stack follows the same
+    rule as the lift animation: raised only when you picked it up with Super.
+
 [ ] design three-finger gesture to grab windows when not in focus and be able to lift and resize with one hand
 
 [ ] Spawning new windows should get an option to spawn non-covering and find nearest empty space
