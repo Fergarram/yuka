@@ -15,9 +15,14 @@ BUGS:
 
 IMPROVEMENTS OR TESTS:
 
+[ ] When window in focus and NOT maximized. If super is pressed and cursor on top of this window, two-finger pinch should resize the window from center and we should use the pinch aspect ratio as a way to set the new size proportion as well.
+
+[ ] is there a way to make the cursor movement not lag when the fps are low?
+
 [ ] mod+w for closing focused window
-[ ] I think that 3-finger swipes should be a go-to-nearest window in direction of swipe like a quick focused scroll. and we then make 3-finger tap a toggle between overview_zoom and fly-focus to window if hovering a window, otherwise just land at position. If zoom is already 1.0 then tripple tapping doesn't fly into it, we instead always go to overview_zoom if zoom was 1.0
+
 [ ] design three-finger gesture to grab windows when not in focus and be able to lift and resize with one hand
+
 [ ] Palm rest. I think done by increasing the minimum area required to mark as finger depending on how close to the sides it is.
 
 ---

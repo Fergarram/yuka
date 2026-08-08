@@ -142,18 +142,6 @@ pub struct Settings {
     // 0 never creeps, which is what om_wm did before this existed. 0.05 closes half the drift
     // in about a fifth of a second. Higher forgives more and demands a brisker pinch.
     pub zoom_ref_follow: f32,
-    // Where a three-finger swipe turns the view around: the middle of the screen, or the
-    // cursor.
-    //
-    // False, the middle of the screen, is the default because a swipe moves the whole canvas
-    // rather than a piece of it. It is "show me everything" and "put me back", and where the
-    // cursor happens to be resting is not what the gesture is about; anchoring there sends the
-    // view somewhere your hands did not choose.
-    //
-    // True anchors on the cursor instead, which keeps whatever you are pointing at exactly
-    // where it is while the scale changes around it. That is the pinch's rule, and it makes
-    // the swipe a faster way of doing the same thing rather than a different kind of move.
-    pub swipe_zoom_at_cursor: bool,
 
     // Trackpad: how much contact counts as a touch at all, in the raw units the overlay
     // shows (this pad reports 0..2048). Below the first threshold a contact is ignored
@@ -374,11 +362,33 @@ pub struct Settings {
     // and take it back. Under 1 on purpose, so crossing the trigger still has somewhere to spring
     // to and the commit is something you feel rather than a motion that merely stops.
     //
-    // The dry pull is what a swipe does when the view is already where that swipe would send it.
-    // It gives way a little and springs back, which answers the gesture without lying about
-    // having done something. As a fraction of the current scale.
     pub swipe_preview_frac: f32,
-    pub swipe_dry_frac: f32,
+    // And how far the view actually slides at a full swipe, in screen pixels.
+    //
+    // Screen rather than canvas, so the gesture looks the same however far out you are: what it is
+    // saying is "a shove that way", and a shove is a thing you feel on a screen rather than a
+    // distance on a canvas.
+    pub swipe_nudge_px: f32,
+    // Which way a swipe reaches: with the canvas, or with the view.
+    //
+    // True is the canvas following your fingers, the same idea as invert_scroll and the same as
+    // every other gesture here: swipe down and the canvas comes down with your hand, which brings
+    // you to whatever was above. It is the one that matches a hand pushing paper around a desk.
+    //
+    // False sends the view the way your fingers went, so swiping down reaches the window below.
+    // That is the other mental model, a joystick rather than a sheet of paper, and people are
+    // genuinely split on it.
+    pub swipe_natural: bool,
+    // How far a three-finger tap steps back out of the window you are working in, as a fraction of
+    // the scale you are at.
+    //
+    // Relative rather than a destination, because stepping back is a relative act: it means "a bit
+    // further than this", and how far that is depends on how close you were. 0.7 leaves you at
+    // seven tenths of the scale you had.
+    //
+    // It never goes further out than overview_zoom, which is what the tap does from 1:1 anyway when
+    // nothing is focused. 1.0 leaves the scale alone and the tap only lets go.
+    pub tap_step_out: f32,
     // How far past its destination a swipe can be pulled, as a fraction of the distance to it.
     //
     // The end of a rubber band rather than a wall. Up to the threshold the view follows your
@@ -461,7 +471,6 @@ pub fn defaults() -> Settings {
         mode_eps_frac: 0.0015,
         pinch_deadzone_frac: 0.0005,
         zoom_ref_follow: 0.05,
-        swipe_zoom_at_cursor: false,
 
 
         touch_min_size: 0.0,
@@ -507,7 +516,9 @@ pub fn defaults() -> Settings {
         swipe_spring_hz: 4.0,
         swipe_spring_damping: 1.0,
         swipe_preview_frac: 0.7,
-        swipe_dry_frac: 0.06,
+        swipe_nudge_px: 140.0,
+        swipe_natural: true,
+        tap_step_out: 0.7,
         swipe_stretch_frac: 0.35,
         swipe_resist: 2.0,
         zoom_detent: 0.05,
@@ -677,21 +688,20 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
         "swipe_spring_hz" => f32_key!(swipe_spring_hz),
         "swipe_spring_damping" => f32_key!(swipe_spring_damping),
         "swipe_preview_frac" => f32_key!(swipe_preview_frac),
-        "swipe_dry_frac" => f32_key!(swipe_dry_frac),
+        "swipe_nudge_px" => f32_key!(swipe_nudge_px),
+        "tap_step_out" => f32_key!(tap_step_out),
+        "swipe_natural" => match value {
+            "true" | "1" | "yes" => set.swipe_natural = true,
+            "false" | "0" | "no" => set.swipe_natural = false,
+            _ => {
+                eprintln!("om_wm: settings: {path}:{line}: swipe_natural wants true or false");
+                return false;
+            }
+        },
         "swipe_stretch_frac" => f32_key!(swipe_stretch_frac),
         "swipe_resist" => f32_key!(swipe_resist),
         "zoom_detent" => f32_key!(zoom_detent),
         "resize_corner_hold" => f32_key!(resize_corner_hold),
-        "swipe_zoom_at_cursor" => match value {
-            "true" | "1" | "yes" => set.swipe_zoom_at_cursor = true,
-            "false" | "0" | "no" => set.swipe_zoom_at_cursor = false,
-            _ => {
-                eprintln!(
-                    "om_wm: settings: {path}:{line}: swipe_zoom_at_cursor wants true or false"
-                );
-                return false;
-            }
-        },
         "spawn_gap" => f32_key!(spawn_gap),
         "spawn_order" => {
             let mut order = [DIR_NONE; 4];
@@ -843,6 +853,10 @@ fn sanitise(set: &mut Settings) {
     set.press_freeze_secs = set.press_freeze_secs.max(0.0);
     set.tap_max_secs = set.tap_max_secs.max(0.0);
     set.tap_move_frac = set.tap_move_frac.max(0.0);
+    // A swipe has to want more travel than a tap is allowed to drift, or the same motion is legally
+    // both and every tap draws a little swipe before deciding it was not one. Half again is enough
+    // to tell them apart by hand.
+    set.swipe_frac = set.swipe_frac.max(set.tap_move_frac * 1.5);
 }
 
 //

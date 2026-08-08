@@ -1015,6 +1015,19 @@ fn zoom_for_window(
     zoom.clamp(set.zoom_min, set.zoom_max)
 }
 
+// Which way a swipe reaches, from the way the fingers went.
+//
+// Natural is the canvas following your hand, so a swipe down brings down what was above you and the
+// view therefore travels up. The other way sends the view where the fingers went. One line, but it
+// has to be asked in two places, the slide and the search, and they must never disagree.
+fn swipe_way(dir: (f32, f32), set: &settings::Settings) -> (f32, f32) {
+    if set.swipe_natural {
+        (-dir.0, -dir.1)
+    } else {
+        dir
+    }
+}
+
 // Dragging a window that is filling the view takes it out of maximized first.
 //
 // Only when it is actually filling it. Maximized here is a size, not a mode that owns a screen,
@@ -1415,17 +1428,11 @@ fn main() {
     // fingers landed, what each direction would do from there, and where the scale is turned
     // around. Held for as long as the fingers are down.
     struct SwipePreview {
-        from_zoom: f32,
-        ax: f32,
-        ay: f32,
-        // Where a full swipe each way would land, or None for a direction with nowhere to go.
-        //
-        // Decided when the fingers land and held for the whole gesture. Deciding it at release
-        // instead would read it off a view the gesture itself has been moving: pull up past the
-        // overview and the answer to "should this go to the overview" flips from yes to no
-        // halfway through your own swipe.
-        up: Option<f32>,
-        down: Option<f32>,
+        // Where the view was when the fingers landed. Everything the gesture does is measured from
+        // here: the slide while it is being made, the direction the search is done in, and the
+        // place it comes back to when there is nothing that way.
+        from_cx: f32,
+        from_cy: f32,
     }
     let mut swipe_preview: Option<SwipePreview> = None;
     // A pinch sequence in progress toward a client, and how far it has scaled since it began.
@@ -1832,7 +1839,14 @@ fn main() {
         // Every window's hold on the keyboard, the pointer and the implicit grab is dropped
         // by the key and by the swipe alike: stepping back to look at everything is not a
         // moment when one window should still be taking your keystrokes.
-        let release_all = let_go || pad.swipe_up || pad.swipe_down;
+        // What lets go of every window: Super+Escape, and the three-finger tap.
+        //
+        // A swipe used to do this, when it meant "step back from everything". It means "go to that
+        // one" now and hands over focus rather than dropping it. The tap took the other half of the
+        // old meaning: it is a gesture about where the view is, never about what has your typing,
+        // so it lets go whichever of its three answers it gives, including the one that flies you
+        // into a window. Landing in front of something is not the same as working in it.
+        let mut release_all = let_go || pad.three_finger_double_tap;
 
         // Whether this reaches the canvas or the window under the pointer is decided below,
         // by whether Super is held. The pad reports the same thing either way.
@@ -2058,132 +2072,88 @@ fn main() {
         // where you had put it, which is the whole of what it is for: a key with no direction
         // cannot say where to go, and made to guess it moved the canvas out from under work
         // that only wanted the keyboard back.
-        const NEAR: f32 = 0.001;
+        // Close enough to 1:1 to count as being there, which is what decides whether a tap steps
+        // back or comes in. Wider than the detent's own settling, so a zoom the detent has just
+        // finished pulling home is unambiguously home.
+        const HOME: f32 = 0.01;
 
-        // The swipe, shown while it is being made.
+        // The swipe, while it is being made and when it is let go.
         //
-        // The destinations are worked out once, when the fingers land, and held: deciding them
-        // per frame would mean the preview chasing a target that the preview itself is moving.
-        // A direction with nowhere to go gets a small pull instead, in the direction of the
-        // gesture, which is what a dry swipe gives way by before springing back.
+        // A swipe means "go that way": to the nearest window in the direction the fingers went, at
+        // whatever angle they went in. While they are down the view slides that way, part of the
+        // distance, so the gesture is something you can feel doing and can take back by lifting
+        // early. Letting go past the threshold commits it.
+        //
+        // This used to be about the zoom, up to the overview and down to 1:1. Those are the tap's
+        // job now: a swipe is for moving between windows, which is the thing you do most and had
+        // no gesture at all.
         if pad.swiping {
-            let anchor = if set.swipe_zoom_at_cursor {
-                let (px, py) = pointer_xy.unwrap_or((0, 0));
-                (px as f32, py as f32)
-            } else {
-                (ray::screen_width() as f32 * 0.5, ray::screen_height() as f32 * 0.5)
-            };
-            let preview = swipe_preview.get_or_insert_with(|| SwipePreview {
-                from_zoom: cam.zoom,
-                ax: anchor.0,
-                ay: anchor.1,
-                // Up is "show me more", so it has somewhere to go only from closer in than the
-                // overview. Already out there, or further out than it by your own pinch, and
-                // there is no more to show: pulling the view back in would be the gesture doing
-                // the opposite of what it means.
-                up: (cam.zoom > set.overview_zoom + NEAR).then_some(set.overview_zoom),
-                // Down is "put me back", and 1:1 is home from either side, whether you are
-                // zoomed past it or out beyond it.
-                down: ((cam.zoom - set.zoom_default).abs() > NEAR).then_some(set.zoom_default),
-            });
-            // How far along the view goes for how far the fingers went.
+            let preview = swipe_preview
+                .get_or_insert_with(|| SwipePreview { from_cx: cam.cx, from_cy: cam.cy });
+            // How far the view goes for how far the fingers went.
             //
             // Up to the trigger it is a straight fraction of the travel, so the gesture feels
-            // attached to the hand and lifting early can take it back. Past the trigger it becomes
-            // a rubber band: each further millimetre buys less than the one before, approaching
-            // 1 + swipe_stretch_frac and never reaching it. Never a wall, because a hand that keeps
-            // pulling and gets nothing back stops feeling connected to anything, which is the one
-            // thing this whole preview exists to avoid.
-            //
-            // The two pieces meet at the trigger with the same slope, so there is no step where
-            // the resistance begins.
-            let p = pad.swipe_progress.abs();
+            // attached to the hand. Past it the give tails off toward a limit it never reaches:
+            // a hand that keeps pulling and gets nothing back stops feeling connected to anything,
+            // and a wall is what this exists to avoid. The two pieces meet at the trigger with the
+            // same slope, so you cannot feel where the resistance begins, only that it is there.
+            let p = pad.swipe_progress;
             let base = set.swipe_preview_frac;
-            let dry = set.swipe_dry_frac;
             let travel = if p <= 1.0 {
                 base * p
             } else {
-                // Past the goal, two things are being asked separately. How far it can ever be
-                // pulled is swipe_stretch_frac, which sets where this curve flattens out. How hard
-                // it fights getting there is swipe_resist, which divides the rate it gives at.
                 let room = (1.0 + set.swipe_stretch_frac - base).max(0.0001);
                 let give = base / set.swipe_resist;
                 base + room * (1.0 - 1.0 / (1.0 + (p - 1.0) * give / room))
             };
-            if travel > 0.0 {
-                // A direction with nowhere to go still gives way, by a little, in the direction
-                // you pulled. That is the dry answer: the gesture is felt and nothing is claimed.
-                let dest = if pad.swipe_progress > 0.0 {
-                    preview.up.unwrap_or(preview.from_zoom * (1.0 - dry))
-                } else {
-                    preview.down.unwrap_or(preview.from_zoom * (1.0 + dry))
-                };
-                let want = if preview.from_zoom > 0.0 && dest > 0.0 {
-                    (preview.from_zoom * (dest / preview.from_zoom).powf(travel))
-                        .clamp(set.zoom_min, set.zoom_max)
-                } else {
-                    cam.zoom
-                };
-                let factor = if cam.zoom > 0.0 { want / cam.zoom } else { 1.0 };
-                camera::zoom_at(
-                    &mut cam,
-                    factor,
-                    preview.ax,
-                    preview.ay,
-                    ray::screen_width() as f32,
-                    ray::screen_height() as f32,
-                    &set,
-                );
-                // The fingers own the view while they are on the pad, so anything the view was
-                // still travelling toward is no longer where it is going.
-                zoom_ease = None;
-            }
+            // With the canvas or with the view, see swipe_natural. Applied here and to the search
+            // below from the same value, so what you feel during the gesture and where it takes you
+            // can never disagree.
+            let (dx, dy) = swipe_way(pad.swipe_dir, &set);
+            // In screen pixels, so the slide looks the same at any zoom, and converted here to the
+            // canvas units the camera is in.
+            let slide = travel * set.swipe_nudge_px / cam.zoom.max(0.0001);
+            cam.cx = preview.from_cx + dx * slide;
+            cam.cy = preview.from_cy + dy * slide;
+            // The fingers own the view while they are on the pad, so anything it was still
+            // travelling toward is no longer where it is going.
+            zoom_ease = None;
         }
 
-        // Where the gesture is sending the view, read off the answer taken when the fingers landed.
-        // A direction with nowhere to go sends it back to where it started, which is the bounce:
-        // the swipe still happened, and still lets go of every window, it simply had no distance
-        // to cover.
-        let target = if pad.swipe_up || pad.swipe_down {
-            swipe_preview.as_ref().map(|pv| {
-                let dest = if pad.swipe_up { pv.up } else { pv.down };
-                dest.unwrap_or(pv.from_zoom)
-            })
-        } else {
-            None
-        };
-
-        // Around the middle of the screen by default. These move the whole canvas rather than
-        // a piece of it, so where the cursor happens to be sitting is not what the gesture is
-        // about. swipe_zoom_at_cursor takes the pinch's rule instead and holds whatever you
-        // are pointing at still while the scale changes around it.
-        if let Some(target) = target {
-            // Around the point the preview was turning around, so the commit continues the motion
-            // your fingers were making rather than starting a new one somewhere else.
-            let (ax, ay) = match swipe_preview.as_ref() {
-                Some(pv) => (pv.ax, pv.ay),
-                None if set.swipe_zoom_at_cursor => {
-                    let (px, py) = pointer_xy.unwrap_or((0, 0));
-                    (px as f32, py as f32)
+        // Let go, having gone far enough: the nearest window that way, or back where you started.
+        //
+        // Searched from where the fingers landed rather than from where the slide has left the
+        // view, or the gesture would be biased by its own preview: nudge far enough toward a window
+        // and it starts to count as being behind you.
+        if pad.swipe_fired {
+            let origin = swipe_preview
+                .as_ref()
+                .map(|pv| (pv.from_cx, pv.from_cy))
+                .unwrap_or((cam.cx, cam.cy));
+            match render::nearest_in_direction(&windows, origin, swipe_way(pad.swipe_dir, &set)) {
+                Some(surf) => {
+                    if let Some((wx, wy)) = render::window_center(&windows, &surf) {
+                        let window = wl::state::window_root(&state, &surf);
+                        focus_window(&mut state, &mut focused, Some(window));
+                        let target = zoom_for_window(&windows, &surf, &set);
+                        zoom_placed = (target != set.zoom_default).then_some(target);
+                        zoom_ease = Some(journey_to(&cam, target, Some((wx, wy)), 0.0, 0.0, true));
+                    }
                 }
-                None => (ray::screen_width() as f32 * 0.5, ray::screen_height() as f32 * 0.5),
-            };
-            zoom_ease = Some(journey_to(&cam, target, None, ax, ay, true));
-        }
-        // It fired, so the preview is spent rather than mistaken: the journey it just started
-        // carries on from wherever the fingers had got the view to, and nothing is taken back.
-        if pad.swipe_up || pad.swipe_down {
+                // Nothing that way. The swipe still happened and still gave way; there was simply
+                // nowhere for it to go, so the view comes back rather than drifting off the end.
+                None => {
+                    zoom_ease = Some(journey_to(&cam, cam.zoom, Some(origin), 0.0, 0.0, true));
+                }
+            }
             swipe_preview = None;
         }
-        // And the fingers left without it firing, or with nothing for it to do. Back to where the
-        // view was when they landed, on the same spring as everything else, which is what makes a
-        // dry gesture read as an answer rather than as nothing happening.
+        // And the fingers left without going far enough. Back to where the view was when they
+        // landed, on the same spring as everything else.
         if !pad.swiping {
             if let Some(preview) = swipe_preview.take() {
-                if (cam.zoom - preview.from_zoom).abs() > NEAR {
-                    zoom_ease =
-                        Some(journey_to(&cam, preview.from_zoom, None, preview.ax, preview.ay, true));
-                }
+                let home = (preview.from_cx, preview.from_cy);
+                zoom_ease = Some(journey_to(&cam, cam.zoom, Some(home), 0.0, 0.0, true));
             }
         }
 
@@ -2323,7 +2293,12 @@ fn main() {
         // Gone means gone entirely, not merely mostly: a window one pixel of which is still on
         // screen is a window you are still working in, and letting go while a corner of it shows
         // would make focus flicker as you pan along an edge.
-        if let Some(surf) = focused.clone() {
+        //
+        // Not while the view is travelling. A journey to a window focuses it as it sets off, when
+        // the window is by definition still off screen, so asking this question mid-flight would
+        // take the focus back before the view had moved a pixel. What you can see is not a settled
+        // fact while the camera is moving, and this rule is about settled facts.
+        if let (Some(surf), None) = (focused.clone(), zoom_ease.as_ref()) {
             let (sw, sh) = (ray::screen_width() as f32, ray::screen_height() as f32);
             let corners = (
                 camera::screen_to_plane(cam3d, 0.0, 0.0, 0.0),
@@ -2888,18 +2863,67 @@ fn main() {
         // journey Super with a double click makes. One hand, no keyboard, and no click: a tap is
         // fingers landing and leaving without travelling, so it cannot be confused with the
         // three-finger swipes, which are the same fingers going somewhere.
+        // The tap is the zoom now that the swipes have stopped being about it, and it is one
+        // gesture with three answers rather than three gestures.
+        //
+        // At 1:1 it steps back to the overview, whatever is under the cursor: from up close the
+        // thing you want is almost always to see where everything is, and having to aim at empty
+        // canvas to ask for it would be a rule to remember rather than a gesture.
+        //
+        // From anywhere else it comes in. To the window under the cursor if there is one, at the
+        // scale that window asks for, and otherwise to 1:1 where you are pointing, so tapping over
+        // empty canvas in the overview drops you into that part of it rather than nowhere.
         if pad.three_finger_double_tap {
-            if let Some((surf, ..)) = render::window_at(&windows, cam3d, sxp, syp) {
-                if let Some((wx, wy)) = render::window_center(&windows, &surf) {
-                    render::front(&mut windows, &surf);
-                    // Being sent to a window is choosing it, so it takes the keyboard too. The
-                    // toplevel rather than whatever surface was under the cursor, which is the
-                    // rule a click follows: focus never goes to a popup or a subsurface.
-                    let window = wl::state::window_root(&state, &surf);
-                    focus_window(&mut state, &mut focused, Some(window));
-                    let target = zoom_for_window(&windows, &surf, &set);
-                    zoom_placed = (target != set.zoom_default).then_some(target);
-                    zoom_ease = Some(journey_to(&cam, target, Some((wx, wy)), 0.0, 0.0, false));
+            let (px, py) = pointer_xy.unwrap_or((0, 0));
+            let (ax, ay) = (px as f32, py as f32);
+            let at_home = (cam.zoom - set.zoom_default).abs() < HOME;
+
+            // A window under the cursor that is not the one you are already in. That is the case
+            // where a tap means "this one", and it is the only case where the tap hands over focus
+            // instead of letting go: you pointed at something and asked for it by name.
+            //
+            // Whatever the zoom. Pointing at a window says which window far more clearly than the
+            // scale says anything, so nothing about how close you are should change the answer.
+            let under = render::window_at(&windows, cam3d, sxp, syp).filter(|(surf, ..)| {
+                focused.as_ref() != Some(&wl::state::window_root(&state, surf))
+            });
+
+            match under {
+                Some((surf, ..)) => {
+                    if let Some((wx, wy)) = render::window_center(&windows, &surf) {
+                        render::front(&mut windows, &surf);
+                        let window = wl::state::window_root(&state, &surf);
+                        focus_window(&mut state, &mut focused, Some(window));
+                        // The tap lets go of everything by default. Not this time: it was asked for
+                        // a window, and route_input would take back the focus given here.
+                        release_all = false;
+                        let target = zoom_for_window(&windows, &surf, &set);
+                        zoom_placed = (target != set.zoom_default).then_some(target);
+                        zoom_ease =
+                            Some(journey_to(&cam, target, Some((wx, wy)), 0.0, 0.0, false));
+                    }
+                }
+                // Nothing new to go to, so the tap is about the view.
+                //
+                // Working in a window, or pointing at the one you are already in: let go of it and
+                // step back a little, since standing at the same scale afterwards would say nothing
+                // happened and the overview would say more than you asked.
+                //
+                // Otherwise it is the zoom's own toggle: at 1:1 step out to the overview, and from
+                // anywhere else come home to 1:1 where you are pointing.
+                None => {
+                    let stepping_back = focused.is_some() && set.tap_step_out < 1.0;
+                    let target = if stepping_back {
+                        (cam.zoom * set.tap_step_out)
+                            .max(set.overview_zoom)
+                            .clamp(set.zoom_min, set.zoom_max)
+                    } else if at_home {
+                        set.overview_zoom
+                    } else {
+                        set.zoom_default
+                    };
+                    zoom_placed = None;
+                    zoom_ease = Some(journey_to(&cam, target, None, ax, ay, false));
                 }
             }
         }

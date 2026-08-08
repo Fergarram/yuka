@@ -1160,6 +1160,49 @@ fn spot_free(windows: &Windows, x: f32, y: f32, w: f32, h: f32, gap: f32) -> boo
     true
 }
 
+// The nearest window in a direction from a point, or None when there is nothing that way.
+//
+// A cone rather than a half plane: a window at right angles to the swipe is not "that way", however
+// close it is, and treating it as a candidate would make the gesture feel like it was guessing.
+// Within the cone the score is how far along the direction it lies plus a penalty for how far off
+// the line, so a window straight ahead beats a nearer one off to the side.
+pub fn nearest_in_direction(
+    windows: &Windows,
+    from: (f32, f32),
+    dir: (f32, f32),
+) -> Option<WlSurface> {
+    // How far off the line a candidate may be, as a fraction of how far along it is. 1.0 is a
+    // forty-five degree cone either side, which covers a hand that swipes diagonally by accident
+    // without reaching windows nobody was pointing at.
+    const SPREAD: f32 = 1.0;
+    // And how much being off the line costs against being far away, which is what makes a window
+    // straight ahead win over a closer one to the side.
+    const OFF_AXIS: f32 = 2.0;
+
+    let mut best: Option<(f32, usize)> = None;
+    for i in 0..windows.surface.len() {
+        if child(windows, i) || !drawable(windows, i) {
+            continue;
+        }
+        let (x, y, w, h) = visible(windows, i);
+        let (vx, vy) = (x + w * 0.5 - from.0, y + h * 0.5 - from.1);
+        let along = vx * dir.0 + vy * dir.1;
+        // Behind you, or where you already are.
+        if along <= 1.0 {
+            continue;
+        }
+        let across = (vx * dir.1 - vy * dir.0).abs();
+        if across > along * SPREAD {
+            continue;
+        }
+        let score = along + across * OFF_AXIS;
+        if best.map_or(true, |(b, _)| score < b) {
+            best = Some((score, i));
+        }
+    }
+    best.map(|(_, i)| windows.surface[i].clone())
+}
+
 // Where to put a new window: the nearest place to the middle of the view where it lands on nothing.
 //
 // A cascade is what a desktop does because a desktop has one screenful and no choice. A canvas has
