@@ -257,6 +257,12 @@ pub fn visible(windows: &Windows, i: usize) -> (f32, f32, f32, f32) {
     )
 }
 
+// A window's drawn rectangle in canvas units, for a caller that has a surface rather than an index.
+// The same rectangle the hit test uses, so what is judged to be on screen is what is on screen.
+pub fn window_rect(windows: &Windows, surface: &WlSurface) -> Option<(f32, f32, f32, f32)> {
+    index_of(windows, surface).map(|i| visible(windows, i))
+}
+
 // What we do with a client's dmabuf once it is imported. The arm not selected at runtime is
 // unused by construction.
 //

@@ -11,8 +11,12 @@ GOALS:
 
 BUGS:
 
-[ ] If focused window gets out of camera view, it should unfocus immediately.
-[ ] dont change z order when focusing via click on existing windows.
+[x] If focused window gets out of camera view, it should unfocus immediately.
+    Checked every frame against the view rectangle. Gone means entirely gone, so focus does not
+    flicker while an edge of the window is still on screen.
+[x] dont change z order when focusing via click on existing windows.
+    A click focuses without raising now. Super+drag still raises, since picking a window
+    up is the moment you did ask for it on top.
 
 ---
 

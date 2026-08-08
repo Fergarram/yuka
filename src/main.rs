@@ -576,8 +576,13 @@ fn route_input(
                 // handing focus to the popup killed the menu before the click landed,
                 // and re-sending focus a window already has would do the same for no
                 // reason at all.
+                //
+                // And focus alone: the window is not brought to the front. Clicking something to
+                // type in it should not rearrange the desk, and on a canvas the stack is mostly a
+                // detail of where things overlap rather than a pile you dig through. Raising is
+                // still what a Super+drag does, since picking a window up is the moment you did
+                // ask for it to be on top.
                 let window = wl::state::window_root(state, surf);
-                render::front(windows, &window);
                 focus_window(state, focused, Some(window));
             }
             None => focus_window(state, focused, None),
@@ -2279,6 +2284,31 @@ fn main() {
         // as the 3D camera is built rather than written back into cam, so no code path can
         // forget it and none can accumulate it either.
         let cam3d = camera::camera_3d(&cam, ray::screen_width(), ray::screen_height(), &set);
+
+        // A focused window that has left the view lets go of the keyboard.
+        //
+        // Focus is a claim on what you type, and typing into something you cannot see is the way
+        // to put a paragraph somewhere you will not find it. On a canvas that is not a rare
+        // accident: panning away from a window is an ordinary thing to do, and the window has no
+        // idea it happened.
+        //
+        // Gone means gone entirely, not merely mostly: a window one pixel of which is still on
+        // screen is a window you are still working in, and letting go while a corner of it shows
+        // would make focus flicker as you pan along an edge.
+        if let Some(surf) = focused.clone() {
+            let (sw, sh) = (ray::screen_width() as f32, ray::screen_height() as f32);
+            let corners = (
+                camera::screen_to_plane(cam3d, 0.0, 0.0, 0.0),
+                camera::screen_to_plane(cam3d, sw, sh, 0.0),
+            );
+            if let (Some((lx, ty)), Some((rx, by)), Some((x, y, w, h))) =
+                (corners.0, corners.1, render::window_rect(&windows, &surf))
+            {
+                if x + w < lx || x > rx || y + h < ty || y > by {
+                    focus_window(&mut state, &mut focused, None);
+                }
+            }
+        }
         let cursor_pos = pointer_xy;
 
         // Super+drag: grab the window under the cursor and lift it toward the
