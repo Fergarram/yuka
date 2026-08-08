@@ -34,8 +34,6 @@ use smithay::reexports::wayland_server::Resource;
 // DmabufMode::Blit is the other way out of that: it copies an imported buffer into a texture
 // of ours, which can then carry a chain like an shm one. Measured at roughly three times the
 // slow frame rate, so it is a zoom quality decision rather than a free one.
-const MIPS_WHEN_MINIFIED: bool = false;
-
 //
 // Constants
 //
@@ -635,6 +633,47 @@ pub fn align_positions(windows: &mut Windows, zoom: f32) {
     }
 }
 
+// Copy every dmabuf window we are sampling in place into a texture of our own, so it can carry a
+// mip chain.
+//
+// Only while minified, which is the whole idea: at 1:1 and above a chain buys nothing and holding
+// the client's buffer costs nothing, so the copy would be pure loss. Below that the window is being
+// shrunk and level 0 alone shimmers, and a copy is the only way to have the smaller levels at all.
+// A dmabuf's level 0 is the client's buffer, and there is nowhere to put the rest.
+//
+// Once per window rather than once per frame: after this it is ours, so the next frame finds owns
+// already true and does nothing. The client's next commit puts it back on the imported texture,
+// freeing this one, and the copy happens again if the view is still out.
+pub fn blit_minified(windows: &mut Windows, egl: &Egl, zoom: f32, below: f32) {
+    if below <= 0.0 || zoom >= below {
+        return;
+    }
+    for i in 0..windows.surface.len() {
+        if windows.owns[i] || windows.tex_id[i] == 0 || windows.tex_w[i] <= 0 {
+            continue;
+        }
+        let (w, h) = (windows.tex_w[i], windows.tex_h[i]);
+        let dst = ray::load_texture_rgba(std::ptr::null(), w, h);
+        if dst == 0 {
+            continue;
+        }
+        if !egl.copy_into(windows.tex_id[i], dst, w, h) {
+            // The driver will not render from this image. Nothing is lost: the imported texture is
+            // still there and still draws, it simply cannot have a chain.
+            ray::unload_texture(dst);
+            continue;
+        }
+        // The old texture belongs to the dmabuf cache, so it is dropped rather than freed.
+        windows.tex_id[i] = dst;
+        windows.owns[i] = true;
+        // An imported image samples as correct RGBA and so does a copy of it.
+        windows.swizzle[i] = 0.0;
+        // A new texture, with nothing set on it and no chain yet.
+        windows.mip[i] = MIP_NONE;
+        windows.filter[i] = FILTER_UNSET;
+    }
+}
+
 // Decide how each window is sampled. Runs every frame, after everything that could move
 // a window and before anything is drawn.
 //
@@ -662,7 +701,7 @@ pub fn align_positions(windows: &mut Windows, zoom: f32) {
 // min filter then leaves it incomplete, an incomplete texture samples as transparent
 // black, and our shader discards on zero alpha, so the window silently vanishes the
 // moment you zoom out. That is exactly what Chromium did.
-pub fn prepare_textures(windows: &mut Windows, zoom: f32, anisotropy: f32) {
+pub fn prepare_textures(windows: &mut Windows, zoom: f32, anisotropy: f32, mips: bool) {
     // Below this a window is being shrunk; at or above it, it is being magnified.
     const NATIVE_ZOOM: f32 = 0.999;
     // A lift this small is a window that has finished settling.
@@ -683,7 +722,7 @@ pub fn prepare_textures(windows: &mut Windows, zoom: f32, anisotropy: f32) {
             && (windows.scale_y[i] - 1.0).abs() < SCALE_EPS;
 
         // A chain, if this window is being shrunk and does not have one yet.
-        if MIPS_WHEN_MINIFIED && !magnified && windows.mip[i] == MIP_NONE {
+        if mips && !magnified && windows.mip[i] == MIP_NONE {
             windows.mip[i] = if !windows.owns[i] {
                 MIP_REFUSED
             } else if egl::build_mips(windows.tex_id[i], anisotropy) {
@@ -697,7 +736,7 @@ pub fn prepare_textures(windows: &mut Windows, zoom: f32, anisotropy: f32) {
 
         let want = if magnified && flat && unscaled {
             FILTER_NEAREST
-        } else if MIPS_WHEN_MINIFIED && !magnified && windows.mip[i] == MIP_READY {
+        } else if mips && !magnified && windows.mip[i] == MIP_READY {
             FILTER_TRILINEAR
         } else {
             FILTER_LINEAR

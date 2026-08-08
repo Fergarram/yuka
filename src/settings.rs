@@ -218,6 +218,23 @@ pub struct Settings {
     // geometry rectangle, so the padding can never be clicked.
     pub draw_shadows: bool,
 
+    // Whether a window being shrunk gets a mip chain, sampled trilinear with anisotropy.
+    //
+    // It measurably reduces the shimmer on minified text, and it was off because only textures we
+    // own can carry a chain: a dmabuf sampled in place cannot, so half the canvas would have had
+    // it and half would not. dmabuf_blit_below is what closes that gap.
+    pub mips_when_minified: bool,
+    // The zoom below which a dmabuf window is copied into a texture of our own, so that it can
+    // carry a chain like an shm one.
+    //
+    // The copy is what a mip chain costs, and this is when it is worth paying: at 1:1 and above a
+    // chain buys nothing, since nothing is being minified, and holding the client's buffer in
+    // place is free. Below this the window is being shrunk, which is where the shimmer lives.
+    //
+    // Once per commit rather than per frame, so a window that is not redrawing pays once and then
+    // nothing. A client that commits every frame while you are zoomed out pays every frame, which
+    // is the case to watch. 0 switches it off and dmabuf windows are never copied.
+    pub dmabuf_blit_below: f32,
     // What happens to a client's dmabuf once we have imported it: hold it and sample it in
     // place, or copy it into a texture of our own and hand it back. See DmabufMode.
     pub dmabuf_mode: DmabufMode,
@@ -404,6 +421,8 @@ pub fn defaults() -> Settings {
         resize_stretch: false,
         resize_wait_frames: 8,
         draw_shadows: true,
+        mips_when_minified: true,
+        dmabuf_blit_below: 0.9,
         dmabuf_mode: DmabufMode::Hold,
 
         fit_padding_px: 0.0,
@@ -603,6 +622,15 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
                 return false;
             }
         },
+        "mips_when_minified" => match value {
+            "true" | "1" | "yes" => set.mips_when_minified = true,
+            "false" | "0" | "no" => set.mips_when_minified = false,
+            _ => {
+                eprintln!("om_wm: settings: {path}:{line}: mips_when_minified wants true or false");
+                return false;
+            }
+        },
+        "dmabuf_blit_below" => f32_key!(dmabuf_blit_below),
         "draw_shadows" => match value {
             "true" | "1" | "yes" => set.draw_shadows = true,
             "false" | "0" | "no" => set.draw_shadows = false,
@@ -654,6 +682,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
 // Clamped rather than rejected: a file with one silly number should still load, and a
 // zoom range of zero would divide by it.
 fn sanitise(set: &mut Settings) {
+    set.dmabuf_blit_below = set.dmabuf_blit_below.max(0.0);
     set.fit_padding_px = set.fit_padding_px.max(0.0);
     set.zoom_min = set.zoom_min.max(0.001);
     set.zoom_max = set.zoom_max.max(set.zoom_min * 1.001);

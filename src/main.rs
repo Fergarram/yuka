@@ -3061,7 +3061,17 @@ fn main() {
         // Everything that could move a window has run. Put them all on the pixel grid, then
         // decide how each one is sampled from where it actually ended up.
         render::align_positions(&mut windows, cam.zoom);
-        render::prepare_textures(&mut windows, cam.zoom, anisotropy);
+        // Copy first, so a window that has just become ours is mipped on the same frame rather
+        // than spending one frame minified without a chain.
+        //
+        // And only when a chain is wanted at all: the copy exists to make one possible, so with
+        // mips off it would be a texture allocated, a blit run and a buffer doubled in memory for
+        // nothing. Turning mips off is the way to spend nothing here on a machine that cannot
+        // afford it, and it has to actually mean that.
+        if set.mips_when_minified {
+            render::blit_minified(&mut windows, &egl, cam.zoom, set.dmabuf_blit_below);
+        }
+        render::prepare_textures(&mut windows, cam.zoom, anisotropy, set.mips_when_minified);
 
         // Dismissal is the popup grab's job now, not ours: it knows the chain and
         // tells the client in the right order. OM_WM_DEBUG_INPUT=1 still dumps the

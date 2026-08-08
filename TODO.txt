@@ -19,7 +19,6 @@ IMPROVEMENTS OR TESTS:
 [ ] design three-finger gesture to grab windows when not in focus and be able to lift and resize with one hand
 
 [ ] Spawning new windows should get an option to spawn non-covering and find nearest empty space
-[ ] show false positive 3 finger gesture by sprining back if already in a direction.
 
 [ ] dont change z order when focusing via click on existing windows.
 
@@ -27,6 +26,8 @@ IMPROVEMENTS OR TESTS:
 
 MINIMUM SHIT:
 
+[ ] CMDPAL
+[ ] App launcher
 [-] Picture-in-picture mode is tricky
 [-] A lot of polish for trackpad gesture/sensitivity.
 [ ] decent cursor for canvas 
