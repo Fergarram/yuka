@@ -11,6 +11,8 @@ GOALS:
 
 BUGS:
 
+[ ] If focused window gets out of camera view, it should unfocus immediately.
+[ ] dont change z order when focusing via click on existing windows.
 
 ---
 
@@ -20,9 +22,7 @@ IMPROVEMENTS OR TESTS:
 
 [ ] Spawning new windows should get an option to spawn non-covering and find nearest empty space
 
-[ ] dont change z order when focusing via click on existing windows.
-
-[ ] Palm rest. I think done by increasing the minimum pressure required to mark as finger depending on how close to the sides it is.
+[ ] Palm rest. I think done by increasing the minimum area required to mark as finger depending on how close to the sides it is.
 
 ---
 
@@ -36,6 +36,8 @@ MINIMUM SHIT:
     The theme's own left_ptr, read out of the Xcursor files every toolkit reads, so the
     canvas pointer is literally the same image the windows show. Falls back to a drawn
     arrow when no theme is installed. XCURSOR_THEME and XCURSOR_SIZE are honoured.
+    cursor-shape-v1 too, so a client can ask for "text" or "grab" by name and we read it
+    from the same theme. Newer toolkits prefer that to sending pixels once it is offered.
 [ ] drag and drop
 [ ] Correct pointer lock behavior
 [ ] Minimize window design

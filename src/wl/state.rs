@@ -54,13 +54,16 @@ use smithay::wayland::dmabuf::{
     ImportNotifier,
 };
 use smithay::wayland::shm::{ShmHandler, ShmState};
+use smithay::wayland::cursor_shape::CursorShapeManagerState;
 use smithay::wayland::pointer_gestures::PointerGesturesState;
+use smithay::wayland::tablet_manager::TabletSeatHandler;
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::xdg_activation::{
     XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
 };
 use smithay::{
-    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_output,
+    delegate_compositor, delegate_cursor_shape, delegate_data_device, delegate_dmabuf,
+    delegate_output,
     delegate_pointer_gestures, delegate_seat, delegate_shm, delegate_viewporter,
     delegate_xdg_activation, delegate_xdg_shell,
 };
@@ -110,6 +113,12 @@ pub struct State {
     // guess at. Held for the lifetime of the program to keep the global registered.
     #[allow(dead_code)]
     pub pointer_gestures_state: PointerGesturesState,
+    // Cursors asked for by name rather than by pixels: a client says "text" or "grab" and looking
+    // it up in the theme is ours to do. Newer toolkits prefer this to sending an image, and without
+    // the global they fall back to sending one, so this is about doing the modern thing well rather
+    // than about anything being broken. Held to keep the global registered.
+    #[allow(dead_code)]
+    pub cursor_shape_state: CursorShapeManagerState,
     pub keyboard: KeyboardHandle<State>,
     pub dmabuf_state: DmabufState,
     #[allow(dead_code)]
@@ -231,6 +240,7 @@ pub fn init(
     let mut seat = seat_state.new_wl_seat(&dh, "seat0");
     let pointer = seat.add_pointer();
     let pointer_gestures_state = PointerGesturesState::new::<State>(&dh);
+    let cursor_shape_state = CursorShapeManagerState::new::<State>(&dh);
     let keyboard = seat
         .add_keyboard(XkbConfig::default(), 600, 25)
         .expect("keyboard");
@@ -281,6 +291,7 @@ pub fn init(
         seat,
         pointer,
         pointer_gestures_state,
+        cursor_shape_state,
         keyboard,
         dmabuf_state,
         dmabuf_global,
@@ -1180,6 +1191,11 @@ impl XdgShellHandler for State {
 //
 // Delegates
 //
+
+delegate_cursor_shape!(State);
+// Required by the cursor-shape delegate, which serves tablet tools as well as pointers. We have no
+// tablet, so the default does exactly the right amount of nothing.
+impl TabletSeatHandler for State {}
 
 delegate_compositor!(State);
 delegate_shm!(State);

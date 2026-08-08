@@ -168,6 +168,8 @@ pub struct Cursor {
 #[derive(Clone, Copy, PartialEq)]
 pub enum Shape {
     Arrow,
+    // A shape asked for by name, keyed by which one so a repeat costs nothing.
+    Named(u32),
     Hidden,
     // A client's own image. The generation counter changes whenever that surface commits
     // new pixels, which is how an animated cursor gets uploaded again.
@@ -353,31 +355,48 @@ fn place(c: &mut Cursor) {
 //
 
 // Back to our own arrow, for the canvas.
+// Lay a theme image into the plane: straight rows of ARGB, cropped rather than scaled, exactly the
+// way a client's own image is handled. Both are premultiplied ARGB8888, which is what the plane
+// wants, so neither needs converting.
+fn blit_image(map: *mut u8, pitch: u32, image: &xcursor::Image) {
+    for y in 0..image.h.min(CURSOR_SIZE as i32) {
+        for x in 0..image.w.min(CURSOR_SIZE as i32) {
+            let at = (y * image.w + x) as usize;
+            put(map, pitch, x, y, image.pixels[at]);
+        }
+    }
+}
+
 pub fn set_arrow(c: &mut Cursor) {
     if c.shape == Shape::Arrow {
         return;
     }
     clear(c);
-    // The theme's own pixels, laid into the plane the same way a client's are: straight rows of
-    // ARGB, cropped rather than scaled, hotspot exactly as the file gives it.
+    let (map, pitch) = (c.map, c.pitch);
     let hot = match c.own.as_ref() {
         Some(image) => {
-            let (map, pitch) = (c.map, c.pitch);
-            for y in 0..image.h.min(CURSOR_SIZE as i32) {
-                for x in 0..image.w.min(CURSOR_SIZE as i32) {
-                    let at = (y * image.w + x) as usize;
-                    put(map, pitch, x, y, image.pixels[at]);
-                }
-            }
+            blit_image(map, pitch, image);
             (image.hot_x, image.hot_y)
         }
         None => {
-            draw_arrow(c.map, c.pitch);
+            draw_arrow(map, pitch);
             (ARROW_HOT_X, ARROW_HOT_Y)
         }
     };
     c.shape = Shape::Arrow;
     arm(c, hot.0, hot.1);
+}
+
+// A cursor a client asked for by name, from the theme. The key identifies which one, so hovering
+// the same text field for a thousand frames uploads nothing after the first.
+pub fn set_named(c: &mut Cursor, key: u32, image: &xcursor::Image) {
+    if c.shape == Shape::Named(key) {
+        return;
+    }
+    clear(c);
+    blit_image(c.map, c.pitch, image);
+    c.shape = Shape::Named(key);
+    arm(c, image.hot_x, image.hot_y);
 }
 
 // No cursor at all, which a client is allowed to ask for: a video player hiding it, or a

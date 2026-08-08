@@ -1360,6 +1360,10 @@ fn main() {
     //
     // Keyed by surface, capped, and only for surfaces small enough to be a cursor.
     let mut cursor_images: Vec<CursorImage> = Vec::new();
+    // Cursors a client asked for by name, looked up in the theme once each. The name is kept
+    // alongside a None for a shape the theme does not have, so a miss is not looked up again every
+    // frame the pointer sits over the thing that wanted it.
+    let mut named_cursors: Vec<(&'static str, Option<xcursor::Image>)> = Vec::new();
     // What we last handed the plane: surface and hotspot, so an unchanged cursor is not
     // rebuilt every frame.
     let mut cursor_key: Option<(ObjectId, i32, i32)> = None;
@@ -3043,8 +3047,37 @@ fn main() {
                     cursor::apply_client(cur);
                 }
                 (true, CursorImageStatus::Hidden) => cursor::set_hidden(cur),
-                // A named shape, which needs a cursor theme we do not load yet; a surface
-                // whose pixels we have not seen yet; and empty canvas.
+                // A shape asked for by name rather than sent as pixels: the client says "text" or
+                // "grab" and looking it up in the theme is ours to do. Same theme the windows use,
+                // so an I-beam here is the I-beam they would have drawn.
+                //
+                // Every name is tried in turn, since themes disagree about what to call things:
+                // the protocol's own name first, then the older X11 ones it is also known by.
+                (true, CursorImageStatus::Named(icon)) => {
+                    let name = icon.name();
+                    let at = match named_cursors.iter().position(|(n, _)| *n == name) {
+                        Some(at) => at,
+                        None => {
+                            let mut found = xcursor::load(name, 0);
+                            for alt in icon.alt_names() {
+                                if found.is_some() {
+                                    break;
+                                }
+                                found = xcursor::load(alt, 0);
+                            }
+                            if found.is_none() && debug_input {
+                                println!("om_wm: no theme cursor for {name}, using our own");
+                            }
+                            named_cursors.push((name, found));
+                            named_cursors.len() - 1
+                        }
+                    };
+                    match named_cursors[at].1.as_ref() {
+                        Some(image) => cursor::set_named(cur, at as u32, image),
+                        None => cursor::set_arrow(cur),
+                    }
+                }
+                // A surface whose pixels we have not seen yet, and empty canvas.
                 _ => cursor::set_arrow(cur),
             }
         }
