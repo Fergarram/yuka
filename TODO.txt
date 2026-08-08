@@ -11,9 +11,14 @@ GOALS:
 
 BUGS:
 
+[ ] Sometimes apps can focus on existing windows. if the winow to be focused is not at least 30% (or whatever configured) visible in camera, we should fly to it.
+
 ---
 
 IMPROVEMENTS OR TESTS:
+
+[x] An app activating one of its own windows flies the view to it, when the window is not
+    already fully on screen. Fully visible is left alone.
 
 [ ] When window in focus and NOT maximized. If super is pressed and cursor on top of this window, two-finger pinch should resize the window from center and we should use the pinch aspect ratio as a way to set the new size proportion as well.
 

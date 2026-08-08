@@ -1693,7 +1693,29 @@ fn main() {
                 continue;
             }
             render::front(&mut windows, &surface);
-            focus_window(&mut state, &mut focused, Some(surface));
+            focus_window(&mut state, &mut focused, Some(surface.clone()));
+            // And go to it if it is not already all on screen.
+            //
+            // An application activating one of its windows means "the thing you asked for is here",
+            // and here is a place on a canvas larger than the view. Partly visible counts as not
+            // here: a window with half of itself off the edge is one you would have to go and find
+            // anyway, and the journey is cheaper than the hunt.
+            //
+            // Fully visible is left alone. The window has focus and you can see all of it, and
+            // moving the view then would be motion for its own sake.
+            let (sw, sh) = (ray::screen_width() as f32, ray::screen_height() as f32);
+            let (lx, ty, rx, by) = camera::view_rect(&cam, sw, sh);
+            if let Some((x, y, w, h)) = render::window_rect(&windows, &surface) {
+                let all_on_screen = x >= lx && y >= ty && x + w <= rx && y + h <= by;
+                if !all_on_screen {
+                    if let Some((wx, wy)) = render::window_center(&windows, &surface) {
+                        let target = zoom_for_window(&windows, &surface, &set);
+                        zoom_placed = (target != set.zoom_default).then_some(target);
+                        zoom_ease =
+                            Some(journey_to(&cam, target, Some((wx, wy)), 0.0, 0.0, false));
+                    }
+                }
+            }
         }
 
         // New windows open where the view is.
@@ -2300,13 +2322,8 @@ fn main() {
         // fact while the camera is moving, and this rule is about settled facts.
         if let (Some(surf), None) = (focused.clone(), zoom_ease.as_ref()) {
             let (sw, sh) = (ray::screen_width() as f32, ray::screen_height() as f32);
-            let corners = (
-                camera::screen_to_plane(cam3d, 0.0, 0.0, 0.0),
-                camera::screen_to_plane(cam3d, sw, sh, 0.0),
-            );
-            if let (Some((lx, ty)), Some((rx, by)), Some((x, y, w, h))) =
-                (corners.0, corners.1, render::window_rect(&windows, &surf))
-            {
+            let (lx, ty, rx, by) = camera::view_rect(&cam, sw, sh);
+            if let Some((x, y, w, h)) = render::window_rect(&windows, &surf) {
                 if x + w < lx || x > rx || y + h < ty || y > by {
                     focus_window(&mut state, &mut focused, None);
                 }

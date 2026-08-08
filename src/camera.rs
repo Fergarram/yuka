@@ -132,6 +132,17 @@ pub fn snapped_center(cam: &Camera, sw: f32, sh: f32) -> (f32, f32) {
     )
 }
 
+// What the view covers on the canvas, as left, top, right, bottom at the z = 0 plane.
+//
+// Flat maths rather than a ray cast: the 3D camera is built so one canvas unit is exactly `zoom`
+// screen pixels there, so casting through it would give the same four numbers more slowly. Through
+// the aligned centre, so it agrees with what was drawn.
+pub fn view_rect(cam: &Camera, sw: f32, sh: f32) -> (f32, f32, f32, f32) {
+    let (cx, cy) = snapped_center(cam, sw, sh);
+    let (half_w, half_h) = (sw * 0.5 / cam.zoom, sh * 0.5 / cam.zoom);
+    (cx - half_w, cy - half_h, cx + half_w, cy + half_h)
+}
+
 // Build the perspective 3D camera. It floats on the -z side of the canvas,
 // looking toward +z, at a distance chosen so that at the z=0 plane `zoom` screen
 // pixels map to one canvas unit (keeping the 2D zoom controls meaningful).
