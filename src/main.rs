@@ -1944,6 +1944,18 @@ fn main() {
                 debug_fps = !debug_fps;
                 println!("om_wm: fps counter {}", if debug_fps { "on" } else { "off" });
             }
+            // Super+W asks the focused window to close, the way every desktop's close chord does.
+            //
+            // Asks. xdg_toplevel.close is a request, and a client may answer it with a dialog about
+            // unsaved work or ignore it entirely. Killing the process instead would be deciding on
+            // its behalf that whatever it was holding does not matter.
+            let close_window = input::super_down(i)
+                && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_W);
+            if close_window {
+                if let Some(surf) = focused.clone() {
+                    wl::state::close_toplevel(&state, &surf);
+                }
+            }
             let toggle_pad = input::super_down(i)
                 && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_P);
             if toggle_pad {

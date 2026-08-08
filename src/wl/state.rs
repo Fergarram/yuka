@@ -454,6 +454,26 @@ pub fn maximize_toplevel(state: &State, surface: &WlSurface, w: i32, h: i32, max
     }
 }
 
+// Ask a toplevel to close.
+//
+// Ask, not kill. xdg_toplevel.close is a request, and a client is entitled to answer it with a
+// dialog about unsaved work, or with nothing at all. A compositor that killed the process instead
+// would be deciding on the client's behalf that whatever it was holding does not matter.
+//
+// Which means a window that ignores this stays open, and the only honest answer to that is a
+// separate, more deliberate act rather than making this one heavier.
+pub fn close_toplevel(state: &State, surface: &WlSurface) {
+    let Some(toplevel) = state
+        .xdg_state
+        .toplevel_surfaces()
+        .iter()
+        .find(|t| t.wl_surface() == surface)
+    else {
+        return;
+    };
+    toplevel.send_close();
+}
+
 // Tell a toplevel it is not maximized, and that its size is its own business.
 //
 // For refusing a request rather than answering one. A configure carrying 0x0 is the protocol's way
