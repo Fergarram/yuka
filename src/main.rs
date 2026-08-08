@@ -1627,14 +1627,32 @@ fn main() {
         // app doing the launching hands over a token proving a user asked for it; we do not
         // implement it, so anything that is not the focused client waits to be clicked.
         for surface in windows.mapped.drain(..).collect::<Vec<_>>() {
-            let welcome = match focused.as_ref() {
-                Some(current) => same_client(current, &surface),
-                None => true,
+            let welcome = match set.focus_new {
+                settings::FocusNew::Never => false,
+                settings::FocusNew::Always => true,
+                settings::FocusNew::SameClient => match focused.as_ref() {
+                    Some(current) => same_client(current, &surface),
+                    None => true,
+                },
             };
             if welcome {
                 // No raise needed: a window is given the frontmost stack order as it is
                 // stored, and nothing between there and here can have changed that.
-                focus_window(&mut state, &mut focused, Some(surface));
+                focus_window(&mut state, &mut focused, Some(surface.clone()));
+                // And the view goes to it, on the same journey a double click makes.
+                //
+                // A canvas is larger than the screen, so a window that opened in clear space may
+                // have opened somewhere you are not looking, and one you launched and cannot find
+                // is worse than one that landed on your work. Behind the same welcome test as the
+                // focus above, so an application helping itself to a window in the background
+                // cannot help itself to your view either.
+                if set.spawn_travel {
+                    if let Some((wx, wy)) = render::window_center(&windows, &surface) {
+                        let target = zoom_for_window(&windows, &surface, &set);
+                        zoom_placed = (target != set.zoom_default).then_some(target);
+                        zoom_ease = Some(journey_to(&cam, target, Some((wx, wy)), 0.0, 0.0, false));
+                    }
+                }
             }
         }
 
@@ -1672,7 +1690,16 @@ fn main() {
         }
 
         // New windows open where the view is.
-        render::set_place_origin(&mut windows, cam.cx, cam.cy);
+        render::set_place_origin(
+            &mut windows,
+            cam.cx,
+            cam.cy,
+            render::Spawn {
+                clear: set.spawn_clear,
+                gap: set.spawn_gap,
+                order: set.spawn_order,
+            },
+        );
 
 
         // Send frame callbacks and flush BEFORE the vsync-blocking draw, so the

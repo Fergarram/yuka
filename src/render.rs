@@ -150,6 +150,9 @@ pub struct Windows {
     // land exactly on the first. A row from the origin was fine for a fixed test
     // set and wrong for real apps: anything that opened later, including a
     // browser's own dialogs, landed off screen and looked like it never appeared.
+    // How a new window places itself. Policy from the settings, kept here so that placing a window
+    // needs nothing but the window list.
+    spawn: Spawn,
     place_at: (f32, f32),
     cascade: u32,
     // Next stack order to assign (monotonic; higher = more recently raised).
@@ -212,6 +215,7 @@ pub fn windows_new() -> Windows {
         popup: Vec::new(),
         sub: Vec::new(),
         placed: Vec::new(),
+        spawn: Spawn { clear: true, gap: 24.0, order: [DIR_NONE; 4] },
         place_at: (0.0, 0.0),
         cascade: 0,
         next_order: 0,
@@ -268,6 +272,25 @@ pub fn visible(windows: &Windows, i: usize) -> (f32, f32, f32, f32) {
 // The same rectangle the hit test uses, so what is judged to be on screen is what is on screen.
 pub fn window_rect(windows: &Windows, surface: &WlSurface) -> Option<(f32, f32, f32, f32)> {
     index_of(windows, surface).map(|i| visible(windows, i))
+}
+
+// Which way a new window prefers to look for room, as indices into this list. 255 is "no more
+// preferences", so an order may be shorter than four.
+pub const DIR_RIGHT: u8 = 0;
+pub const DIR_UP: u8 = 1;
+pub const DIR_LEFT: u8 = 2;
+pub const DIR_DOWN: u8 = 3;
+pub const DIR_NONE: u8 = 255;
+
+// How a new window places itself: whether to look for room at all, how much of it to leave, and
+// which directions to try before others.
+//
+// One value rather than three arguments, because it travels together and is set in one place.
+#[derive(Clone, Copy)]
+pub struct Spawn {
+    pub clear: bool,
+    pub gap: f32,
+    pub order: [u8; 4],
 }
 
 // What we do with a client's dmabuf once it is imported. The arm not selected at runtime is
@@ -1078,8 +1101,112 @@ pub fn log_rects(windows: &Windows) {
 // Where the next new window will be centred: the canvas point in the middle of
 // the view. Kept current by the main loop so a window always opens where you are
 // looking, however far the canvas has been panned.
-pub fn set_place_origin(windows: &mut Windows, cx: f32, cy: f32) {
+pub fn set_place_origin(windows: &mut Windows, cx: f32, cy: f32, spawn: Spawn) {
     windows.place_at = (cx, cy);
+    windows.spawn = spawn;
+}
+
+// Which of the four directions a candidate lies in, from the centre it was measured against.
+//
+// The dominant axis, so a candidate up and slightly right counts as up. A diagonal, where neither
+// leads, belongs to no direction at all and is only taken once the preferred ones are exhausted.
+fn direction_of(dx: i32, dy: i32) -> u8 {
+    if dx.abs() > dy.abs() {
+        if dx > 0 {
+            DIR_RIGHT
+        } else {
+            DIR_LEFT
+        }
+    } else if dy.abs() > dx.abs() {
+        // Screen coordinates: y grows downward, so up is negative.
+        if dy < 0 {
+            DIR_UP
+        } else {
+            DIR_DOWN
+        }
+    } else {
+        DIR_NONE
+    }
+}
+
+// How much a direction is preferred, lower being sooner. Anything unlisted comes after everything
+// listed, which is what makes a short order mean "these first, then whatever is nearest".
+fn direction_rank(order: &[u8; 4], dir: u8) -> u8 {
+    for (rank, &want) in order.iter().enumerate() {
+        if want == DIR_NONE {
+            break;
+        }
+        if want == dir {
+            return rank as u8;
+        }
+    }
+    u8::MAX
+}
+
+// Whether a rectangle would land clear of every window already on the canvas, with a gap around it.
+//
+// Children are ignored: a popup belongs to its parent and is placed off it every frame, so treating
+// a menu as an obstacle would push new windows away from a shape that is about to disappear.
+fn spot_free(windows: &Windows, x: f32, y: f32, w: f32, h: f32, gap: f32) -> bool {
+    for i in 0..windows.surface.len() {
+        if child(windows, i) || !drawable(windows, i) {
+            continue;
+        }
+        let (bx, by, bw, bh) = visible(windows, i);
+        if x - gap < bx + bw && bx < x + w + gap && y - gap < by + bh && by < y + h + gap {
+            return false;
+        }
+    }
+    true
+}
+
+// Where to put a new window: the nearest place to the middle of the view where it lands on nothing.
+//
+// A cascade is what a desktop does because a desktop has one screenful and no choice. A canvas has
+// room, and a window arriving on top of what you are reading is a decision nobody made. Nearest to
+// the middle rather than anywhere free, because a window that opens where you are not looking is
+// its own kind of lost.
+//
+// Rings outward from the centre, taking the closest free candidate on the first ring that has one.
+// Rings rather than a scan, so the answer is near by construction rather than by sorting everything.
+// The step is half a window, fine enough not to miss a gap that would have fitted and coarse enough
+// to cross a screenful in a handful of rings.
+fn free_spot(windows: &Windows, w: f32, h: f32) -> (f32, f32) {
+    const RINGS: i32 = 16;
+    let (cx, cy) = windows.place_at;
+    let gap = windows.spawn.gap;
+    let order = windows.spawn.order;
+    let step = (w.max(h) * 0.5).max(64.0);
+
+    for ring in 0..=RINGS {
+        // Ranked first by which direction it lies in, then by how far it is. With no preferences
+        // every candidate ranks the same and this is purely nearest, which is where it started.
+        let mut best: Option<(u8, f32, f32, f32)> = None;
+        for dy in -ring..=ring {
+            for dx in -ring..=ring {
+                // The perimeter of this ring only: the inside was searched by the rings before it.
+                if ring > 0 && dx.abs() != ring && dy.abs() != ring {
+                    continue;
+                }
+                let (ox, oy) = (cx + dx as f32 * step, cy + dy as f32 * step);
+                let (x, y) = ((ox - w * 0.5).round(), (oy - h * 0.5).round());
+                if !spot_free(windows, x, y, w, h, gap) {
+                    continue;
+                }
+                let rank = direction_rank(&order, direction_of(dx, dy));
+                let d2 = (ox - cx) * (ox - cx) + (oy - cy) * (oy - cy);
+                if best.map_or(true, |(br, bd, _, _)| (rank, d2) < (br, bd)) {
+                    best = Some((rank, d2, x, y));
+                }
+            }
+        }
+        if let Some((_, _, x, y)) = best {
+            return (x, y);
+        }
+    }
+    // A canvas crowded for sixteen rings in every direction. Land in the middle and overlap, which
+    // is at least where you are looking.
+    ((cx - w * 0.5).round(), (cy - h * 0.5).round())
 }
 
 // Anchor every popup to its parent on the canvas. The offset is the position the
@@ -1263,6 +1390,11 @@ fn store_entry(
             const CASCADE_WRAP: u32 = 6;
             let (cx, cy) = if popup || sub {
                 (0.0, 0.0)
+            } else if windows.spawn.clear {
+                // The buffer's size, since geometry is not known until the client's first commit.
+                // That reads slightly larger than the window is, by whatever it pads around itself,
+                // which errs toward leaving room rather than toward crowding.
+                free_spot(windows, w as f32, h as f32)
             } else {
                 let step = (windows.cascade % CASCADE_WRAP) as f32 * CASCADE_STEP;
                 windows.cascade += 1;

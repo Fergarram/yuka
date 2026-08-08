@@ -23,7 +23,7 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use crate::input::TrackpadMode;
-use crate::render::DmabufMode;
+use crate::render::{DmabufMode, DIR_DOWN, DIR_LEFT, DIR_NONE, DIR_RIGHT, DIR_UP};
 
 //
 // Constants
@@ -35,6 +35,22 @@ pub const DEFAULT_PATH: &str = "om_wm.conf";
 //
 // Types
 //
+
+// Which new windows are allowed to take the keyboard as they appear.
+#[derive(Clone, Copy, PartialEq)]
+pub enum FocusNew {
+    // None of them. Every window waits to be clicked, which is the only rule that can never
+    // interrupt what you are typing.
+    Never,
+    // Only from the client you were already using, or when nothing had focus. A dialog from the
+    // application in front of you is something you asked for; a window from one you left running in
+    // the background is not, and taking your keystrokes mid-sentence is why compositors stopped
+    // letting clients do this at all.
+    SameClient,
+    // All of them. The honest choice once the view travels to a new window anyway: being carried to
+    // something you cannot type into is a stranger state than being carried to something you can.
+    Always,
+}
 
 #[derive(Clone, Copy)]
 pub struct Settings {
@@ -204,6 +220,44 @@ pub struct Settings {
     // means fresher content from a client that ignores configures, at the cost of asking
     // one that is merely slow to redraw work it will throw away.
     pub resize_wait_frames: u32,
+    // Whether a new window looks for empty canvas instead of landing on what is already there.
+    //
+    // The cascade it replaces is what a desktop does because a desktop has one screenful and has to
+    // stack. A canvas has room, so a window arriving on top of your work is a choice nobody made.
+    //
+    // Nearest free space to the middle of the view, so it still arrives where you are looking, and
+    // false goes back to the cascade.
+    pub spawn_clear: bool,
+    // Which new windows take the keyboard as they appear. See FocusNew.
+    //
+    // spawn_travel follows this rather than deciding for itself: the view goes to a window exactly
+    // when that window is allowed to have your typing, so the two can never disagree about whether
+    // a window is worth your attention.
+    pub focus_new: FocusNew,
+    // Whether the view travels to a window that has just opened.
+    //
+    // A canvas is larger than the screen, so a new window can land somewhere you are not looking,
+    // and one you launched and cannot see is worse than one that arrived on top of your work.
+    // Going to it answers where it went, using the same journey a double click makes.
+    //
+    // It takes the keyboard when the view arrives, which is not focus stealing so much as the
+    // consequence of arriving: a window that leaves the view drops focus anyway, so travelling
+    // without focusing would leave your typing going nowhere at all.
+    pub spawn_travel: bool,
+    // Which directions a new window tries before others when looking for room, in order.
+    //
+    // Nearest to the middle of the view is the rule, and this bends it: a direction named here is
+    // preferred over one named later, and both over one not named at all. So "right" alone means it
+    // opens to the right when there is room and does whatever is nearest when there is not, while
+    // naming all four decides every case.
+    //
+    // Written in the file as names, "right,up,left,down", and empty for no preference at all, which
+    // is nearest and nothing else. Held as ranks rather than as text, since Settings is Copy and
+    // four bytes say the same thing.
+    pub spawn_order: [u8; 4],
+    // The gap left around a window placed that way, in canvas units. Enough that two windows read
+    // as two rather than as a seam, and small enough that a crowded canvas still finds room.
+    pub spawn_gap: f32,
     // How opaque a window is drawn while it covers the one you are working in.
     //
     // A window in front of the focused one hides work you are looking at, and the usual answers are
@@ -431,6 +485,11 @@ pub fn defaults() -> Settings {
         resize_stretch: false,
         resize_wait_frames: 8,
         draw_shadows: true,
+        spawn_clear: true,
+        focus_new: FocusNew::SameClient,
+        spawn_travel: true,
+        spawn_order: [DIR_RIGHT, DIR_UP, DIR_LEFT, DIR_DOWN],
+        spawn_gap: 24.0,
         cover_opacity: 0.35,
         mips_when_minified: true,
         dmabuf_blit_below: 0.9,
@@ -633,6 +692,64 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
                 return false;
             }
         },
+        "spawn_gap" => f32_key!(spawn_gap),
+        "spawn_order" => {
+            let mut order = [DIR_NONE; 4];
+            let mut at = 0;
+            for name in value.split(',') {
+                let name = name.trim();
+                if name.is_empty() || name == "nearest" {
+                    continue;
+                }
+                let dir = match name {
+                    "right" => DIR_RIGHT,
+                    "up" => DIR_UP,
+                    "left" => DIR_LEFT,
+                    "down" => DIR_DOWN,
+                    _ => {
+                        eprintln!(
+                            "om_wm: settings: {path}:{line}: spawn_order wants right, up, left, \
+                             down or nearest"
+                        );
+                        return false;
+                    }
+                };
+                // A direction named twice is the same preference stated twice, not a new one.
+                if order.contains(&dir) {
+                    continue;
+                }
+                order[at] = dir;
+                at += 1;
+            }
+            set.spawn_order = order;
+        }
+        "focus_new" => match value {
+            "never" | "none" => set.focus_new = FocusNew::Never,
+            "same-client" | "same_client" => set.focus_new = FocusNew::SameClient,
+            "always" => set.focus_new = FocusNew::Always,
+            _ => {
+                eprintln!(
+                    "om_wm: settings: {path}:{line}: focus_new wants never, same-client or always"
+                );
+                return false;
+            }
+        },
+        "spawn_travel" => match value {
+            "true" | "1" | "yes" => set.spawn_travel = true,
+            "false" | "0" | "no" => set.spawn_travel = false,
+            _ => {
+                eprintln!("om_wm: settings: {path}:{line}: spawn_travel wants true or false");
+                return false;
+            }
+        },
+        "spawn_clear" => match value {
+            "true" | "1" | "yes" => set.spawn_clear = true,
+            "false" | "0" | "no" => set.spawn_clear = false,
+            _ => {
+                eprintln!("om_wm: settings: {path}:{line}: spawn_clear wants true or false");
+                return false;
+            }
+        },
         "cover_opacity" => f32_key!(cover_opacity),
         "mips_when_minified" => match value {
             "true" | "1" | "yes" => set.mips_when_minified = true,
@@ -694,6 +811,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
 // Clamped rather than rejected: a file with one silly number should still load, and a
 // zoom range of zero would divide by it.
 fn sanitise(set: &mut Settings) {
+    set.spawn_gap = set.spawn_gap.max(0.0);
     set.cover_opacity = set.cover_opacity.clamp(0.0, 1.0);
     set.dmabuf_blit_below = set.dmabuf_blit_below.max(0.0);
     set.fit_padding_px = set.fit_padding_px.max(0.0);
