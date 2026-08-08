@@ -141,6 +141,9 @@ pub struct State {
     // The cursor a client asked for, from wl_pointer.set_cursor. Read each frame by the
     // cursor plane code, which decides whether to honour it.
     pub cursor_image: CursorImageStatus,
+    // Bumped on every set_cursor, so the frame loop can see the call rather than infer it from the
+    // value changing.
+    pub cursor_serial: u32,
     // Clients asking to be moved or resized, from dragging their own titlebar or edge.
     // Drained each frame by the canvas code, which is where a drag actually lives. The
     // resize entries carry which edges are moving, as a direction per axis.
@@ -287,6 +290,7 @@ pub fn init(
         committed: Vec::new(),
         dead_dmabufs: Vec::new(),
         cursor_image: CursorImageStatus::default_named(),
+        cursor_serial: 0,
         move_requests: Vec::new(),
         resize_requests: Vec::new(),
         maximize_requests: Vec::new(),
@@ -1030,6 +1034,12 @@ impl SeatHandler for State {
     // because drawing it belongs to the cursor plane and this is the protocol boundary.
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
         self.cursor_image = image;
+        // Every set_cursor lands here, including one that repeats what it said last time. Counting
+        // them is the only way the cursor code can tell "the client stated its hotspot again" from
+        // "the client said nothing this frame", and those two mean opposite things for the attach
+        // offsets the protocol says decrement a hotspot: a fresh set_cursor sets it outright, and
+        // only attaches after it move it.
+        self.cursor_serial = self.cursor_serial.wrapping_add(1);
     }
 }
 

@@ -22,6 +22,8 @@ IMPROVEMENTS OR TESTS:
 
 [ ] dont change z order when focusing via click on existing windows.
 
+[ ] Palm rest. I think done by increasing the minimum pressure required to mark as finger depending on how close to the sides it is.
+
 ---
 
 MINIMUM SHIT:
@@ -30,7 +32,10 @@ MINIMUM SHIT:
 [ ] App launcher
 [-] Picture-in-picture mode is tricky
 [-] A lot of polish for trackpad gesture/sensitivity.
-[ ] decent cursor for canvas 
+[x] decent cursor for canvas
+    The theme's own left_ptr, read out of the Xcursor files every toolkit reads, so the
+    canvas pointer is literally the same image the windows show. Falls back to a drawn
+    arrow when no theme is installed. XCURSOR_THEME and XCURSOR_SIZE are honoured.
 [ ] drag and drop
 [ ] Correct pointer lock behavior
 [ ] Minimize window design

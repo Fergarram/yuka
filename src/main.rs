@@ -17,6 +17,7 @@ mod settings;
 mod seat;
 mod touch;
 mod wl;
+mod xcursor;
 
 use std::ffi::c_int;
 use std::process::{Child, Command};
@@ -144,9 +145,13 @@ struct CursorImage {
     pixels: Vec<u32>,
     // In buffer pixels, which is what the plane is armed with.
     hot: (i32, i32),
-    // And the last hotspot set_cursor gave us, so a new one can be told from the old. A fresh
-    // set_cursor is the client stating the hotspot outright, which resets the accumulation.
-    set: (i32, i32),
+    // And which set_cursor we last took a hotspot from, by the serial the protocol side counts.
+    //
+    // The call rather than the value. A client that states the same hotspot twice has stated it
+    // twice, and each statement resets whatever the attaches since had subtracted from it; reading
+    // that off the value instead meant a client repeating one hotspot never reset at all, and every
+    // attach offset piled onto it until the tip was in the wrong place.
+    set: u32,
 }
 
 // A window being dragged: which one, the offset from the cursor to its origin, and whether
@@ -1339,7 +1344,7 @@ fn main() {
     // Last session state we acted on, to catch activation edges from libseat.
     let mut session_active = true;
     // What the cursor should be showing, as of the last frame, for the debug trace only.
-    let mut last_cursor_want = "crosshair";
+    let mut last_cursor_want = "arrow";
     // The dmabuf mode we last said out loud, so a live reload that changes it says so once.
     let mut announced_dmabuf: Option<DmabufMode> = None;
     // Where recent button presses landed, by serial, for anchoring client-initiated drags.
@@ -1584,7 +1589,7 @@ fn main() {
                         h,
                         pixels,
                         hot: (0, 0),
-                        set: (i32::MIN, i32::MIN),
+                        set: u32::MAX,
                     });
                 }
                 cursor_key = None;
@@ -2960,7 +2965,8 @@ fn main() {
 
         // The cursor image belongs to whatever is under the pointer: a text field wants an
         // I-beam and a resize edge wants an arrow, and only the client knows which. A client
-        // asking for no cursor gets none. Over empty canvas it is ours, and a crosshair.
+        // asking for no cursor gets none. Over empty canvas it is ours: the same arrow, so the
+        // pointer does not change shape for having nothing under it.
         //
         // The hotspot comes with it, which is the part that was wrong before: a cursor
         // image says where in itself the pointer actually is, and without honouring that
@@ -2986,10 +2992,11 @@ fn main() {
             let id = surf.id();
             let (hx, hy) = wl::state::cursor_hotspot(surf);
             if let Some(img) = cursor_images.iter_mut().find(|c| c.id == id) {
-                // A hotspot we have not been told before is a fresh set_cursor, which states
-                // where the pointer is in the surface and so ends any accumulation.
-                if img.set != (hx, hy) {
-                    img.set = (hx, hy);
+                // A set_cursor we have not acted on yet: the client is stating where the pointer is
+                // in its surface, so that is the hotspot, and anything the attaches had subtracted
+                // is done with.
+                if img.set != state.cursor_serial {
+                    img.set = state.cursor_serial;
                     img.hot = (hx, hy);
                     cursor_key = None;
                 }
@@ -3024,7 +3031,7 @@ fn main() {
                     (true, CursorImageStatus::Surface(_)) => "client",
                     (true, CursorImageStatus::Hidden) => "hidden",
                     (true, CursorImageStatus::Named(_)) => "named",
-                    _ => "crosshair",
+                    _ => "arrow",
                 };
                 if want != last_cursor_want {
                     println!("om_wm: cursor want {want} (was {last_cursor_want})");
@@ -3038,7 +3045,7 @@ fn main() {
                 (true, CursorImageStatus::Hidden) => cursor::set_hidden(cur),
                 // A named shape, which needs a cursor theme we do not load yet; a surface
                 // whose pixels we have not seen yet; and empty canvas.
-                _ => cursor::set_crosshair(cur),
+                _ => cursor::set_arrow(cur),
             }
         }
 

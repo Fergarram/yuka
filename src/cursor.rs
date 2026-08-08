@@ -13,14 +13,25 @@
 use std::fs;
 use std::path::Path;
 
+use crate::xcursor;
+
 //
 // Constants
 //
 
 const CURSOR_SIZE: u32 = 64;
-// Our own cursor: a crosshair centered at (10, 10), so its hotspot is there.
-const CROSSHAIR_HOT_X: i32 = 10;
-const CROSSHAIR_HOT_Y: i32 = 10;
+// Our own cursor: an arrow, tip at its own top-left corner, which is where every pointer people
+// have used for forty years puts its hotspot.
+const ARROW_HOT_X: i32 = 0;
+const ARROW_HOT_Y: i32 = 0;
+
+// The arrow, as the outline of the classic left pointer, in cursor pixels from the tip. Down the
+// left edge, up into the notch, out along the tail and back, then across the shoulder and home.
+//
+// A polygon rather than a picture, so it is one list of corners to read and to change, and the
+// black edge comes from growing the filled shape by a pixel rather than from being drawn twice.
+const ARROW: [(i32, i32); 7] =
+    [(0, 0), (0, 24), (6, 18), (10, 28), (14, 26), (10, 17), (17, 17)];
 
 //
 // libdrm FFI
@@ -96,7 +107,7 @@ pub struct Cursor {
     map: *mut u8,
     pitch: u32,
     size: u64,
-    // The hotspot currently in force, which is the crosshair's or the client's. Every move
+    // The hotspot currently in force, which is our arrow's or the client's. Every move
     // is offset by it, so the pointer position and the point of the arrow are the same
     // place: this is what decides whether a click lands where the cursor looks like it is.
     hot_x: i32,
@@ -108,8 +119,8 @@ pub struct Cursor {
     // Our own copy of the client's cursor image, and where its hotspot is.
     //
     // Kept because the client's buffer is not ours to hold: it is released back the moment
-    // we have read it, and the plane's buffer gets overwritten whenever the crosshair comes
-    // back. Without a copy, crossing from the canvas onto a window would show the crosshair
+    // we have read it, and the plane's buffer gets overwritten whenever our own arrow comes
+    // back. Without a copy, crossing from the canvas onto a window would show the arrow
     // until the client happened to commit its cursor again, which it has no reason to do.
     client: Vec<u32>,
     client_hot: (i32, i32),
@@ -135,6 +146,13 @@ pub struct Cursor {
     // it drags does not is either being told late, or being told slowly.
     move_calls: u64,
     move_ms: f64,
+    // Our own pointer, from the cursor theme, and where its tip is. None when no theme could be
+    // read, which is when the drawn arrow below is used instead.
+    //
+    // The theme's is preferred because the canvas should not change the pointer's shape for having
+    // nothing under it: every window shows a themed cursor, and a drawn one is always slightly the
+    // wrong drawing. Read once at startup, since it cannot change without the theme changing.
+    own: Option<xcursor::Image>,
     // Whether to hold the plane back until the frame is about to be presented.
     //
     // The plane updates the instant the ioctl lands, while our windows only appear at the
@@ -149,7 +167,7 @@ pub struct Cursor {
 // Which image the plane is carrying.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Shape {
-    Crosshair,
+    Arrow,
     Hidden,
     // A client's own image. The generation counter changes whenever that surface commits
     // new pixels, which is how an animated cursor gets uploaded again.
@@ -202,7 +220,7 @@ pub fn init(screen_w: i32, screen_h: i32) -> Option<Cursor> {
         return None;
     }
 
-    draw_crosshair(map as *mut u8, pitch);
+    draw_arrow(map as *mut u8, pitch);
 
     if unsafe {
         drmModeSetCursor2(
@@ -211,8 +229,8 @@ pub fn init(screen_w: i32, screen_h: i32) -> Option<Cursor> {
             handle,
             CURSOR_SIZE,
             CURSOR_SIZE,
-            CROSSHAIR_HOT_X,
-            CROSSHAIR_HOT_Y,
+            ARROW_HOT_X,
+            ARROW_HOT_Y,
         )
     } != 0
     {
@@ -221,10 +239,17 @@ pub fn init(screen_w: i32, screen_h: i32) -> Option<Cursor> {
     }
 
     println!("om_wm: hardware cursor on crtc {crtc} (drm fd {fd})");
+    // The theme's pointer, if there is one to read. The name every theme has, at the size every
+    // toolkit asks for unless told otherwise.
+    let own = xcursor::load("left_ptr", 0);
+    if own.is_none() {
+        println!("om_wm: no cursor theme found, drawing our own arrow");
+    }
     let mut c = Cursor {
         fd,
         crtc,
         handle,
+        own,
         x: screen_w / 2,
         y: screen_h / 2,
         max_x: screen_w,
@@ -232,10 +257,10 @@ pub fn init(screen_w: i32, screen_h: i32) -> Option<Cursor> {
         map: map as *mut u8,
         pitch,
         size,
-        hot_x: CROSSHAIR_HOT_X,
-        hot_y: CROSSHAIR_HOT_Y,
+        hot_x: ARROW_HOT_X,
+        hot_y: ARROW_HOT_Y,
         visible: true,
-        shape: Shape::Crosshair,
+        shape: Shape::Arrow,
         client: vec![0; (CURSOR_SIZE * CURSOR_SIZE) as usize],
         client_hot: (0, 0),
         client_gen: 0,
@@ -327,15 +352,32 @@ fn place(c: &mut Cursor) {
 // Shapes
 //
 
-// Back to our own crosshair, for the canvas.
-pub fn set_crosshair(c: &mut Cursor) {
-    if c.shape == Shape::Crosshair {
+// Back to our own arrow, for the canvas.
+pub fn set_arrow(c: &mut Cursor) {
+    if c.shape == Shape::Arrow {
         return;
     }
     clear(c);
-    draw_crosshair(c.map, c.pitch);
-    c.shape = Shape::Crosshair;
-    arm(c, CROSSHAIR_HOT_X, CROSSHAIR_HOT_Y);
+    // The theme's own pixels, laid into the plane the same way a client's are: straight rows of
+    // ARGB, cropped rather than scaled, hotspot exactly as the file gives it.
+    let hot = match c.own.as_ref() {
+        Some(image) => {
+            let (map, pitch) = (c.map, c.pitch);
+            for y in 0..image.h.min(CURSOR_SIZE as i32) {
+                for x in 0..image.w.min(CURSOR_SIZE as i32) {
+                    let at = (y * image.w + x) as usize;
+                    put(map, pitch, x, y, image.pixels[at]);
+                }
+            }
+            (image.hot_x, image.hot_y)
+        }
+        None => {
+            draw_arrow(c.map, c.pitch);
+            (ARROW_HOT_X, ARROW_HOT_Y)
+        }
+    };
+    c.shape = Shape::Arrow;
+    arm(c, hot.0, hot.1);
 }
 
 // No cursor at all, which a client is allowed to ask for: a video player hiding it, or a
@@ -427,7 +469,7 @@ pub fn apply_client(c: &mut Cursor) {
     blit_client(c);
     c.shape = Shape::Client(c.client_gen);
     let (hx, hy) = c.client_hot;
-    // Coming from the crosshair or from hidden, the plane has to be handed the buffer and
+    // Coming from our own arrow or from hidden, the plane has to be handed the buffer and
     // the hotspot again. Between two client images it does not.
     if coming_from_elsewhere || (hx, hy) != (c.hot_x, c.hot_y) {
         arm(c, hx, hy);
@@ -564,33 +606,51 @@ fn put(base: *mut u8, pitch: u32, x: i32, y: i32, color: u32) {
     unsafe { *(base.add(off) as *mut u32) = color };
 }
 
-// A crosshair centered at (10, 10): white 1px arms with a black outline and a
-// small center gap for precision. ARGB8888 (little-endian B,G,R,A).
-fn draw_crosshair(base: *mut u8, pitch: u32) {
+// Whether a pixel's centre is inside the arrow, by counting how many edges a ray cast from it
+// crosses. Odd is inside, which is the whole of the even-odd rule and needs no special cases for a
+// shape like this one.
+fn in_arrow(x: i32, y: i32) -> bool {
+    let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+    let mut inside = false;
+    let mut j = ARROW.len() - 1;
+    for i in 0..ARROW.len() {
+        let (xi, yi) = (ARROW[i].0 as f32, ARROW[i].1 as f32);
+        let (xj, yj) = (ARROW[j].0 as f32, ARROW[j].1 as f32);
+        if (yi > py) != (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
+fn draw_arrow(base: *mut u8, pitch: u32) {
     const TRANSPARENT: u32 = 0x0000_0000;
     const WHITE: u32 = 0xFFFF_FFFF;
     const BLACK: u32 = 0xFF00_0000;
 
+    // White where the shape is, and black in a one pixel skirt around it: an arrow has to be
+    // visible on a white window and on a black one, and a single colour is only ever visible on
+    // one of them. Grown from the shape rather than drawn as a second outline, so the two can
+    // never disagree about where the edge is.
     for y in 0..CURSOR_SIZE as i32 {
         for x in 0..CURSOR_SIZE as i32 {
-            put(base, pitch, x, y, TRANSPARENT);
-        }
-    }
-
-    let c = 10i32;
-    let len = 10i32;
-    let gap = 2i32;
-
-    // Black outline pass (3px arms), then white center pass (1px arms) on top.
-    for &(color, thick) in &[(BLACK, 1i32), (WHITE, 0i32)] {
-        for i in -len..=len {
-            if i.abs() < gap {
-                continue;
-            }
-            for w in -thick..=thick {
-                put(base, pitch, c + i, c + w, color); // horizontal arm
-                put(base, pitch, c + w, c + i, color); // vertical arm
-            }
+            let color = if in_arrow(x, y) {
+                WHITE
+            } else if in_arrow(x - 1, y)
+                || in_arrow(x + 1, y)
+                || in_arrow(x, y - 1)
+                || in_arrow(x, y + 1)
+                || in_arrow(x - 1, y - 1)
+                || in_arrow(x + 1, y - 1)
+                || in_arrow(x - 1, y + 1)
+                || in_arrow(x + 1, y + 1)
+            {
+                BLACK
+            } else {
+                TRANSPARENT
+            };
+            put(base, pitch, x, y, color);
         }
     }
 }
