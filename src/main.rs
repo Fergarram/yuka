@@ -2920,7 +2920,9 @@ fn main() {
             match under {
                 Some((surf, ..)) => {
                     if let Some((wx, wy)) = render::window_center(&windows, &surf) {
-                        render::front(&mut windows, &surf);
+                        // Focused, not raised. Going to a window is choosing where to be, not
+                        // rearranging what is in front of what, and the same rule a click follows:
+                        // the stack changes when you pick a window up, which is a Super+drag.
                         let window = wl::state::window_root(&state, &surf);
                         focus_window(&mut state, &mut focused, Some(window));
                         // The tap lets go of everything by default. Not this time: it was asked for
