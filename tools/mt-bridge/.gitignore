@@ -1,0 +1,4 @@
+# built binaries
+host/mt-capture
+mt-inject
+*.o
