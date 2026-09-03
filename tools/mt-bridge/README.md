@@ -60,6 +60,13 @@ the (unfocused) UTM window: two fingers pan and pinch the canvas, one finger mov
 the pointer, a click clicks. Press Enter in the mt-capture terminal to pause or
 resume forwarding.
 
+macOS gestures: om_wm uses 3- and 4-finger gestures, and so does macOS (Mission
+Control, App Exposé, swipe between full-screen apps and spaces, three-finger tap).
+Both fire at once, since macOS handles those below where any tap could swallow
+them. Turn them off while you work in the VM: System Settings > Trackpad, uncheck
+Mission Control, App Exposé, "Swipe between full-screen apps," and (under Point &
+Click) the three-finger tap; re-enable them afterward.
+
 Focus rules that fall out of how macOS delivers multitouch:
 
 - Touches reach the guest only while the mt-capture terminal is the frontmost app.
