@@ -103,13 +103,16 @@ static int create_device(void) {
     ioctl(fd, UI_SET_EVBIT, EV_KEY);
     ioctl(fd, UI_SET_EVBIT, EV_ABS);
 
-    // Properties that mark this as a clickable touchpad, not a touchscreen.
+    // Mark this as a touchpad (indirect pointing), not a touchscreen. We do NOT
+    // set INPUT_PROP_BUTTONPAD: we forward real left/right buttons from the Mac,
+    // and a buttonpad that also reports BTN_RIGHT trips libinput's "clickpad
+    // advertising right button" kernel-bug warning.
     ioctl(fd, UI_SET_PROPBIT, INPUT_PROP_POINTER);
-    ioctl(fd, UI_SET_PROPBIT, INPUT_PROP_BUTTONPAD);
 
     // Buttons. BTN_TOOL_* finger counts are what libinput reads to decide the
     // device is a touchpad with a tap-finger-count, which is om_wm's test for it.
     ioctl(fd, UI_SET_KEYBIT, BTN_LEFT);
+    ioctl(fd, UI_SET_KEYBIT, BTN_RIGHT);
     ioctl(fd, UI_SET_KEYBIT, BTN_TOUCH);
     ioctl(fd, UI_SET_KEYBIT, BTN_TOOL_FINGER);
     ioctl(fd, UI_SET_KEYBIT, BTN_TOOL_DOUBLETAP);
@@ -166,8 +169,8 @@ static int contact_on_surface(uint32_t state) {
     return state == 3 || state == 4 || state == 6;
 }
 
-// Turn one frame of contacts into a protocol-B report.
-static void inject_frame(int fd, const Contact *c, int n) {
+// Turn one frame of contacts into a protocol-B report. buttons: bit0 left, bit1 right.
+static void inject_frame(int fd, const Contact *c, int n, uint8_t buttons) {
     int want_slot[MAX_SLOTS];
     for (int i = 0; i < MAX_SLOTS; i++) want_slot[i] = -1;
 
@@ -244,6 +247,11 @@ static void inject_frame(int fd, const Contact *c, int n) {
     if (pressure > PRESSURE_MAX) pressure = PRESSURE_MAX;
     emit(fd, EV_ABS, ABS_PRESSURE, pressure);
 
+    // Physical click, from the host's mouse buttons. The kernel drops repeats,
+    // so re-emitting the same level every frame is a no-op.
+    emit(fd, EV_KEY, BTN_LEFT, (buttons & 1) ? 1 : 0);
+    emit(fd, EV_KEY, BTN_RIGHT, (buttons & 2) ? 1 : 0);
+
     syn(fd);
 }
 
@@ -278,7 +286,7 @@ static void run_test(int fd) {
         Contact c[2];
         c[0] = (Contact){ .id = 0, .x = (float)(cx - span), .y = 0.5f, .size = 0.5f, .state = 4 };
         c[1] = (Contact){ .id = 1, .x = (float)(cx + span), .y = 0.5f, .size = 0.5f, .state = 4 };
-        inject_frame(fd, c, 2);
+        inject_frame(fd, c, 2, 0);
         sleep_ms(ms);
         t += (double)ms / 1000.0;
     }
@@ -322,21 +330,23 @@ static void run_client(int fd, const char *host, int port) {
         fprintf(stderr, "mt-inject: connected\n");
 
         for (;;) {
-            uint8_t count;
-            int r = read_full(sock, &count, 1);
+            uint8_t hdr[2];               // count, buttons
+            int r = read_full(sock, hdr, 2);
             if (r <= 0) break;
+            uint8_t count = hdr[0];
+            uint8_t buttons = hdr[1];
             if (count > MAX_SLOTS) count = MAX_SLOTS;
             Contact c[MAX_SLOTS];
             if (count > 0) {
                 r = read_full(sock, c, (size_t)count * sizeof(Contact));
                 if (r <= 0) break;
             }
-            inject_frame(fd, c, count);
+            inject_frame(fd, c, count, buttons);
         }
         fprintf(stderr, "mt-inject: host disconnected, retrying\n");
         close(sock);
-        // Make sure no finger is left stuck down.
-        inject_frame(fd, NULL, 0);
+        // Make sure no finger or button is left stuck down.
+        inject_frame(fd, NULL, 0, 0);
         sleep_ms(500);
     }
 }

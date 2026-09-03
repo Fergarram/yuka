@@ -31,6 +31,7 @@
 #include <unistd.h>
 
 #include <CoreFoundation/CoreFoundation.h>
+#include <CoreGraphics/CoreGraphics.h>
 
 //
 // MultitouchSupport private API (reverse-engineered, stable for years)
@@ -54,8 +55,7 @@ typedef struct {
     float majorAxis;
     float minorAxis;
     MTVector absolute;
-    int32_t unknown4;
-    int32_t unknown5[2];
+    int32_t unknown4[2];
     float zDensity;
 } MTTouch;
 
@@ -85,7 +85,14 @@ typedef struct __attribute__((packed)) {
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_client = -1;
-static volatile int g_frames = 0; // for the heartbeat line
+static volatile int g_frames = 0;   // for the heartbeat line
+static volatile int g_paused = 0;   // press Enter to toggle forwarding
+static volatile int g_buttons = 0;  // bit0 left, bit1 right (from the event tap)
+
+// Last touch frame, so the click tap can send a frame with the current fingers
+// the instant a button changes. Guarded by g_lock.
+static WireContact g_last[MAX_SLOTS];
+static int g_last_n = 0;
 
 static void set_client(int fd) {
     pthread_mutex_lock(&g_lock);
@@ -116,32 +123,96 @@ static void send_frame(const uint8_t *buf, size_t len) {
     }
 }
 
+// Pack contacts + buttons into a wire frame and send it. Paused forwards a bare
+// "all up, no buttons" frame so nothing is left stuck on the guest.
+static void send_touch(const WireContact *cts, int n, int buttons) {
+    if (g_paused) {
+        uint8_t up[2] = { 0, 0 };
+        send_frame(up, 2);
+        return;
+    }
+    if (n < 0) n = 0;
+    if (n > MAX_SLOTS) n = MAX_SLOTS;
+    uint8_t buf[2 + MAX_SLOTS * sizeof(WireContact)];
+    buf[0] = (uint8_t)n;
+    buf[1] = (uint8_t)buttons;
+    memcpy(buf + 2, cts, (size_t)n * sizeof(WireContact));
+    send_frame(buf, 2 + (size_t)n * sizeof(WireContact));
+    g_frames++;
+}
+
 //
-// MultitouchSupport callback: pack the frame and ship it.
+// MultitouchSupport callback: convert the frame, remember it, and ship it.
 //
+
+static int g_debug = 0;
 
 static int contact_cb(MTDeviceRef dev, MTTouch *touches, int32_t n, double ts, int32_t frame) {
     (void)dev; (void)ts; (void)frame;
     if (n < 0) n = 0;
     if (n > MAX_SLOTS) n = MAX_SLOTS;
 
-    uint8_t buf[1 + MAX_SLOTS * sizeof(WireContact)];
-    buf[0] = (uint8_t)n;
-    WireContact *out = (WireContact *)(buf + 1);
+    if (g_debug) {
+        fprintf(stderr, "\nframe: n=%d  sizeof(MTTouch)=%zu\n", n, sizeof(MTTouch));
+        for (int i = 0; i < n; i++)
+            fprintf(stderr, "  [%d] id=%d state=%d x=%.3f y=%.3f maj=%.2f z=%.2f\n",
+                    i, touches[i].identifier, touches[i].state,
+                    touches[i].normalized.position.x, touches[i].normalized.position.y,
+                    touches[i].majorAxis, touches[i].zTotal);
+    }
+
+    WireContact cts[MAX_SLOTS];
     for (int i = 0; i < n; i++) {
-        out[i].id = touches[i].identifier;
-        out[i].x = touches[i].normalized.position.x;
-        out[i].y = touches[i].normalized.position.y;
+        cts[i].id = touches[i].identifier;
+        cts[i].x = touches[i].normalized.position.x;
+        cts[i].y = touches[i].normalized.position.y;
         // majorAxis is roughly finger contact size; scale toward 0..1.
         float size = touches[i].majorAxis / 10.0f;
         if (size > 1.0f) size = 1.0f;
         if (size < 0.0f) size = 0.0f;
-        out[i].size = size;
-        out[i].state = (uint32_t)touches[i].state;
+        cts[i].size = size;
+        cts[i].state = (uint32_t)touches[i].state;
     }
-    send_frame(buf, 1 + (size_t)n * sizeof(WireContact));
-    g_frames++;
+
+    pthread_mutex_lock(&g_lock);
+    memcpy(g_last, cts, (size_t)n * sizeof(WireContact));
+    g_last_n = n;
+    int buttons = g_buttons;
+    pthread_mutex_unlock(&g_lock);
+
+    send_touch(cts, n, buttons);
     return 0;
+}
+
+//
+// Mouse-button tap: the physical click is not in the touch stream, so read it
+// here and push a frame the instant it changes, using the last known contacts.
+//
+
+static CGEventRef click_cb(CGEventTapProxy proxy, CGEventType type, CGEventRef ev, void *ctx) {
+    (void)proxy; (void)ctx;
+    int bit = 0;
+    int down = 0;
+    switch (type) {
+        case kCGEventLeftMouseDown:  bit = 1; down = 1; break;
+        case kCGEventLeftMouseUp:    bit = 1; down = 0; break;
+        case kCGEventRightMouseDown: bit = 2; down = 1; break;
+        case kCGEventRightMouseUp:   bit = 2; down = 0; break;
+        case kCGEventTapDisabledByTimeout:
+        case kCGEventTapDisabledByUserInput:
+            return ev; // re-enabled by the caller if needed
+        default: return ev;
+    }
+    WireContact cts[MAX_SLOTS];
+    int n, buttons;
+    pthread_mutex_lock(&g_lock);
+    if (down) g_buttons |= bit; else g_buttons &= ~bit;
+    buttons = g_buttons;
+    n = g_last_n;
+    memcpy(cts, g_last, (size_t)n * sizeof(WireContact));
+    pthread_mutex_unlock(&g_lock);
+    send_touch(cts, n, buttons);
+    return ev; // listen-only: pass the event through untouched
 }
 
 //
@@ -150,6 +221,18 @@ static int contact_cb(MTDeviceRef dev, MTTouch *touches, int32_t n, double ts, i
 //
 
 static int g_listen = -1;
+
+// Press Enter in the mt-capture terminal to pause/resume forwarding, for when
+// the terminal is frontmost but you do not want the pad reaching the guest.
+static void *stdin_thread(void *arg) {
+    (void)arg;
+    char line[64];
+    while (fgets(line, sizeof(line), stdin)) {
+        g_paused = !g_paused;
+        fprintf(stderr, "\nmt-capture: forwarding %s\n", g_paused ? "PAUSED" : "resumed");
+    }
+    return NULL;
+}
 
 static void *accept_thread(void *arg) {
     (void)arg;
@@ -188,6 +271,7 @@ int main(int argc, char **argv) {
     int port = 9999;
     if (argc >= 2) host = argv[1];
     if (argc >= 3) port = atoi(argv[2]);
+    if (getenv("MT_DEBUG")) g_debug = 1;
 
     // Listening socket.
     g_listen = socket(AF_INET, SOCK_STREAM, 0);
@@ -211,8 +295,10 @@ int main(int argc, char **argv) {
     }
     fprintf(stderr, "mt-capture: listening on %s:%d\n", host, port);
 
-    pthread_t th;
+    pthread_t th, sth;
     pthread_create(&th, NULL, accept_thread, NULL);
+    pthread_create(&sth, NULL, stdin_thread, NULL);
+    fprintf(stderr, "mt-capture: press Enter to pause/resume forwarding\n");
 
     // Start every multitouch device (built-in trackpad and any Magic Trackpad).
     CFMutableArrayRef devs = MTDeviceCreateList();
@@ -227,6 +313,22 @@ int main(int argc, char **argv) {
         MTDeviceStart(d, 0);
     }
     fprintf(stderr, "mt-capture: %ld multitouch device(s) started\n", (long)ndev);
+
+    // Mouse-button tap for the physical click. Listen-only, so it needs Input
+    // Monitoring (or Accessibility) for the terminal running this; without it the
+    // tap is NULL and touches still work, only clicks are missing.
+    CGEventMask mask = CGEventMaskBit(kCGEventLeftMouseDown) | CGEventMaskBit(kCGEventLeftMouseUp) |
+                       CGEventMaskBit(kCGEventRightMouseDown) | CGEventMaskBit(kCGEventRightMouseUp);
+    CFMachPortRef tap = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap,
+                                         kCGEventTapOptionListenOnly, mask, click_cb, NULL);
+    if (tap) {
+        CFRunLoopSourceRef src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0);
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), src, kCFRunLoopCommonModes);
+        CGEventTapEnable(tap, true);
+        fprintf(stderr, "mt-capture: click tap active (forwarding trackpad clicks)\n");
+    } else {
+        fprintf(stderr, "mt-capture: no click tap (grant Input Monitoring to the terminal to get clicks)\n");
+    }
 
     // One-second heartbeat on the run loop.
     CFRunLoopTimerRef timer = CFRunLoopTimerCreate(

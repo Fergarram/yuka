@@ -6,5 +6,5 @@ set -e
 cd "$(dirname "$0")"
 clang -O2 -Wall mt-capture.c -o mt-capture \
     -F/System/Library/PrivateFrameworks \
-    -framework MultitouchSupport -framework CoreFoundation
+    -framework MultitouchSupport -framework CoreFoundation -framework CoreGraphics
 echo "built ./mt-capture"

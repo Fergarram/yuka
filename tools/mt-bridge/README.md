@@ -44,12 +44,29 @@ can break it; that is the only way to get trackpad multitouch on macOS.
 
        ./host/mt-capture                 # listens on 192.168.64.1:9999
 
+   Run this in a real terminal (Terminal.app or iTerm), not inside an editor's
+   embedded terminal: the click tap needs Input Monitoring for the app that owns
+   the process, and MultitouchSupport only delivers touches while that app is
+   frontmost. Grant the terminal Input Monitoring (System Settings > Privacy &
+   Security > Input Monitoring) and restart it once; the startup line then reads
+   "click tap active".
+
 3. Guest: start om_wm *after* mt-inject, so it finds the touchpad at startup.
 
        cd ~/repos/om_wm && ~/run_om_tty.sh
 
-Now touch the Mac trackpad: two fingers pan and pinch the canvas, and the rest of
-`touch.rs` (taps, pointer, gestures) is driven by the real pad.
+Now touch the Mac trackpad while the mt-capture terminal is frontmost, and watch
+the (unfocused) UTM window: two fingers pan and pinch the canvas, one finger moves
+the pointer, a click clicks. Press Enter in the mt-capture terminal to pause or
+resume forwarding.
+
+Focus rules that fall out of how macOS delivers multitouch:
+
+- Touches reach the guest only while the mt-capture terminal is the frontmost app.
+  Focus anything else and the trackpad is a normal Mac trackpad again.
+- You cannot gate it on the UTM window instead: when UTM is frontmost it grabs the
+  trackpad exclusively and MultitouchSupport delivers nothing. So om_wm renders to
+  the console and is driven through the bridge with UTM in the background.
 
 ## Permissions and setup notes (already done in this VM)
 
@@ -63,9 +80,8 @@ Now touch the Mac trackpad: two fingers pan and pinch the canvas, and the rest o
 
 ## Known gaps / next steps
 
-- The physical trackpad click (BTN_LEFT) is not streamed yet: MTTouch carries
-  contacts, not the button. Add a CGEventTap on the host for left/right mouse
-  button and a small button frame in the protocol.
+- Clicks are streamed via a CGEventTap (left and right mouse buttons). Needs Input
+  Monitoring for the terminal, see above.
 - `size`/pressure scaling (`majorAxis / 10`) is a first guess; tune against how
   `touch.rs` reads contact size and whole-pad load.
 - Y is flipped in the guest (Mac origin bottom-left, Linux MT top-left). If pan
