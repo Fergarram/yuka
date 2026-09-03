@@ -1163,7 +1163,18 @@ fn main() {
         ray::set_config_flags(ray::FLAG_WINDOW_UNDECORATED | ray::FLAG_VSYNC_HINT);
         ray::init_window(WINDOWED_W, WINDOWED_H, "om_wm (nested)");
     } else {
-        ray::init_window(0, 0, "om_wm");
+        // 0, 0 lets raylib take the connector's current mode: the whole screen. A
+        // virtual GPU whose current mode is not a clean match (virtio-gpu in a VM)
+        // can land on a tiny fallback, so OM_WM_SIZE=WxH names the mode by hand and
+        // raylib picks that exact connector mode instead.
+        let (w, h) = std::env::var("OM_WM_SIZE")
+            .ok()
+            .and_then(|s| {
+                let (a, b) = s.split_once('x')?;
+                Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+            })
+            .unwrap_or((0, 0));
+        ray::init_window(w, h, "om_wm");
     }
     // No SetTargetFPS: the DRM page flip in EndDrawing already vsyncs to the
     // display. A second 60 Hz cap would beat against it and cause stutter.
