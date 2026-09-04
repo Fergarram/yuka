@@ -164,7 +164,7 @@ editing on the Mac:
   in the guest (`mount -t 9p -o trans=virtio,version=9p2000.L share <path>`).
 - The share is **read-only** to the guest, so build output cannot live in it. Set
   `CARGO_TARGET_DIR` to a local path in the guest (e.g.
-  `~/.cache/om_wm-target`) so builds are fast and never touch the share.
+  `~/.cache/yuka-target`) so builds are fast and never touch the share.
 
 Then build and run in the guest over SSH. The compositor renders to the guest's
 console (the UTM window): because there is an active session on that VT, libseat
@@ -173,9 +173,9 @@ interact with the UTM window, not over SSH.
 
 ```sh
 # from the Mac
-ssh <guest> 'export CARGO_TARGET_DIR=$HOME/.cache/om_wm-target; \
-             cd ~/repos/om_wm && cargo build'
-ssh <guest> 'cd ~/repos/om_wm && CARGO_TARGET_DIR=$HOME/.cache/om_wm-target \
+ssh <guest> 'export CARGO_TARGET_DIR=$HOME/.cache/yuka-target; \
+             cd ~/repos/yuka && cargo build'
+ssh <guest> 'cd ~/repos/yuka && CARGO_TARGET_DIR=$HOME/.cache/yuka-target \
              ./run_tty.sh 600'
 ```
 
@@ -208,12 +208,12 @@ the short version:
 ```sh
 # build once
 tools/mt-bridge/host/build.sh                 # on the Mac  -> ./mt-capture
-ssh <guest> 'bash ~/repos/om_wm/tools/mt-bridge/guest/build.sh'   # -> ~/mt-inject
+ssh <guest> 'bash ~/repos/yuka/tools/mt-bridge/guest/build.sh'   # -> ~/mt-inject
 
 # each session, in order
 ssh <guest> '~/mt-inject &'                   # 1. create the uinput touchpad
 tools/mt-bridge/host/mt-capture               # 2. stream the trackpad (real terminal)
-ssh <guest> 'cd ~/repos/om_wm && ~/run_om_tty.sh'   # 3. yuka finds the pad at start
+ssh <guest> 'cd ~/repos/yuka && ~/run_yuka_tty.sh'   # 3. yuka finds the pad at start
 ```
 
 Then, with the mt-capture terminal frontmost, touch the trackpad and watch the

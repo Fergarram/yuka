@@ -53,7 +53,7 @@ can break it; that is the only way to get trackpad multitouch on macOS.
 
 3. Guest: start yuka *after* mt-inject, so it finds the touchpad at startup.
 
-       cd ~/repos/om_wm && ~/run_om_tty.sh
+       cd ~/repos/yuka && ~/run_yuka_tty.sh
 
 Now touch the Mac trackpad while the mt-capture terminal is frontmost, and watch
 the (unfocused) UTM window: two fingers pan and pinch the canvas, one finger moves
