@@ -1,9 +1,9 @@
 # mt-bridge
 
-Use the Mac's trackpad as a real multitouch device inside the om_wm dev VM.
+Use the Mac's trackpad as a real multitouch device inside the yuka dev VM.
 
 UTM/QEMU only forwards pointer, click, and scroll to a guest, so the Mac
-trackpad shows up there as a plain mouse and om_wm's custom gesture engine
+trackpad shows up there as a plain mouse and yuka's custom gesture engine
 (`touch.rs`, `trackpad_mode = custom`) has no multitouch to read. mt-bridge fills
 that gap: it reads raw per-finger data on the host and synthesizes a matching
 `uinput` touchpad in the guest, so `touch.rs` sees genuine protocol-B multitouch.
@@ -12,7 +12,7 @@ that gap: it reads raw per-finger data on the host and synthesizes a matching
       -> mt-capture (host, MultitouchSupport.framework)
       -> TCP over the vmnet link (host 192.168.64.1)
       -> mt-inject (guest, creates a uinput touchpad)
-      -> libinput classifies it -> om_wm touch.rs
+      -> libinput classifies it -> yuka touch.rs
 
 The guest device mimics an Apple trackpad (axis span ~9760x6750, clickpad, the
 `BTN_TOOL_*TAP` finger-count bits), which is what `touch.rs` was tuned against, so
@@ -51,7 +51,7 @@ can break it; that is the only way to get trackpad multitouch on macOS.
    Security > Input Monitoring) and restart it once; the startup line then reads
    "click tap active".
 
-3. Guest: start om_wm *after* mt-inject, so it finds the touchpad at startup.
+3. Guest: start yuka *after* mt-inject, so it finds the touchpad at startup.
 
        cd ~/repos/om_wm && ~/run_om_tty.sh
 
@@ -60,7 +60,7 @@ the (unfocused) UTM window: two fingers pan and pinch the canvas, one finger mov
 the pointer, a click clicks. Press Enter in the mt-capture terminal to pause or
 resume forwarding.
 
-macOS gestures: om_wm uses 3- and 4-finger gestures, and so does macOS (Mission
+macOS gestures: yuka uses 3- and 4-finger gestures, and so does macOS (Mission
 Control, App Exposé, swipe between full-screen apps and spaces, three-finger tap).
 Both fire at once, since macOS handles those below where any tap could swallow
 them. Turn them off while you work in the VM: System Settings > Trackpad, uncheck
@@ -72,7 +72,7 @@ Focus rules that fall out of how macOS delivers multitouch:
 - Touches reach the guest only while the mt-capture terminal is the frontmost app.
   Focus anything else and the trackpad is a normal Mac trackpad again.
 - You cannot gate it on the UTM window instead: when UTM is frontmost it grabs the
-  trackpad exclusively and MultitouchSupport delivers nothing. So om_wm renders to
+  trackpad exclusively and MultitouchSupport delivers nothing. So yuka renders to
   the console and is driven through the bridge with UTM in the background.
 
 ## Permissions and setup notes (already done in this VM)

@@ -82,10 +82,10 @@ $RECYCLE.BIN/
 # Backtrace / debug artifacts
 *.pdb
 
-# NOTE: Cargo.lock is intentionally committed (om_wm is a binary application).
+# NOTE: Cargo.lock is intentionally committed (yuka is a binary application).
 
-### om_wm ###
-# Framebuffer screenshots. OM_WM_SHOT=<frame> writes the first, Super+S writes the numbered
+### yuka ###
+# Framebuffer screenshots. YUKA_SHOT=<frame> writes the first, Super+S writes the numbered
 # ones on demand.
 /shot.png
 /shot-*.png

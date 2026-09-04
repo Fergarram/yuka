@@ -4,7 +4,7 @@
 // The feel of the thing: trackpad sensitivities, gesture thresholds, camera rates.
 // These were consts, which meant a rebuild to answer "is 0.12 better than 0.09", and
 // feel is the one thing that cannot be reasoned about, only tried. So they are data
-// now, read from a file, and the file is re-read while om_wm runs.
+// now, read from a file, and the file is re-read while yuka runs.
 //
 // One flat key = value per line, parsed here in a few dozen lines. No format library:
 // a flat set of numbers does not need nesting, and a parser we own cannot pull in a
@@ -29,8 +29,8 @@ use crate::render::{DmabufMode, DIR_DOWN, DIR_LEFT, DIR_NONE, DIR_RIGHT, DIR_UP}
 // Constants
 //
 
-// Where the file lives, unless OM_WM_CONF says otherwise.
-pub const DEFAULT_PATH: &str = "om_wm.conf";
+// Where the file lives, unless YUKA_CONF says otherwise.
+pub const DEFAULT_PATH: &str = "yuka.conf";
 
 //
 // Types
@@ -139,7 +139,7 @@ pub struct Settings {
     // the reference creep forgives drift, because it keeps moving to meet it, while a real
     // pinch outruns it and still counts.
     //
-    // 0 never creeps, which is what om_wm did before this existed. 0.05 closes half the drift
+    // 0 never creeps, which is what yuka did before this existed. 0.05 closes half the drift
     // in about a fifth of a second. Higher forgives more and demands a brisker pinch.
     pub zoom_ref_follow: f32,
 
@@ -178,7 +178,7 @@ pub struct Settings {
     pub double_click_ms: u32,
 
     // Debugging, as settings rather than as environment variables, so they can be turned on
-    // while om_wm is running and turned off again without restarting it. What they report is our
+    // while yuka is running and turned off again without restarting it. What they report is our
     // own reading of the pad, which is the thing worth seeing: raw events say what the kernel
     // sent, these say what we made of it and why.
     //
@@ -301,7 +301,7 @@ pub struct Settings {
     // as a window rather than as a wall. A maximized window is fitted exactly, margin or no margin,
     // because it was given the shape of the screen and one with a gap around it is not maximized.
     //
-    // 0 fits exactly either way, which is what om_wm did before this existed. A margin is worth
+    // 0 fits exactly either way, which is what yuka did before this existed. A margin is worth
     // having now that we draw the shadow a client puts around itself: an exact fit crops it
     // against the screen edge.
     pub fit_padding_px: f32,
@@ -559,7 +559,7 @@ pub fn client_hscroll_sign(set: &Settings) -> f32 {
 pub fn load(path: &str) -> Settings {
     let mut set = defaults();
     let Ok(text) = std::fs::read_to_string(path) else {
-        println!("om_wm: settings: no {path}, using defaults");
+        println!("yuka: settings: no {path}, using defaults");
         return set;
     };
     let mut applied = 0usize;
@@ -569,14 +569,14 @@ pub fn load(path: &str) -> Settings {
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
-            eprintln!("om_wm: settings: {path}:{} is not key = value", n + 1);
+            eprintln!("yuka: settings: {path}:{} is not key = value", n + 1);
             continue;
         };
         if apply(&mut set, key.trim(), value.trim(), path, n + 1) {
             applied += 1;
         }
     }
-    println!("om_wm: settings: {applied} from {path}");
+    println!("yuka: settings: {applied} from {path}");
     set
 }
 
@@ -592,7 +592,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
                     return true;
                 }
                 Err(_) => {
-                    eprintln!("om_wm: settings: {path}:{line}: {key} wants a number, got '{value}'");
+                    eprintln!("yuka: settings: {path}:{line}: {key} wants a number, got '{value}'");
                     return false;
                 }
             }
@@ -606,7 +606,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
                     return true;
                 }
                 Err(_) => {
-                    eprintln!("om_wm: settings: {path}:{line}: {key} wants a number, got '{value}'");
+                    eprintln!("yuka: settings: {path}:{line}: {key} wants a number, got '{value}'");
                     return false;
                 }
             }
@@ -619,7 +619,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
             "libinput" => set.trackpad_mode = TrackpadMode::Libinput,
             _ => {
                 eprintln!(
-                    "om_wm: settings: {path}:{line}: trackpad_mode wants custom or libinput"
+                    "yuka: settings: {path}:{line}: trackpad_mode wants custom or libinput"
                 );
                 return false;
             }
@@ -655,14 +655,14 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
             "true" | "1" | "yes" => set.resize_stretch = true,
             "false" | "0" | "no" => set.resize_stretch = false,
             _ => {
-                eprintln!("om_wm: settings: {path}:{line}: resize_stretch wants true or false");
+                eprintln!("yuka: settings: {path}:{line}: resize_stretch wants true or false");
                 return false;
             }
         },
         "resize_wait_frames" => match value.parse::<u32>() {
             Ok(v) => set.resize_wait_frames = v.max(1),
             Err(_) => {
-                eprintln!("om_wm: settings: {path}:{line}: resize_wait_frames wants a whole number");
+                eprintln!("yuka: settings: {path}:{line}: resize_wait_frames wants a whole number");
                 return false;
             }
         },
@@ -671,7 +671,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
             "blit" => set.dmabuf_mode = DmabufMode::Blit,
             _ => {
                 eprintln!(
-                    "om_wm: settings: {path}:{line}: dmabuf_mode wants hold or blit"
+                    "yuka: settings: {path}:{line}: dmabuf_mode wants hold or blit"
                 );
                 return false;
             }
@@ -694,7 +694,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
             "true" | "1" | "yes" => set.swipe_natural = true,
             "false" | "0" | "no" => set.swipe_natural = false,
             _ => {
-                eprintln!("om_wm: settings: {path}:{line}: swipe_natural wants true or false");
+                eprintln!("yuka: settings: {path}:{line}: swipe_natural wants true or false");
                 return false;
             }
         },
@@ -718,7 +718,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
                     "down" => DIR_DOWN,
                     _ => {
                         eprintln!(
-                            "om_wm: settings: {path}:{line}: spawn_order wants right, up, left, \
+                            "yuka: settings: {path}:{line}: spawn_order wants right, up, left, \
                              down or nearest"
                         );
                         return false;
@@ -739,7 +739,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
             "always" => set.focus_new = FocusNew::Always,
             _ => {
                 eprintln!(
-                    "om_wm: settings: {path}:{line}: focus_new wants never, same-client or always"
+                    "yuka: settings: {path}:{line}: focus_new wants never, same-client or always"
                 );
                 return false;
             }
@@ -748,7 +748,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
             "true" | "1" | "yes" => set.spawn_travel = true,
             "false" | "0" | "no" => set.spawn_travel = false,
             _ => {
-                eprintln!("om_wm: settings: {path}:{line}: spawn_travel wants true or false");
+                eprintln!("yuka: settings: {path}:{line}: spawn_travel wants true or false");
                 return false;
             }
         },
@@ -756,7 +756,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
             "true" | "1" | "yes" => set.spawn_clear = true,
             "false" | "0" | "no" => set.spawn_clear = false,
             _ => {
-                eprintln!("om_wm: settings: {path}:{line}: spawn_clear wants true or false");
+                eprintln!("yuka: settings: {path}:{line}: spawn_clear wants true or false");
                 return false;
             }
         },
@@ -765,7 +765,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
             "true" | "1" | "yes" => set.mips_when_minified = true,
             "false" | "0" | "no" => set.mips_when_minified = false,
             _ => {
-                eprintln!("om_wm: settings: {path}:{line}: mips_when_minified wants true or false");
+                eprintln!("yuka: settings: {path}:{line}: mips_when_minified wants true or false");
                 return false;
             }
         },
@@ -774,7 +774,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
             "true" | "1" | "yes" => set.draw_shadows = true,
             "false" | "0" | "no" => set.draw_shadows = false,
             _ => {
-                eprintln!("om_wm: settings: {path}:{line}: draw_shadows wants true or false");
+                eprintln!("yuka: settings: {path}:{line}: draw_shadows wants true or false");
                 return false;
             }
         },
@@ -782,7 +782,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
             "true" | "1" | "yes" => set.debug_taps = true,
             "false" | "0" | "no" => set.debug_taps = false,
             _ => {
-                eprintln!("om_wm: settings: {path}:{line}: debug_taps wants true or false");
+                eprintln!("yuka: settings: {path}:{line}: debug_taps wants true or false");
                 return false;
             }
         },
@@ -790,7 +790,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
             "true" | "1" | "yes" => set.debug_jumps = true,
             "false" | "0" | "no" => set.debug_jumps = false,
             _ => {
-                eprintln!("om_wm: settings: {path}:{line}: debug_jumps wants true or false");
+                eprintln!("yuka: settings: {path}:{line}: debug_jumps wants true or false");
                 return false;
             }
         },
@@ -798,19 +798,19 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
             "true" | "1" | "yes" => set.invert_scroll = true,
             "false" | "0" | "no" => set.invert_scroll = false,
             _ => {
-                eprintln!("om_wm: settings: {path}:{line}: invert_scroll wants true or false");
+                eprintln!("yuka: settings: {path}:{line}: invert_scroll wants true or false");
                 return false;
             }
         },
         "double_click_ms" => match value.parse::<u32>() {
             Ok(v) => set.double_click_ms = v,
             Err(_) => {
-                eprintln!("om_wm: settings: {path}:{line}: double_click_ms wants a whole number");
+                eprintln!("yuka: settings: {path}:{line}: double_click_ms wants a whole number");
                 return false;
             }
         },
         _ => {
-            eprintln!("om_wm: settings: {path}:{line}: unknown key '{key}'");
+            eprintln!("yuka: settings: {path}:{line}: unknown key '{key}'");
             return false;
         }
     }
@@ -881,7 +881,7 @@ pub fn reload_if_changed(watch: &mut Watch, set: &mut Settings) -> bool {
     // Reopening the device is not something a file save should do, so the mode in force
     // stays in force until the next start.
     if set.trackpad_mode != mode {
-        eprintln!("om_wm: settings: trackpad_mode change takes effect on restart");
+        eprintln!("yuka: settings: trackpad_mode change takes effect on restart");
         set.trackpad_mode = mode;
     }
     sanitise(set);

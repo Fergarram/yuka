@@ -1,4 +1,4 @@
-# om_wm devlog screenshots
+# yuka devlog screenshots
 
 Frames captured while working, 2026-07-28 and 2026-07-29. All are full 1440x900
 DRM captures unless the name says crop; the crops are magnified regions of the

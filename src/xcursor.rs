@@ -87,7 +87,7 @@ pub fn load(name: &str, want: u32) -> Option<Image> {
             let Ok(bytes) = fs::read(&path) else { continue };
             if let Some(image) = parse(&bytes, want) {
                 println!(
-                    "om_wm: cursor {name} {}x{} hotspot {},{} from {}",
+                    "yuka: cursor {name} {}x{} hotspot {},{} from {}",
                     image.w,
                     image.h,
                     image.hot_x,

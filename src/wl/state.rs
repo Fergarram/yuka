@@ -222,11 +222,11 @@ pub fn init(
     // One output the size of the screen, even though the canvas is unbounded: it
     // is what clients size themselves against.
     let output = Output::new(
-        "om_wm-0".to_string(),
+        "yuka-0".to_string(),
         PhysicalProperties {
             size: (0, 0).into(),
             subpixel: Subpixel::Unknown,
-            make: "om_wm".to_string(),
+            make: "yuka".to_string(),
             model: "canvas".to_string(),
         },
     );
@@ -255,7 +255,7 @@ pub fn init(
             })
         })
         .collect();
-    println!("om_wm: advertising {} dmabuf formats", formats.len());
+    println!("yuka: advertising {} dmabuf formats", formats.len());
 
     let mut dmabuf_state = DmabufState::new();
     // Prefer a v4 global with default feedback (advertises the render node),
@@ -331,7 +331,7 @@ pub fn accept_and_dispatch(server: &mut Server, state: &mut State) {
             .insert_client(stream, Arc::new(ClientState::default()))
         {
             Ok(client) => server.clients.push(client),
-            Err(e) => eprintln!("om_wm: insert_client failed: {e}"),
+            Err(e) => eprintln!("yuka: insert_client failed: {e}"),
         }
     }
 
@@ -709,7 +709,7 @@ pub fn is_window_like(state: &State, surface: &WlSurface) -> bool {
 }
 
 // Read a cursor surface's pixels without consuming them. A cursor surface is committed
-// like any other, but it is not a window: nothing else in om_wm will take its buffer, and
+// like any other, but it is not a window: nothing else in yuka will take its buffer, and
 // the buffer has to stay put because a cursor is uploaded again every time it moves shape
 // rather than every frame. So this borrows the current buffer and leaves it attached.
 // Where a client just moved its cursor buffer, if it moved it at all.
@@ -1156,7 +1156,7 @@ impl XdgShellHandler for State {
         // canvas has no edges to be pushed away from.
         let _ = surface.send_configure();
         if let Err(e) = self.popups.track_popup(PopupKind::Xdg(surface)) {
-            eprintln!("om_wm: popup track failed: {e}");
+            eprintln!("yuka: popup track failed: {e}");
         }
     }
 

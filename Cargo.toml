@@ -1,14 +1,14 @@
 [package]
-name = "om_wm"
+name = "yuka"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
 [[bin]]
-name = "om_wm"
+name = "yuka"
 path = "src/main.rs"
 
-# Windowed (nested) build: om_wm runs as a client of another compositor instead of
+# Windowed (nested) build: yuka runs as a client of another compositor instead of
 # owning the hardware. Same source, different platform for raylib, and the DRM-only
 # paths (session control, cursor plane, libinput) stay out of the way.
 [features]

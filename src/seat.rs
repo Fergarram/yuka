@@ -1,7 +1,7 @@
 //
 // Session and VT ownership (Data Oriented zone)
 //
-// om_wm runs as a logind session controller, through libseat. Taking control is
+// yuka runs as a logind session controller, through libseat. Taking control is
 // what makes the rest work: logind then owns our VT and sets it up the way every
 // compositor needs it (KDSKBMODE K_OFF, KDSETMODE KD_GRAPHICS, VT_SETMODE
 // VT_PROCESS), and it restores all of that when we disconnect, even if we crash.
@@ -194,7 +194,7 @@ pub fn init() -> Option<Seat> {
     let handle = unsafe { (api.open_seat)(&LISTENER, shared as *mut c_void) };
     if handle.is_null() {
         eprintln!(
-            "om_wm: seat: no session to control (need a logind session or seatd), \
+            "yuka: seat: no session to control (need a logind session or seatd), \
              falling back to grabbed input with no vt switching"
         );
         drop(unsafe { Box::from_raw(shared) });
@@ -210,7 +210,7 @@ pub fn init() -> Option<Seat> {
         tries += 1;
     }
     if !unsafe { (*shared).enabled } {
-        eprintln!("om_wm: seat: session never became active, falling back");
+        eprintln!("yuka: seat: session never became active, falling back");
         unsafe { (api.close_seat)(handle) };
         drop(unsafe { Box::from_raw(shared) });
         return None;
@@ -227,7 +227,7 @@ pub fn init() -> Option<Seat> {
         }
     };
     println!(
-        "om_wm: session control on {name}, rendering on vt{our_vt}, \
+        "yuka: session control on {name}, rendering on vt{our_vt}, \
          switch with ctrl+alt+F1..F12 or alt+left/right, ctrl+alt+F{our_vt} comes back"
     );
 
@@ -239,7 +239,7 @@ fn load_api() -> Option<Api> {
         libc::dlopen(c"libseat.so.1".as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL)
     };
     if lib.is_null() {
-        eprintln!("om_wm: seat: libseat.so.1 not available, no session control");
+        eprintln!("yuka: seat: libseat.so.1 not available, no session control");
         return None;
     }
     Some(Api {
@@ -259,7 +259,7 @@ fn load_api() -> Option<Api> {
 fn sym(lib: *mut c_void, name: &std::ffi::CStr) -> Option<*mut c_void> {
     let p = unsafe { libc::dlsym(lib, name.as_ptr()) };
     if p.is_null() {
-        eprintln!("om_wm: seat: libseat symbol missing: {}", name.to_string_lossy());
+        eprintln!("yuka: seat: libseat symbol missing: {}", name.to_string_lossy());
         return None;
     }
     Some(p)
@@ -280,7 +280,7 @@ pub fn open_card(s: &mut Seat) -> Option<i32> {
     let id = unsafe { (s.api.open_device)(s.handle, c_path.as_ptr(), &mut fd) };
     if id < 0 || fd < 0 {
         let err = std::io::Error::last_os_error();
-        eprintln!("om_wm: seat: libseat would not open {path} ({err})");
+        eprintln!("yuka: seat: libseat would not open {path} ({err})");
         return None;
     }
     s.card = id;
@@ -288,7 +288,7 @@ pub fn open_card(s: &mut Seat) -> Option<i32> {
     // No SET_MASTER here on purpose: logind takes master on this fd while our session
     // is active and drops it when it pauses the device, and our own attempt would be
     // refused. See own_master.
-    println!("om_wm: seat: {path} through libseat, fd {fd}");
+    println!("yuka: seat: {path} through libseat, fd {fd}");
     Some(fd)
 }
 
@@ -297,7 +297,7 @@ pub fn open_card(s: &mut Seat) -> Option<i32> {
 pub fn adopt_card(s: &mut Seat) -> bool {
     let fd = find_drm_fd();
     if fd < 0 {
-        eprintln!("om_wm: seat: no /dev/dri/card* fd open, vt switches will not release the display");
+        eprintln!("yuka: seat: no /dev/dri/card* fd open, vt switches will not release the display");
         return false;
     }
     unsafe { (*s.shared).drm_fd = fd };
@@ -420,7 +420,7 @@ fn take_master(drm_fd: i32) {
     }
     if unsafe { libc::ioctl(drm_fd, DRM_IOCTL_SET_MASTER) } != 0 {
         let err = std::io::Error::last_os_error();
-        eprintln!("om_wm: seat: set master failed: {err}");
+        eprintln!("yuka: seat: set master failed: {err}");
     }
 }
 
@@ -447,8 +447,8 @@ pub fn drm_is_ours() -> bool {
     }
     let err = std::io::Error::last_os_error();
     eprintln!(
-        "om_wm: the display belongs to another process ({err}). Only one thing can \
-         drive DRM at a time: check 'pgrep -a om_wm'."
+        "yuka: the display belongs to another process ({err}). Only one thing can \
+         drive DRM at a time: check 'pgrep -a yuka'."
     );
     false
 }
@@ -471,7 +471,7 @@ pub fn our_vt(s: &Seat) -> u16 {
 pub fn poll(s: &Seat) {
     if unsafe { (s.api.dispatch)(s.handle, 0) } < 0 {
         let err = std::io::Error::last_os_error();
-        eprintln!("om_wm: seat: dispatch failed: {err}");
+        eprintln!("yuka: seat: dispatch failed: {err}");
     }
 }
 
@@ -539,7 +539,7 @@ pub fn switch_to(s: &Seat, target: u16) -> bool {
     let dropped = own && drop_master(unsafe { (*s.shared).drm_fd });
     if unsafe { (s.api.switch_session)(s.handle, target as c_int) } < 0 {
         let err = std::io::Error::last_os_error();
-        eprintln!("om_wm: seat: switch to vt{target} failed: {err}");
+        eprintln!("yuka: seat: switch to vt{target} failed: {err}");
         if dropped {
             take_master(unsafe { (*s.shared).drm_fd });
         }

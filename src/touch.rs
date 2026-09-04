@@ -373,7 +373,7 @@ pub fn open(path: &str, set: &Settings) -> Option<Touchpad> {
     let c = CString::new(path).ok()?;
     let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
     if fd < 0 {
-        eprintln!("om_wm: touchpad open failed: {path}");
+        eprintln!("yuka: touchpad open failed: {path}");
         return None;
     }
     // Not grabbed: in Custom mode libinput already has this device muted, and a
@@ -397,17 +397,17 @@ pub fn open(path: &str, set: &Settings) -> Option<Touchpad> {
     let has_right = has_key(fd, BTN_RIGHT);
     let software_buttons = buttonpad && !has_right;
     println!(
-        "om_wm: touchpad {path} (span {span:.0}: pan/tap {:.0}, pinch {:.0} units)",
+        "yuka: touchpad {path} (span {span:.0}: pan/tap {:.0}, pinch {:.0} units)",
         span * set.move_start_frac,
         span * set.pinch_start_frac
     );
     println!(
-        "om_wm: touchpad contact size {}, whole-pad load {}",
+        "yuka: touchpad contact size {}, whole-pad load {}",
         if size_max > 0.0 { "reported" } else { "not reported" },
         if load_max > 0.0 { "reported" } else { "not reported" }
     );
     println!(
-        "om_wm: touchpad buttons: {}",
+        "yuka: touchpad buttons: {}",
         if software_buttons {
             "clickpad, bottom third of the surface split in half (left | right)"
         } else if has_right {
@@ -765,7 +765,7 @@ fn read_events(tp: &mut Touchpad, set: &Settings) {
                         let tapped = tp.contact_max == 3 && held <= set.tap_max_secs && still;
                         if set.debug_taps {
                             println!(
-                                "om_wm: contact of {} finger(s) for {held:.3}s, moved {:.0} of {:.0} -> {}",
+                                "yuka: contact of {} finger(s) for {held:.3}s, moved {:.0} of {:.0} -> {}",
                                 tp.contact_max,
                                 tp.contact_moved,
                                 tp.span * set.tap_move_frac,
@@ -1020,7 +1020,7 @@ fn press_is_right(tp: &Touchpad, set: &Settings) -> bool {
     let right = fy >= 1.0 - set.button_strip && fx >= set.button_split;
     if set.debug_taps {
         eprintln!(
-            "om_wm: touchpad click at {fx:.2},{fy:.2} of the surface -> {}",
+            "yuka: touchpad click at {fx:.2},{fy:.2} of the surface -> {}",
             if right { "right" } else { "left" }
         );
     }
@@ -1141,7 +1141,7 @@ fn update_gesture(tp: &mut Touchpad, cursor: Option<&mut Cursor>, set: &Settings
                     None => "none".to_string(),
                 };
                 println!(
-                    "om_wm: pointer primary {} -> {} (count {count}, btn {})",
+                    "yuka: pointer primary {} -> {} (count {count}, btn {})",
                     at(tp.primary_slot),
                     at(primary),
                     tp.btn_down
@@ -1199,7 +1199,7 @@ fn update_gesture(tp: &mut Touchpad, cursor: Option<&mut Cursor>, set: &Settings
                     const JUMP_PX: f32 = 30.0;
                     if set.debug_jumps && (idx.abs() >= JUMP_PX || idy.abs() >= JUMP_PX) {
                         println!(
-                            "om_wm: pointer jump {idx},{idy} from slot {p} \
+                            "yuka: pointer jump {idx},{idy} from slot {p} \
                              finger {fx},{fy} prev {px},{py} count {count} \
                              ids {:?} active {:?} resting {:?} faint {:?}",
                             tp.slots.iter().map(|s| s.id).collect::<Vec<_>>(),

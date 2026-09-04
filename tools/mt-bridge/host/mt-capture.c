@@ -3,7 +3,7 @@
 //
 // Uses Apple's private MultitouchSupport.framework to get per-finger contact
 // frames (normalized position, size, state) and forwards them, in the protocol.md
-// wire format, to the om_wm dev VM where mt-inject turns them into a uinput
+// wire format, to the yuka dev VM where mt-inject turns them into a uinput
 // touchpad. This is the host half of the bridge; see tools/mt-bridge/README.md.
 //
 // Build (on the Mac):

@@ -1079,7 +1079,7 @@ pub fn draw_pad_debug(pad: &touch::PadView, screen_w: i32, screen_h: i32) {
 pub fn log_rects(windows: &Windows) {
     for i in 0..windows.surface.len() {
         println!(
-            "om_wm:   {} {}x{} at {:.0},{:.0} z={:.2} order={} placed={}",
+            "yuka:   {} {}x{} at {:.0},{:.0} z={:.2} order={} placed={}",
             if windows.popup[i] {
                 "popup "
             } else if windows.sub[i] {
@@ -1492,7 +1492,7 @@ fn store_entry(
                 windows.mapped.push(surface.clone());
             }
             println!(
-                "om_wm: {} + {w}x{h} at {cx:.0},{cy:.0}",
+                "yuka: {} + {w}x{h} at {cx:.0},{cy:.0}",
                 if popup { "popup" } else { "window" }
             );
         }
@@ -1550,7 +1550,7 @@ impl DmabufCache {
         if !self.logged {
             self.logged = true;
             println!(
-                "om_wm: ZERO-COPY dmabuf import ok {}x{} fourcc={:#x} mod={:#x} gl_tex={tex}",
+                "yuka: ZERO-COPY dmabuf import ok {}x{} fourcc={:#x} mod={:#x} gl_tex={tex}",
                 info.width, info.height, info.fourcc, info.modifier
             );
         }
@@ -1627,7 +1627,7 @@ pub fn upload_committed(
     state::take_dmabuf_and_retain(state, surface, |key, info| {
         let Some((tex, w, h)) = cache.get_or_import(egl, key, info) else {
             eprintln!(
-                "om_wm: dmabuf import failed {}x{} fourcc={:#x} mod={:#x}",
+                "yuka: dmabuf import failed {}x{} fourcc={:#x} mod={:#x}",
                 info.width, info.height, info.fourcc, info.modifier
             );
             // This buffer is no use to us, but the window still draws from the one before it,

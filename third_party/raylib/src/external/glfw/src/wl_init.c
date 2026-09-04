@@ -854,7 +854,7 @@ int _glfwInitWayland(void)
         }
     }
 
-    // om_wm patch: guard against a compositor with no wl_seat. Upstream calls
+    // yuka patch: guard against a compositor with no wl_seat. Upstream calls
     // wl_seat_get_version unconditionally, and a headless host (weston with no input
     // devices) advertises no seat at all, so this segfaults before any window exists.
     if (_glfw.wl.seat &&

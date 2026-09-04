@@ -1,8 +1,8 @@
 //
-// mt-inject: a synthetic multitouch trackpad for the om_wm dev VM.
+// mt-inject: a synthetic multitouch trackpad for the yuka dev VM.
 //
 // Creates a uinput device that looks enough like an Apple/MacBook trackpad that
-// libinput classifies it as a touchpad (so om_wm finds it and, in Custom mode,
+// libinput classifies it as a touchpad (so yuka finds it and, in Custom mode,
 // reads its raw evdev protocol-B stream through touch.rs). It then injects
 // contacts, either from the host over TCP (mt-capture on the Mac) or, with
 // --test, from a built-in synthetic gesture generator.
@@ -110,7 +110,7 @@ static int create_device(void) {
     ioctl(fd, UI_SET_PROPBIT, INPUT_PROP_POINTER);
 
     // Buttons. BTN_TOOL_* finger counts are what libinput reads to decide the
-    // device is a touchpad with a tap-finger-count, which is om_wm's test for it.
+    // device is a touchpad with a tap-finger-count, which is yuka's test for it.
     ioctl(fd, UI_SET_KEYBIT, BTN_LEFT);
     ioctl(fd, UI_SET_KEYBIT, BTN_RIGHT);
     ioctl(fd, UI_SET_KEYBIT, BTN_TOUCH);
@@ -149,7 +149,7 @@ static int create_device(void) {
     us.id.vendor = 0x05ac;
     us.id.product = 0x0265;
     us.id.version = 0x0001;
-    strncpy(us.name, "om_wm mt-bridge trackpad", UINPUT_MAX_NAME_SIZE - 1);
+    strncpy(us.name, "yuka mt-bridge trackpad", UINPUT_MAX_NAME_SIZE - 1);
     if (ioctl(fd, UI_DEV_SETUP, &us) < 0) {
         perror("UI_DEV_SETUP");
         exit(1);

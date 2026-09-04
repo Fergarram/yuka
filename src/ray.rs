@@ -446,7 +446,7 @@ pub fn mouse_delta() -> (f32, f32) {
 }
 
 // Wheel movement this frame: (horizontal, vertical), positive up and right, which
-// is the convention the rest of om_wm uses.
+// is the convention the rest of yuka uses.
 pub fn mouse_wheel() -> (f32, f32) {
     let w = unsafe { GetMouseWheelMoveV() };
     (w.x, w.y)

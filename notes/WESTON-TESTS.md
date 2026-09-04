@@ -1,14 +1,14 @@
-# Weston demo clients as an om_wm test checklist
+# Weston demo clients as an yuka test checklist
 
 Weston ships small demo clients that each exercise a slice of the Wayland
-protocol. They are a handy black-box test suite for om_wm. Spawn them by name
-(om_wm sets `WAYLAND_DISPLAY`); the launch set lives in `src/main.rs`.
+protocol. They are a handy black-box test suite for yuka. Spawn them by name
+(yuka sets `WAYLAND_DISPLAY`); the launch set lives in `src/main.rs`.
 
-om_wm currently implements: `wl_compositor` (+ subsurfaces), `wl_shm`,
+yuka currently implements: `wl_compositor` (+ subsurfaces), `wl_shm`,
 `xdg_shell`, `wp_viewporter`, `zwp_linux_dmabuf_v1` (v4 feedback), and `wl_seat`
 (pointer + keyboard). Anything needing other protocols is marked N/A below.
 
-Legend: `[x]` verified on om_wm · `[ ]` not yet tested · `N/A` needs an
+Legend: `[x]` verified on yuka · `[ ]` not yet tested · `N/A` needs an
 unimplemented protocol/device.
 
 ## Interaction (pointer / keyboard)

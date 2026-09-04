@@ -136,7 +136,7 @@ extern CoreData CORE;                   // Global CORE state context
 
 static PlatformData platform = { 0 };   // Platform specific data
 
-// om_wm patch: a KMS device fd the application opened for us, or -1 to open one
+// yuka patch: a KMS device fd the application opened for us, or -1 to open one
 // ourselves as before. A session controller (logind, through libseat) has to be the
 // one that opens the card: it hands out the fd, revokes it on a VT switch and waits
 // for an acknowledgement before the switch completes. A card we opened behind its
@@ -144,7 +144,7 @@ static PlatformData platform = { 0 };   // Platform specific data
 // alone in ClosePlatform.
 static int externalDeviceFd = -1;
 
-// om_wm patch: set before InitWindow(), which is the only time it is read.
+// yuka patch: set before InitWindow(), which is the only time it is read.
 void SetGraphicDeviceFd(int fd)
 {
     externalDeviceFd = fd;
@@ -737,7 +737,7 @@ int InitPlatform(void)
     CORE.Window.fullscreen = true;
     CORE.Window.flags |= FLAG_FULLSCREEN_MODE;
 
-    // om_wm patch: prefer the fd the application handed us.
+    // yuka patch: prefer the fd the application handed us.
     if (externalDeviceFd != -1)
     {
         platform.fd = externalDeviceFd;
@@ -1141,7 +1141,7 @@ void ClosePlatform(void)
 
     if (platform.fd != -1)
     {
-        // om_wm patch: the application's fd is the application's to close.
+        // yuka patch: the application's fd is the application's to close.
         if (platform.fd != externalDeviceFd) close(platform.fd);
         platform.fd = -1;
     }

@@ -273,7 +273,7 @@ pub fn init(grab: bool, set: &Settings) -> Option<Input> {
     let seat = std::env::var("XDG_SEAT").unwrap_or_else(|_| "seat0".to_string());
     let mut li = Libinput::new_with_udev(Interface { grab_keyboards: grab });
     if li.udev_assign_seat(&seat).is_err() {
-        eprintln!("om_wm: input: libinput could not assign seat {seat}");
+        eprintln!("yuka: input: libinput could not assign seat {seat}");
         return None;
     }
     let mut inp = Input {
@@ -299,13 +299,13 @@ pub fn init(grab: bool, set: &Settings) -> Option<Input> {
     poll(&mut inp);
     reset(&mut inp);
     if inp.keyboards == 0 {
-        eprintln!("om_wm: input: libinput found no keyboard");
+        eprintln!("yuka: input: libinput found no keyboard");
     }
     // The keyboard count is libinput's keyboard capability, which power and lid
     // buttons carry too, so it is a device count and not a count of things you can
     // type on.
     println!(
-        "om_wm: libinput on {seat}: {} key device(s), {} pointer(s), trackpad {}{}",
+        "yuka: libinput on {seat}: {} key device(s), {} pointer(s), trackpad {}{}",
         inp.keyboards,
         inp.pointers,
         if inp.mode == TrackpadMode::Custom { "custom" } else { "libinput" },
@@ -327,7 +327,7 @@ pub fn init_host(set: &Settings) -> Input {
             }
         }
     }
-    println!("om_wm: host input via the compositor we are nested in, {} keys mapped", host_keys.len());
+    println!("yuka: host input via the compositor we are nested in, {} keys mapped", host_keys.len());
     Input {
         li: None,
         host_keys,
@@ -405,7 +405,7 @@ pub fn poll(inp: &mut Input) {
     let mut p = Pointer::default();
     if let Some(li) = inp.li.as_mut() {
         if let Err(e) = li.dispatch() {
-            eprintln!("om_wm: input: libinput dispatch failed: {e}");
+            eprintln!("yuka: input: libinput dispatch failed: {e}");
         }
     }
     while let Some(event) = inp.li.as_mut().and_then(|li| li.next()) {
@@ -602,18 +602,18 @@ fn added(inp: &mut Input, dev: &Device) {
         // found it and names its node, so nothing has to guess at either.
         if dev.config_send_events_set_mode(SendEventsMode::DISABLED).is_err() {
             eprintln!(
-                "om_wm: input: could not mute {} in libinput, it will fight touch.rs",
+                "yuka: input: could not mute {} in libinput, it will fight touch.rs",
                 dev.name()
             );
         } else {
             let node = node_of(dev);
-            println!("om_wm: input + {} (trackpad {node}, muted for touch.rs)", dev.name());
+            println!("yuka: input + {} (trackpad {node}, muted for touch.rs)", dev.name());
             inp.trackpad = Some(node);
             inp.trackpad_changed = true;
             return;
         }
     }
-    println!("om_wm: input + {}{}", dev.name(), if pad { " (trackpad)" } else { "" });
+    println!("yuka: input + {}{}", dev.name(), if pad { " (trackpad)" } else { "" });
 }
 
 fn removed(inp: &mut Input, dev: &Device) {
@@ -627,7 +627,7 @@ fn removed(inp: &mut Input, dev: &Device) {
     if dev.has_capability(DeviceCapability::Pointer) {
         inp.pointers = inp.pointers.saturating_sub(1);
     }
-    println!("om_wm: input - {}", dev.name());
+    println!("yuka: input - {}", dev.name());
 }
 
 // Where the device lives, from libinput's sysname (e.g. "event8").
@@ -727,7 +727,7 @@ pub fn suspend(inp: &mut Input) {
 pub fn resume(inp: &mut Input) {
     if let Some(li) = inp.li.as_mut() {
         if li.resume().is_err() {
-            eprintln!("om_wm: input: libinput resume failed");
+            eprintln!("yuka: input: libinput resume failed");
         }
     }
     reset(inp);

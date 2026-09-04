@@ -6,7 +6,7 @@
 // Two platforms, chosen by the `windowed` feature:
 //
 //   DRM (default)  raylib owns the display: GLES2 on EGL, driving KMS directly. This
-//                  is how om_wm runs for real.
+//                  is how yuka runs for real.
 //   Desktop        raylib is a Wayland client via GLFW, for the nested build used in
 //                  development. Pinned to "ES 2.0" so the graphics path and the
 //                  shaders (#version 100) are the same ones the DRM build uses;
@@ -27,7 +27,7 @@ fn main() {
     // Whether this raylib carries our patch for taking an already open KMS fd
     // (SetGraphicDeviceFd in rcore_drm.c). Detected rather than assumed: a raylib
     // update that drops the patch must not turn into a link error or, worse, a
-    // silently ignored fd. Without it om_wm opens the card the old way, so this is a
+    // silently ignored fd. Without it yuka opens the card the old way, so this is a
     // cfg and not a build failure.
     let drm_platform = raylib_src.join("src/platforms/rcore_drm.c");
     let external_fd = fs::read_to_string(&drm_platform)
@@ -39,7 +39,7 @@ fn main() {
     } else if !windowed {
         println!(
             "cargo:warning=vendored raylib has no SetGraphicDeviceFd patch: \
-             om_wm will let raylib open the KMS device itself"
+             yuka will let raylib open the KMS device itself"
         );
     }
 

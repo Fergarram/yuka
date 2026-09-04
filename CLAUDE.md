@@ -1,5 +1,5 @@
 <project-context>
-	om_wm is a Wayland compositor and window manager: an infinite canvas where
+	yuka is a Wayland compositor and window manager: an infinite canvas where
 	windows are quads we can smoothly zoom, pan, and move, drawn through a
 	shader pass that applies to all windows.
 

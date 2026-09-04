@@ -200,7 +200,7 @@ pub fn init(screen_w: i32, screen_h: i32) -> Option<Cursor> {
         )
     };
     if r != 0 {
-        eprintln!("om_wm: cursor dumb buffer create failed");
+        eprintln!("yuka: cursor dumb buffer create failed");
         return None;
     }
 
@@ -236,16 +236,16 @@ pub fn init(screen_w: i32, screen_h: i32) -> Option<Cursor> {
         )
     } != 0
     {
-        eprintln!("om_wm: drmModeSetCursor2 failed");
+        eprintln!("yuka: drmModeSetCursor2 failed");
         return None;
     }
 
-    println!("om_wm: hardware cursor on crtc {crtc} (drm fd {fd})");
+    println!("yuka: hardware cursor on crtc {crtc} (drm fd {fd})");
     // The theme's pointer, if there is one to read. The name every theme has, at the size every
     // toolkit asks for unless told otherwise.
     let own = xcursor::load("left_ptr", 0);
     if own.is_none() {
-        println!("om_wm: no cursor theme found, drawing our own arrow");
+        println!("yuka: no cursor theme found, drawing our own arrow");
     }
     let mut c = Cursor {
         fd,
@@ -268,7 +268,7 @@ pub fn init(screen_w: i32, screen_h: i32) -> Option<Cursor> {
         client_gen: 0,
         client_hash: 0,
         has_client: false,
-        debug: std::env::var("OM_WM_DEBUG_INPUT").is_ok(),
+        debug: std::env::var("YUKA_DEBUG_INPUT").is_ok(),
         shown_x: i32::MIN,
         shown_y: i32::MIN,
         move_calls: 0,
@@ -331,18 +331,18 @@ fn place(c: &mut Cursor) {
     if r != 0 {
         // A plane that will not move is invisible except as a cursor that lags, so it is
         // worth saying rather than discarding.
-        eprintln!("om_wm: cursor move failed ({r})");
+        eprintln!("yuka: cursor move failed ({r})");
     }
     if c.debug {
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         c.move_calls += 1;
         c.move_ms += ms;
         if ms > 2.0 {
-            println!("om_wm: cursor move took {ms:.2}ms");
+            println!("yuka: cursor move took {ms:.2}ms");
         }
         if c.move_calls % 120 == 0 {
             println!(
-                "om_wm: cursor moves {} avg {:.3}ms",
+                "yuka: cursor moves {} avg {:.3}ms",
                 c.move_calls,
                 c.move_ms / c.move_calls as f64
             );
@@ -512,7 +512,7 @@ fn clear(c: &mut Cursor) {
 fn arm(c: &mut Cursor, hot_x: i32, hot_y: i32) {
     if c.debug {
         println!(
-            "om_wm: cursor armed hotspot {hot_x},{hot_y} was {},{} at {},{}",
+            "yuka: cursor armed hotspot {hot_x},{hot_y} was {},{} at {},{}",
             c.hot_x, c.hot_y, c.x, c.y
         );
     }
@@ -522,7 +522,7 @@ fn arm(c: &mut Cursor, hot_x: i32, hot_y: i32) {
         drmModeSetCursor2(c.fd, c.crtc, c.handle, CURSOR_SIZE, CURSOR_SIZE, hot_x, hot_y)
     };
     if r != 0 {
-        eprintln!("om_wm: cursor set image failed");
+        eprintln!("yuka: cursor set image failed");
         return;
     }
     c.visible = true;
@@ -549,7 +549,7 @@ pub fn rearm(c: &mut Cursor) {
         drmModeSetCursor2(c.fd, c.crtc, c.handle, CURSOR_SIZE, CURSOR_SIZE, hot_x, hot_y)
     };
     if r != 0 {
-        eprintln!("om_wm: cursor re-arm failed");
+        eprintln!("yuka: cursor re-arm failed");
         return;
     }
     c.shown_x = i32::MIN;
@@ -582,7 +582,7 @@ fn find_drm_fd() -> Option<i32> {
             }
         }
     }
-    eprintln!("om_wm: could not find raylib's DRM fd");
+    eprintln!("yuka: could not find raylib's DRM fd");
     None
 }
 

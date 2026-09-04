@@ -1,4 +1,4 @@
-# om_wm
+# yuka
 
 A Wayland compositor and window manager built as an infinite canvas: windows are
 quads you smoothly zoom, pan, and move, drawn through a single shader pass that
@@ -9,7 +9,7 @@ protocol frontend is Smithay. On real hardware raylib owns the display and drive
 KMS directly; for development it can instead run nested as a client of another
 compositor.
 
-See `CLAUDE.md` for the design and coding conventions, `om_wm.conf` for every
+See `CLAUDE.md` for the design and coding conventions, `yuka.conf` for every
 tunable setting, and `devlog/` for the running history.
 
 ## Requirements
@@ -44,7 +44,7 @@ sudo apt install seatd
 # extra, only for the nested/windowed build (raylib's GLFW Wayland backend)
 sudo apt install libwayland-dev wayland-protocols
 
-# the demo clients om_wm spawns on startup, so the canvas has windows to play with
+# the demo clients yuka spawns on startup, so the canvas has windows to play with
 sudo apt install weston
 
 # Rust, if you do not have it
@@ -80,7 +80,7 @@ plane, libinput) staying out of the way.
 
 ### On real Linux hardware (KMS)
 
-om_wm wants its own VT. Switch to a spare one (Ctrl+Alt+F3), log in, and run it.
+yuka wants its own VT. Switch to a spare one (Ctrl+Alt+F3), log in, and run it.
 It takes session control through logind/seatd, so VT switching keeps working:
 
 ```sh
@@ -91,9 +91,9 @@ It takes session control through logind/seatd, so VT switching keeps working:
 `run_tty.sh` is deliberately safe on a fresh TTY: it stops itself after a frame
 count (so a run that renders nothing still ends without a reboot) and writes its
 log to a file (so output survives the TTY it started from). If it ever locks up,
-Ctrl+Alt+F1 gets you back and `pkill -x om_wm` stops it.
+Ctrl+Alt+F1 gets you back and `pkill -x yuka` stops it.
 
-On startup om_wm spawns a few weston demo clients (a terminal, an editor, a couple
+On startup yuka spawns a few weston demo clients (a terminal, an editor, a couple
 of dmabuf toys) so the canvas has windows to pan, zoom, and drag around. Install
 `weston` to get them; without it the canvas just comes up empty.
 
@@ -117,19 +117,19 @@ cargo run --features windowed
 
 | Variable | Effect |
 |----------|--------|
-| `OM_WM_MAX_FRAMES=<n>` | Stop after n frames. Unset means run forever. |
-| `OM_WM_SIZE=<W>x<H>` | DRM only: pick a specific connector mode, e.g. `1280x720`. Unset takes the whole screen (the connector's current mode), which on a virtual GPU can fall back to something tiny. |
-| `OM_WM_CARD=logind\|raylib` | Who opens the KMS device. Default `logind` (om_wm opens it and hands raylib the fd); `raylib` lets raylib open the card itself. |
-| `OM_WM_NO_SEAT=1` | Do not take session control. Implied when there is no keyboard; also what non-interactive runs want. |
-| `OM_WM_SHOT[=<n>]` | Save a screenshot at frame n (a default frame if no number). |
-| `OM_WM_LOG=<filter>` | Log filter, e.g. `OM_WM_LOG=debug` or `OM_WM_LOG=smithay=trace`. Default `info`. |
-| `OM_WM_LOG_FILE=<path>` | Where `run_tty.sh` writes the log. |
-| `OM_WM_CONF=<path>` | Settings file to read. Default `om_wm.conf` in the working directory. |
-| `OM_WM_DEBUG_FPS`, `OM_WM_DEBUG_INPUT`, `OM_WM_DEBUG_LABELS`, `OM_WM_DEBUG_PAD`, `OM_WM_DEBUG_TREE` | Turn on individual debug overlays. |
+| `YUKA_MAX_FRAMES=<n>` | Stop after n frames. Unset means run forever. |
+| `YUKA_SIZE=<W>x<H>` | DRM only: pick a specific connector mode, e.g. `1280x720`. Unset takes the whole screen (the connector's current mode), which on a virtual GPU can fall back to something tiny. |
+| `YUKA_CARD=logind\|raylib` | Who opens the KMS device. Default `logind` (yuka opens it and hands raylib the fd); `raylib` lets raylib open the card itself. |
+| `YUKA_NO_SEAT=1` | Do not take session control. Implied when there is no keyboard; also what non-interactive runs want. |
+| `YUKA_SHOT[=<n>]` | Save a screenshot at frame n (a default frame if no number). |
+| `YUKA_LOG=<filter>` | Log filter, e.g. `YUKA_LOG=debug` or `YUKA_LOG=smithay=trace`. Default `info`. |
+| `YUKA_LOG_FILE=<path>` | Where `run_tty.sh` writes the log. |
+| `YUKA_CONF=<path>` | Settings file to read. Default `yuka.conf` in the working directory. |
+| `YUKA_DEBUG_FPS`, `YUKA_DEBUG_INPUT`, `YUKA_DEBUG_LABELS`, `YUKA_DEBUG_PAD`, `YUKA_DEBUG_TREE` | Turn on individual debug overlays. |
 
 ### Settings and controls
 
-`om_wm.conf` is read at startup and re-read while running: save the file and the
+`yuka.conf` is read at startup and re-read while running: save the file and the
 change lands on the next frame, or press Super+R to reload on demand. Every knob
 is documented inline; defaults live in `src/settings.rs`.
 
@@ -138,7 +138,7 @@ two fingers pan and pinch the canvas, the wheel zooms, and a drag moves the wind
 under the pointer (Super+right-drag resizes it); three fingers pan, pinch, and
 move between windows whatever the keyboard is doing; Super+Escape toggles the
 overview; Super+W asks the focused window to close. The exact bindings live in
-`src/input.rs` and the feel is tuned in `om_wm.conf`.
+`src/input.rs` and the feel is tuned in `yuka.conf`.
 
 ## Developing from macOS in a VM
 
@@ -187,8 +187,8 @@ assumed from the profile.
 ### Resolution and input in the VM
 
 The virtio-gpu connector often defaults to a tiny mode. Since the DRM path takes
-the connector's current mode, pass `OM_WM_SIZE=WxH` to pick one it offers (see
-`cat /sys/class/drm/card0-Virtual-1/modes`), e.g. `OM_WM_SIZE=1440x900`.
+the connector's current mode, pass `YUKA_SIZE=WxH` to pick one it offers (see
+`cat /sys/class/drm/card0-Virtual-1/modes`), e.g. `YUKA_SIZE=1440x900`.
 
 Input has a real limitation: UTM/QEMU forwards only pointer motion, clicks, and
 scroll from the host. The Mac trackpad appears in the guest as a plain mouse/tablet
@@ -213,7 +213,7 @@ ssh <guest> 'bash ~/repos/om_wm/tools/mt-bridge/guest/build.sh'   # -> ~/mt-inje
 # each session, in order
 ssh <guest> '~/mt-inject &'                   # 1. create the uinput touchpad
 tools/mt-bridge/host/mt-capture               # 2. stream the trackpad (real terminal)
-ssh <guest> 'cd ~/repos/om_wm && ~/run_om_tty.sh'   # 3. om_wm finds the pad at start
+ssh <guest> 'cd ~/repos/om_wm && ~/run_om_tty.sh'   # 3. yuka finds the pad at start
 ```
 
 Then, with the mt-capture terminal frontmost, touch the trackpad and watch the
@@ -223,9 +223,9 @@ with Input Monitoring granted, since multitouch is delivered only to the frontmo
 app and clicks need the permission; the guest needs `/dev/uinput` writable (the
 one-time udev rule in `tools/mt-bridge/README.md`); and disable macOS's own 3/4-
 finger gestures in System Settings > Trackpad so they do not fire alongside
-om_wm's.
+yuka's.
 
 One console gotcha specific to KMS: launch the binary with stdin off the console
-(`om_wm < /dev/null`) so raylib does not also grab the tty keyboard on top of
+(`yuka < /dev/null`) so raylib does not also grab the tty keyboard on top of
 logind's session control; otherwise the console keyboard can be left in raw mode
 on exit. Recover with `sudo kbd_mode -u -f -C /dev/tty1`.

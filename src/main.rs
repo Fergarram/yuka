@@ -1,5 +1,5 @@
 //
-// om_wm
+// yuka
 //
 // Wayland compositor + window manager on an infinite canvas, rendered with
 // raylib on DRM/KMS. Current milestone: import client buffers (shm copy and
@@ -43,7 +43,7 @@ use wl::state::State;
 // Constants
 //
 
-// Default frame for OM_WM_SHOT; OM_WM_SHOT=<n> picks another, which matters when
+// Default frame for YUKA_SHOT; YUKA_SHOT=<n> picks another, which matters when
 // what you want to see only exists a few seconds in.
 const SHOT_FRAME: u32 = 200;
 const BTN_LEFT: u32 = 0x110;
@@ -269,11 +269,11 @@ fn spawn_client(socket_name: &str, cmd: &str) -> Option<Child> {
         .spawn()
     {
         Ok(child) => {
-            println!("om_wm: spawned '{cmd}' (pid {})", child.id());
+            println!("yuka: spawned '{cmd}' (pid {})", child.id());
             Some(child)
         }
         Err(e) => {
-            eprintln!("om_wm: failed to spawn '{cmd}': {e}");
+            eprintln!("yuka: failed to spawn '{cmd}': {e}");
             None
         }
     }
@@ -542,11 +542,11 @@ fn route_input(
     if pressed && debug {
         match under.as_ref() {
             Some((_, ox, oy)) => println!(
-                "om_wm: press -> surface local {:.0},{:.0} (origin {ox:.0},{oy:.0})",
+                "yuka: press -> surface local {:.0},{:.0} (origin {ox:.0},{oy:.0})",
                 ccx - ox,
                 ccy - oy
             ),
-            None => println!("om_wm: press -> nothing under the pointer"),
+            None => println!("yuka: press -> nothing under the pointer"),
         }
     }
 
@@ -596,7 +596,7 @@ fn route_input(
         }
         if under.is_none() {
             if debug {
-                println!("om_wm: button {button:#x} had nothing under the pointer");
+                println!("yuka: button {button:#x} had nothing under the pointer");
             }
             continue;
         }
@@ -1089,9 +1089,9 @@ fn unmaximize_for_drag(
 fn main() {
     // Smithay and wayland-server report everything through tracing, including
     // client protocol errors, and without a subscriber all of it is dropped. That
-    // is why a client dying used to leave no trace at all. OM_WM_LOG overrides the
-    // filter (e.g. OM_WM_LOG=debug, or OM_WM_LOG=smithay=trace).
-    let filter = std::env::var("OM_WM_LOG").unwrap_or_else(|_| "info".to_string());
+    // is why a client dying used to leave no trace at all. YUKA_LOG overrides the
+    // filter (e.g. YUKA_LOG=debug, or YUKA_LOG=smithay=trace).
+    let filter = std::env::var("YUKA_LOG").unwrap_or_else(|_| "info".to_string());
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
         .with_writer(std::io::stderr)
@@ -1101,11 +1101,11 @@ fn main() {
     // thresholds, camera rates. Re-read while running (see SETTINGS_POLL_FRAMES), so
     // tuning is a save from another tty rather than a rebuild.
     let conf_path =
-        std::env::var("OM_WM_CONF").unwrap_or_else(|_| settings::DEFAULT_PATH.to_string());
+        std::env::var("YUKA_CONF").unwrap_or_else(|_| settings::DEFAULT_PATH.to_string());
     let mut set = settings::init(&conf_path);
     let mut conf_watch = settings::watch_new(&conf_path);
 
-    // Nested build: om_wm is a client of another compositor, which owns the display
+    // Nested build: yuka is a client of another compositor, which owns the display
     // and the input devices. Everything that reaches for hardware stays out of it, so
     // there is no session to control, no DRM master to hold, no evdev to read, and
     // nothing that can lock the machine. Same source, one flag apart.
@@ -1116,18 +1116,18 @@ fn main() {
     //
     // Taking control makes us the only thing that can switch VTs, so we refuse it
     // when the machine has no keyboard to switch with: silencing the console then
-    // would leave no way off this VT at all. OM_WM_NO_SEAT opts out by hand, which
+    // would leave no way off this VT at all. YUKA_NO_SEAT opts out by hand, which
     // is also what non-interactive runs want.
-    let no_seat = std::env::var("OM_WM_NO_SEAT").is_ok();
+    let no_seat = std::env::var("YUKA_NO_SEAT").is_ok();
     let mut seat = if windowed {
-        println!("om_wm: nested in another compositor: no session control, no vt switching");
+        println!("yuka: nested in another compositor: no session control, no vt switching");
         None
     } else if input::any_keyboard_present() && !no_seat {
         seat::init()
     } else {
         if !input::any_keyboard_present() {
             eprintln!(
-                "om_wm: no keyboard on this machine, so not taking session control: \
+                "yuka: no keyboard on this machine, so not taking session control: \
                  the console keeps its own ctrl+alt+Fn"
             );
         }
@@ -1137,15 +1137,15 @@ fn main() {
     // The card, before the window: logind hands out KMS devices, and raylib takes the
     // fd from us rather than opening one itself. Without the raylib patch there is
     // nothing to hand it to, so raylib opens the card and we adopt its fd afterwards.
-    // OM_WM_CARD picks the opener by hand: logind (the default) or raylib, which is
+    // YUKA_CARD picks the opener by hand: logind (the default) or raylib, which is
     // also what a raylib without the patch gets. It keeps that older path tested, and
     // is the first thing to try if the handoff ever misbehaves.
     let mut handed_card = false;
-    let handoff = match std::env::var("OM_WM_CARD").unwrap_or_default().as_str() {
+    let handoff = match std::env::var("YUKA_CARD").unwrap_or_default().as_str() {
         "" | "logind" => ray::can_set_drm_fd(),
         "raylib" => false,
         other => {
-            eprintln!("om_wm: OM_WM_CARD={other} is neither logind nor raylib, using logind");
+            eprintln!("yuka: YUKA_CARD={other} is neither logind nor raylib, using logind");
             ray::can_set_drm_fd()
         }
     };
@@ -1161,20 +1161,20 @@ fn main() {
     if windowed {
         ray::disable_libdecor();
         ray::set_config_flags(ray::FLAG_WINDOW_UNDECORATED | ray::FLAG_VSYNC_HINT);
-        ray::init_window(WINDOWED_W, WINDOWED_H, "om_wm (nested)");
+        ray::init_window(WINDOWED_W, WINDOWED_H, "yuka (nested)");
     } else {
         // 0, 0 lets raylib take the connector's current mode: the whole screen. A
         // virtual GPU whose current mode is not a clean match (virtio-gpu in a VM)
-        // can land on a tiny fallback, so OM_WM_SIZE=WxH names the mode by hand and
+        // can land on a tiny fallback, so YUKA_SIZE=WxH names the mode by hand and
         // raylib picks that exact connector mode instead.
-        let (w, h) = std::env::var("OM_WM_SIZE")
+        let (w, h) = std::env::var("YUKA_SIZE")
             .ok()
             .and_then(|s| {
                 let (a, b) = s.split_once('x')?;
                 Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
             })
             .unwrap_or((0, 0));
-        ray::init_window(w, h, "om_wm");
+        ray::init_window(w, h, "yuka");
     }
     // No SetTargetFPS: the DRM page flip in EndDrawing already vsyncs to the
     // display. A second 60 Hz cap would beat against it and cause stutter.
@@ -1191,12 +1191,12 @@ fn main() {
     // the worst outcome available: no picture, while we hold the keyboard and, without
     // session control, leave no obvious way to switch away.
     // A card from logind needs no contention check: it is handed to one session at a
-    // time, so a second om_wm is refused at open and ends up on the path below.
+    // time, so a second yuka is refused at open and ends up on the path below.
     let logind_card = seat.as_ref().map(seat::card_from_logind).unwrap_or(false);
     let display_ours = logind_card || seat::drm_is_ours();
     if ray::screen_width() <= 0 || ray::screen_height() <= 0 || !display_ours {
         eprintln!(
-            "om_wm: no usable display ({}x{}), exiting before taking any input.",
+            "yuka: no usable display ({}x{}), exiting before taking any input.",
             ray::screen_width(),
             ray::screen_height()
         );
@@ -1223,7 +1223,7 @@ fn main() {
     ray::set_clip_planes(1.0, 200_000.0);
 
     println!(
-        "om_wm: screen {}x{}  egl_display={:p}  egl_context={:p}",
+        "yuka: screen {}x{}  egl_display={:p}  egl_context={:p}",
         ray::screen_width(),
         ray::screen_height(),
         ray::egl_current_display(),
@@ -1231,14 +1231,14 @@ fn main() {
     );
 
     // A label under every window saying what it is made of and how it is sampled.
-    // OM_WM_DEBUG_LABELS=1, or Super+I at any time.
-    let mut debug_labels = std::env::var("OM_WM_DEBUG_LABELS").is_ok();
+    // YUKA_DEBUG_LABELS=1, or Super+I at any time.
+    let mut debug_labels = std::env::var("YUKA_DEBUG_LABELS").is_ok();
     // The trackpad instrument in the corner: fingers, button regions, live gesture
-    // state. OM_WM_DEBUG_PAD=1, or Super+P at any time.
-    let mut debug_pad = std::env::var("OM_WM_DEBUG_PAD").is_ok();
-    // Frame rate, this frame and the worst of the last second. OM_WM_DEBUG_FPS=1, or
+    // state. YUKA_DEBUG_PAD=1, or Super+P at any time.
+    let mut debug_pad = std::env::var("YUKA_DEBUG_PAD").is_ok();
+    // Frame rate, this frame and the worst of the last second. YUKA_DEBUG_FPS=1, or
     // Super+F at any time.
-    let mut debug_fps = std::env::var("OM_WM_DEBUG_FPS").is_ok();
+    let mut debug_fps = std::env::var("YUKA_DEBUG_FPS").is_ok();
 
     let egl = egl::init().expect("egl init");
     // How much anisotropic filtering the driver offers, asked once. It only matters
@@ -1248,7 +1248,7 @@ fn main() {
     let dmabuf_formats = egl.query_formats();
     let render_node_dev = egl.render_node_dev();
     println!(
-        "om_wm: egl reports {} dmabuf format/modifier pairs, anisotropy {anisotropy:.0}x",
+        "yuka: egl reports {} dmabuf format/modifier pairs, anisotropy {anisotropy:.0}x",
         dmabuf_formats.len()
     );
 
@@ -1265,7 +1265,7 @@ fn main() {
             ray::screen_height(),
         )
         .expect("wayland init");
-    println!("om_wm: WAYLAND_DISPLAY={}", server.socket_name);
+    println!("yuka: WAYLAND_DISPLAY={}", server.socket_name);
 
     let mut windows = render::windows_new();
     let mut dmabuf_cache = render::dmabuf_cache_new();
@@ -1281,7 +1281,7 @@ fn main() {
     // libinput drives keyboards and pointers. Without a session it grabs them as
     // it opens them, since the console would otherwise read everything we type,
     // and that costs us VT switching: ctrl+alt+backspace is then the way out.
-    // libinput would read the real devices even nested, so the host and om_wm would
+    // libinput would read the real devices even nested, so the host and yuka would
     // both react to every key. Host input comes through raylib instead.
     let mut inp = if windowed {
         Some(input::init_host(&set))
@@ -1297,9 +1297,9 @@ fn main() {
     let opened = inp.as_ref().map(input::devices).unwrap_or(0);
     if opened == 0 && !windowed {
         eprintln!(
-            "om_wm: libinput opened no input devices, so nothing could quit or switch \
-             away from om_wm. Exiting instead of locking the seat. This is usually \
-             permissions on /dev/input: try 'sg input -c ./target/debug/om_wm'."
+            "yuka: libinput opened no input devices, so nothing could quit or switch \
+             away from yuka. Exiting instead of locking the seat. This is usually \
+             permissions on /dev/input: try 'sg input -c ./target/debug/yuka'."
         );
         if let Some(s) = seat.as_mut() {
             seat::shutdown(s);
@@ -1310,7 +1310,7 @@ fn main() {
 
     if seat.is_none() && !windowed {
         println!(
-            "om_wm: no session control: input grabbed, no vt switching, \
+            "yuka: no session control: input grabbed, no vt switching, \
              ctrl+alt+backspace quits"
         );
     }
@@ -1348,18 +1348,18 @@ fn main() {
     let start = Instant::now();
     let clear = ray::Color { r: 24, g: 24, b: 32, a: 255 };
     let mut frame: u32 = 0;
-    let debug_input = std::env::var("OM_WM_DEBUG_INPUT").is_ok();
+    let debug_input = std::env::var("YUKA_DEBUG_INPUT").is_ok();
     // Dumps each toplevel's surface tree, which is what decides how children stack. Twice now
     // a child has drawn on the wrong side of something and the slots were the only way to see
     // what the client had actually asked for.
-    let debug_tree = std::env::var("OM_WM_DEBUG_TREE").is_ok();
-    let shot_env = std::env::var("OM_WM_SHOT");
+    let debug_tree = std::env::var("YUKA_DEBUG_TREE").is_ok();
+    let shot_env = std::env::var("YUKA_SHOT");
     let screenshot = shot_env.is_ok();
     let shot_frame: u32 = shot_env
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(SHOT_FRAME);
-    let max_frames: u32 = std::env::var("OM_WM_MAX_FRAMES")
+    let max_frames: u32 = std::env::var("YUKA_MAX_FRAMES")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(u32::MAX);
@@ -1498,7 +1498,7 @@ fn main() {
                         touch::reset(tp, &set);
                     }
                     last = Instant::now();
-                    println!("om_wm: back on vt{}", seat::our_vt(s));
+                    println!("yuka: back on vt{}", seat::our_vt(s));
                 } else {
                     if let Some(i) = inp.as_ref() {
                         let t = start.elapsed().as_millis() as u32;
@@ -1509,7 +1509,7 @@ fn main() {
                     if let Some(i) = inp.as_mut() {
                         input::suspend(i);
                     }
-                    println!("om_wm: session inactive, display released");
+                    println!("yuka: session inactive, display released");
                 }
             }
             if !now_active {
@@ -1597,7 +1597,7 @@ fn main() {
             });
             if let Some((w, h, pixels)) = taken {
                 if debug_input {
-                    println!("om_wm: cursor image {w}x{h} cached");
+                    println!("yuka: cursor image {w}x{h} cached");
                 }
                 if let Some(slot) = cursor_images.iter_mut().find(|c| c.id == id) {
                     // New pixels for a surface we know: its hotspot bookkeeping carries over,
@@ -1678,13 +1678,13 @@ fn main() {
             for surface in wl::state::toplevel_surfaces(&state) {
                 let tree = wl::state::surface_tree(&surface);
                 let root_slot = tree.iter().position(|(s, _, _)| *s == surface).unwrap_or(0);
-                println!("om_wm: tree {} surfaces, root at slot {root_slot}", tree.len());
+                println!("yuka: tree {} surfaces, root at slot {root_slot}", tree.len());
                 for (slot, (s, ox, oy)) in tree.iter().enumerate() {
                     let size = render::geo_size(&windows, s)
                         .map(|(w, h)| format!("{w:.0}x{h:.0}"))
                         .unwrap_or_else(|| "no entry".to_string());
                     println!(
-                        "om_wm:   slot {slot} off {ox:.0},{oy:.0} {size}{}",
+                        "yuka:   slot {slot} off {ox:.0},{oy:.0} {size}{}",
                         if slot == root_slot { "  <- root" } else { "" }
                     );
                 }
@@ -1786,22 +1786,22 @@ fn main() {
         if announced_dmabuf != Some(set.dmabuf_mode) {
             announced_dmabuf = Some(set.dmabuf_mode);
             match set.dmabuf_mode {
-                DmabufMode::Hold => println!("om_wm: dmabuf_mode hold, buffers sampled in place"),
+                DmabufMode::Hold => println!("yuka: dmabuf_mode hold, buffers sampled in place"),
                 DmabufMode::Blit => println!(
-                    "om_wm: dmabuf_mode blit, buffers copied into textures we own and released at once"
+                    "yuka: dmabuf_mode blit, buffers copied into textures we own and released at once"
                 ),
             }
         }
 
         // Quit chord (ctrl+alt+backspace, the traditional one). While we hold the
         // keyboard grab, ctrl+c in the shell that launched us cannot reach it, so
-        // without this there is no way to stop om_wm from the keyboard at all.
+        // without this there is no way to stop yuka from the keyboard at all.
         if let Some(i) = inp.as_ref() {
             let quit = input::ctrl_down(i)
                 && input::alt_down(i)
                 && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_BACKSPACE);
             if quit {
-                println!("om_wm: ctrl+alt+backspace, quitting");
+                println!("yuka: ctrl+alt+backspace, quitting");
                 RUNNING.store(false, Ordering::Relaxed);
             }
         }
@@ -1816,7 +1816,7 @@ fn main() {
         };
         if let (Some(target), Some(s)) = (vt_target, seat.as_ref()) {
             if seat::switch_to(s, target) {
-                println!("om_wm: switching to vt{target}");
+                println!("yuka: switching to vt{target}");
                 continue;
             }
         }
@@ -1947,13 +1947,13 @@ fn main() {
                 && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_I);
             if toggle {
                 debug_labels = !debug_labels;
-                println!("om_wm: debug labels {}", if debug_labels { "on" } else { "off" });
+                println!("yuka: debug labels {}", if debug_labels { "on" } else { "off" });
             }
             let toggle_fps = input::super_down(i)
                 && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_F);
             if toggle_fps {
                 debug_fps = !debug_fps;
-                println!("om_wm: fps counter {}", if debug_fps { "on" } else { "off" });
+                println!("yuka: fps counter {}", if debug_fps { "on" } else { "off" });
             }
             // Super+W asks the focused window to close, the way every desktop's close chord does.
             //
@@ -1971,7 +1971,7 @@ fn main() {
                 && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_P);
             if toggle_pad {
                 debug_pad = !debug_pad;
-                println!("om_wm: trackpad overlay {}", if debug_pad { "on" } else { "off" });
+                println!("yuka: trackpad overlay {}", if debug_pad { "on" } else { "off" });
             }
             // Super+S grabs the frame. Taken at the end of the draw, so what lands in the
             // file is the frame that was on screen, cursor plane aside: that is a hardware
@@ -2395,7 +2395,7 @@ fn main() {
                 if debug_input {
                     let (w, h) = render::geo_size(&windows, &surf).unwrap_or((0.0, 0.0));
                     println!(
-                        "om_wm: move request {}x{} {} took {} frames (press frame {af}, now {frame}), pointer travelled {:.0},{:.0} since",
+                        "yuka: move request {}x{} {} took {} frames (press frame {af}, now {frame}), pointer travelled {:.0},{:.0} since",
                         w as i32,
                         h as i32,
                         render::source(&windows, &surf),
@@ -2441,7 +2441,7 @@ fn main() {
                     // read about than one that declares and is being obeyed.
                     let (lo, hi) = wl::state::size_limits(&surf);
                     println!(
-                        "om_wm: resize request {}x{} {} took {} frames (press frame {af}, now {frame}), pointer travelled {:.0},{:.0} since, client says min {}x{} max {}x{}",
+                        "yuka: resize request {}x{} {} took {} frames (press frame {af}, now {frame}), pointer travelled {:.0},{:.0} since, client says min {}x{} max {}x{}",
                         w as i32,
                         h as i32,
                         render::source(&windows, &surf),
@@ -2619,7 +2619,7 @@ fn main() {
                         let (edge_x, edge_y) = corner_at(gx, gy, ox, oy, w, h, 0.5, 0.5);
                         if debug_input {
                             println!(
-                                "om_wm: resize grabbed {:.0},{:.0} into {w:.0}x{h:.0}, holding the {} corner",
+                                "yuka: resize grabbed {:.0},{:.0} into {w:.0}x{h:.0}, holding the {} corner",
                                 gx - ox,
                                 gy - oy,
                                 match (edge_x < 0.0, edge_y < 0.0) {
@@ -2688,7 +2688,7 @@ fn main() {
                     if ex != r.edge_x || ey != r.edge_y {
                         if debug_input {
                             println!(
-                                "om_wm: resize now holding the {} corner",
+                                "yuka: resize now holding the {} corner",
                                 match (ex < 0.0, ey < 0.0) {
                                     (true, true) => "top left",
                                     (false, true) => "top right",
@@ -3020,7 +3020,7 @@ fn main() {
                 // the visible top-left is that plus the geometry offset.
                 let geo = wl::state::geometry_of(&surf);
                 if geo != drag_geo {
-                    println!("om_wm: drag geometry now {geo:?} (was {drag_geo:?})");
+                    println!("yuka: drag geometry now {geo:?} (was {drag_geo:?})");
                     drag_geo = geo;
                 }
             }
@@ -3052,7 +3052,7 @@ fn main() {
                     let cursor_d = (sxp - cx0, syp - cy0);
                     let win_d = ((now.0 - px0) * cam.zoom, (now.1 - py0) * cam.zoom);
                     println!(
-                        "om_wm: drag end from_client={from_client} zoom {:.3} cursor moved {:.1},{:.1} window moved {:.1},{:.1} (screen px) drift {:.1},{:.1}",
+                        "yuka: drag end from_client={from_client} zoom {:.3} cursor moved {:.1},{:.1} window moved {:.1},{:.1} (screen px) drift {:.1},{:.1}",
                         cam.zoom,
                         cursor_d.0, cursor_d.1,
                         win_d.0, win_d.1,
@@ -3137,7 +3137,7 @@ fn main() {
                 if cursor_key.as_ref() != Some(&(id.clone(), ox, oy)) {
                     if debug_input {
                         println!(
-                            "om_wm: cursor now {w}x{h} hotspot {ox},{oy} (client said {hx},{hy})"
+                            "yuka: cursor now {w}x{h} hotspot {ox},{oy} (client said {hx},{hy})"
                         );
                     }
                     cursor::store_client_image(
@@ -3164,7 +3164,7 @@ fn main() {
                     _ => "arrow",
                 };
                 if want != last_cursor_want {
-                    println!("om_wm: cursor want {want} (was {last_cursor_want})");
+                    println!("yuka: cursor want {want} (was {last_cursor_want})");
                     last_cursor_want = want;
                 }
             }
@@ -3192,7 +3192,7 @@ fn main() {
                                 found = xcursor::load(alt, 0);
                             }
                             if found.is_none() && debug_input {
-                                println!("om_wm: no theme cursor for {name}, using our own");
+                                println!("yuka: no theme cursor for {name}, using our own");
                             }
                             named_cursors.push((name, found));
                             named_cursors.len() - 1
@@ -3248,10 +3248,10 @@ fn main() {
         render::prepare_textures(&mut windows, cam.zoom, anisotropy, set.mips_when_minified);
 
         // Dismissal is the popup grab's job now, not ours: it knows the chain and
-        // tells the client in the right order. OM_WM_DEBUG_INPUT=1 still dumps the
+        // tells the client in the right order. YUKA_DEBUG_INPUT=1 still dumps the
         // click and every rect it could have hit.
         if debug_input && pressed {
-            println!("om_wm: click screen {sxp:.0},{syp:.0}");
+            println!("yuka: click screen {sxp:.0},{syp:.0}");
             render::log_rects(&windows);
         }
 
@@ -3380,7 +3380,7 @@ fn main() {
             // file is missing whatever the batch was still holding.
             ray::flush_batch();
             ray::take_screenshot(&path);
-            println!("om_wm: wrote {path}");
+            println!("yuka: wrote {path}");
         }
         // Just before the present, so the plane and the frame land together.
         if let Some(cur) = cursor.as_mut() {
@@ -3393,7 +3393,7 @@ fn main() {
     }
 
     println!(
-        "om_wm: shutting down after {frame} frames; cached dmabufs={} max_frame={:.1}ms slow_frames(>20ms)={}",
+        "yuka: shutting down after {frame} frames; cached dmabufs={} max_frame={:.1}ms slow_frames(>20ms)={}",
         dmabuf_cache.key.len(),
         max_dt_ms,
         slow_frames

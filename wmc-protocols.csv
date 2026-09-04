@@ -1,4 +1,4 @@
-protocol,status,what it is,how om_wm handles it
+protocol,status,what it is,how yuka handles it
 wl_compositor,supported,"Surfaces and their buffers. The base object every client needs.","CompositorState. Commits are queued in State::committed and drained once per frame by the render side."
 wl_shm,supported,"Shared memory buffers: pixels through a file descriptor. The universal fallback path.","ShmState. take_shm_buffer copies into a texture we own, so the client's buffer is released immediately."
 wl_seat,supported,"Input devices as a group: pointer, keyboard, touch.","SeatState with a pointer and a keyboard. No touch: this machine has none, and a canvas would want its own answer for it."
@@ -12,7 +12,7 @@ zwp_pointer_gestures_v1,supported,"Pinch and swipe as sequences a client can fol
 wp_cursor_shape_v1,supported,"A client naming a cursor (""text"", ""grab"") instead of sending pixels.","CursorShapeManagerState. The name is looked up in the same Xcursor theme the canvas pointer comes from, once per shape, hits and misses both remembered."
 wlr_layer_shell_v1,missing,"Surfaces belonging to the screen rather than to the window stack: bars, launchers, notification daemons. Anchors, layers and exclusive zones.","Nothing. Quickshell, waybar, fuzzel and mako all refuse to start without it. Smithay has the protocol side and a layer map that does the arranging, so the work is a handler plus deciding what the four layers mean on an infinite canvas. This is the natural home for anything pinned to the view."
 ext_session_lock_v1,missing,"A lock screen the compositor trusts: the locker owns the screen and a crash leaves it locked.","Nothing. Smithay has session_lock. Needed before this is a machine anyone else uses."
-wlr_screencopy / ext_image_copy_capture,missing,"Screenshots and screen recording by another program.","Nothing. om_wm can grab its own framebuffer with Super+S, which is not the same thing: no other application can capture."
+wlr_screencopy / ext_image_copy_capture,missing,"Screenshots and screen recording by another program.","Nothing. yuka can grab its own framebuffer with Super+S, which is not the same thing: no other application can capture."
 xdg_decoration_unstable_v1,missing,"Negotiating who draws the titlebar, client or server.","Nothing, so every client draws its own. That is why we draw the shadow they pad around themselves. Worth having if the canvas ever wants uniform chrome."
 wp_fractional_scale_v1,missing,"Fractional output scaling, negotiated rather than rounded.","Nothing. We advertise scale 1 and the canvas zoom does the scaling instead, which is a different model and mostly a better one here."
 wp_presentation_time,missing,"Telling a client exactly when its frame reached the screen.","Nothing. Clients that pace themselves on it fall back to frame callbacks, which we do send."

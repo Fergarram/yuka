@@ -237,7 +237,7 @@ pub fn build_mips(tex: u32, anisotropy: f32) -> bool {
 fn load<T>(name: &str) -> Option<T> {
     let p = ray::proc_address(name);
     if p.is_null() {
-        eprintln!("om_wm: egl: missing entry point {name}");
+        eprintln!("yuka: egl: missing entry point {name}");
         None
     } else {
         Some(unsafe { transmute_copy_fn::<T>(p) })
@@ -256,7 +256,7 @@ unsafe fn transmute_copy_fn<T>(p: *mut c_void) -> T {
 pub fn init() -> Option<Egl> {
     let display = ray::egl_current_display();
     if display.is_null() {
-        eprintln!("om_wm: egl: no current EGL display");
+        eprintln!("yuka: egl: no current EGL display");
         return None;
     }
 
@@ -429,7 +429,7 @@ impl Egl {
             return None;
         }
         println!(
-            "om_wm: egl render node {} dev={:#x}",
+            "yuka: egl render node {} dev={:#x}",
             path.to_string_lossy(),
             st.st_rdev
         );
