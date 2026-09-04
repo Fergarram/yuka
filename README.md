@@ -44,6 +44,9 @@ sudo apt install seatd
 # extra, only for the nested/windowed build (raylib's GLFW Wayland backend)
 sudo apt install libwayland-dev wayland-protocols
 
+# the demo clients om_wm spawns on startup, so the canvas has windows to play with
+sudo apt install weston
+
 # Rust, if you do not have it
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
@@ -89,6 +92,10 @@ It takes session control through logind/seatd, so VT switching keeps working:
 count (so a run that renders nothing still ends without a reboot) and writes its
 log to a file (so output survives the TTY it started from). If it ever locks up,
 Ctrl+Alt+F1 gets you back and `pkill -x om_wm` stops it.
+
+On startup om_wm spawns a few weston demo clients (a terminal, an editor, a couple
+of dmabuf toys) so the canvas has windows to pan, zoom, and drag around. Install
+`weston` to get them; without it the canvas just comes up empty.
 
 For an unbounded run with debug overlays on:
 
@@ -188,9 +195,35 @@ scroll from the host. The Mac trackpad appears in the guest as a plain mouse/tab
 (`/proc/bus/input/devices` shows only QEMU USB Tablet/Mouse/Keyboard), so the
 custom multitouch gesture engine (`touch.rs`, `trackpad_mode = custom`) has no
 multitouch device to read. You can drive the compositor with pointer + scroll +
-keyboard, but native trackpad gestures need real hardware, or the multitouch bridge
-(see `tools/mt-bridge/`) that synthesizes a `uinput` touchpad in the guest from the
-host trackpad.
+keyboard, but native trackpad gestures need real hardware, or the mt-bridge below.
+
+### Trackpad gestures in the VM (mt-bridge)
+
+`tools/mt-bridge/` carries the real Mac trackpad into the guest: a host program
+reads raw multitouch (and clicks) and streams them to a guest program that
+synthesizes a `uinput` touchpad `touch.rs` reads as if it were a real pad. Full
+detail (protocol, permissions, focus rules) is in `tools/mt-bridge/README.md`;
+the short version:
+
+```sh
+# build once
+tools/mt-bridge/host/build.sh                 # on the Mac  -> ./mt-capture
+ssh <guest> 'bash ~/repos/om_wm/tools/mt-bridge/guest/build.sh'   # -> ~/mt-inject
+
+# each session, in order
+ssh <guest> '~/mt-inject &'                   # 1. create the uinput touchpad
+tools/mt-bridge/host/mt-capture               # 2. stream the trackpad (real terminal)
+ssh <guest> 'cd ~/repos/om_wm && ~/run_om_tty.sh'   # 3. om_wm finds the pad at start
+```
+
+Then, with the mt-capture terminal frontmost, touch the trackpad and watch the
+(unfocused) UTM window: two fingers pan/pinch, one finger points, a click clicks.
+Three things worth knowing: run mt-capture in a real terminal (Terminal.app/iTerm)
+with Input Monitoring granted, since multitouch is delivered only to the frontmost
+app and clicks need the permission; the guest needs `/dev/uinput` writable (the
+one-time udev rule in `tools/mt-bridge/README.md`); and disable macOS's own 3/4-
+finger gestures in System Settings > Trackpad so they do not fire alongside
+om_wm's.
 
 One console gotcha specific to KMS: launch the binary with stdin off the console
 (`om_wm < /dev/null`) so raylib does not also grab the tty keyboard on top of
