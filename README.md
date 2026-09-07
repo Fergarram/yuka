@@ -216,6 +216,13 @@ tools/mt-bridge/host/mt-capture               # 2. stream the trackpad (real ter
 ssh <guest> 'cd ~/repos/yuka && ~/run_yuka_tty.sh'   # 3. yuka finds the pad at start
 ```
 
+`~/run_yuka_tty.sh` is a machine-local copy of `run_yuka_tty.example.sh` in this
+repo: it sets the VM-specific knobs (a local `CARGO_TARGET_DIR` for the read-only
+9p share, the checkout path, the connector mode) and adds the console-safety bits
+the in-tree `run_tty.sh` leaves out. Copy the example somewhere writable, edit the
+three knobs at the top, and run that copy. The example is not machine-specific
+config in version control on purpose; the copy you run is.
+
 Then, with the mt-capture terminal frontmost, touch the trackpad and watch the
 (unfocused) UTM window: two fingers pan/pinch, one finger points, a click clicks.
 Three things worth knowing: run mt-capture in a real terminal (Terminal.app/iTerm)
