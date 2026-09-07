@@ -351,22 +351,77 @@ static void run_client(int fd, const char *host, int port) {
     }
 }
 
+//
+// Suppress the VM's own pointer while we run
+//
+// UTM/QEMU present a USB Tablet and USB Mouse that mirror the host cursor. With
+// our synthetic trackpad also driving the compositor that is double input, the
+// same movement arriving twice. An exclusive evdev grab on those nodes keeps
+// their events from reaching libinput for exactly as long as this process lives;
+// on exit the fds close, the grab is released, and the normal mouse works again.
+// So no udev rule is needed to take them out of the way. Best effort: a node we
+// cannot open or grab is reported and skipped.
+//
+
+#define MAX_GRABS 8
+
+static int grab_fds[MAX_GRABS];
+static int grab_n = 0;
+
+static int is_qemu_pointer(const char *name) {
+    return !strcmp(name, "QEMU QEMU USB Tablet") || !strcmp(name, "QEMU QEMU USB Mouse");
+}
+
+static void grab_qemu_pointers(void) {
+    for (int i = 0; i < 64; i++) {
+        char path[32];
+        snprintf(path, sizeof(path), "/dev/input/event%d", i);
+        int fd = open(path, O_RDONLY | O_NONBLOCK);
+        if (fd < 0) continue;
+
+        char name[256] = { 0 };
+        if (ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name) < 0 || !is_qemu_pointer(name)) {
+            close(fd);
+            continue;
+        }
+        // The grab is exclusive: libinput has these open without a grab of its own,
+        // so ours wins and it stops seeing their events. We never read the fd, we
+        // only hold the grab; the kernel drops what piles up, which is what we want.
+        if (ioctl(fd, EVIOCGRAB, 1) < 0) {
+            fprintf(stderr, "mt-inject: could not grab %s (%s): %s\n", path, name, strerror(errno));
+            close(fd);
+            continue;
+        }
+        fprintf(stderr, "mt-inject: grabbed %s (%s), muted while this runs\n", path, name);
+        if (grab_n < MAX_GRABS) grab_fds[grab_n++] = fd;
+        else close(fd);
+    }
+    if (grab_n == 0)
+        fprintf(stderr, "mt-inject: no QEMU pointer to grab (fine if none is present)\n");
+}
+
 int main(int argc, char **argv) {
     const char *host = "192.168.64.1";
     int port = 9999;
     int test = 0;
+    int no_grab = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--test")) test = 1;
+        else if (!strcmp(argv[i], "--no-grab")) no_grab = 1;
         else if (!strcmp(argv[i], "--connect") && i + 1 < argc) {
             char *sep = strchr(argv[++i], ':');
             if (sep) { *sep = 0; host = argv[i]; port = atoi(sep + 1); }
             else host = argv[i];
         } else {
-            fprintf(stderr, "usage: %s [--test | --connect host:port]\n", argv[0]);
+            fprintf(stderr, "usage: %s [--test | --connect host:port] [--no-grab]\n", argv[0]);
             return 2;
         }
     }
+
+    // Take the VM's own pointer out of the way, unless asked not to. Kept alive for
+    // the life of the process; releasing happens on its own when the fds close.
+    if (!no_grab) grab_qemu_pointers();
 
     int fd = create_device();
     fprintf(stderr, "mt-inject: uinput device created\n");

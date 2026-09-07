@@ -84,6 +84,12 @@ Focus rules that fall out of how macOS delivers multitouch:
 - The host binds `192.168.64.1`, the vmnet bridge address, which exists while the
   VM runs. If the VM's network changes, pass another bind address:
   `./host/mt-capture 0.0.0.0 9999` and point `mt-inject --connect` at it.
+- UTM/QEMU also present a USB Tablet and USB Mouse that mirror the host cursor.
+  Left to reach the compositor they would double every movement the bridge already
+  sends. `mt-inject` takes an exclusive evdev grab on both for as long as it runs,
+  so they are muted only while the bridge is up; stop `mt-inject` and the normal
+  QEMU mouse works again. No udev rule is needed for this. Pass `--no-grab` to
+  leave them alone (e.g. to keep the plain mouse alongside `--test`).
 
 ## Known gaps / next steps
 
