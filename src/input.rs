@@ -202,6 +202,16 @@ pub struct Input {
     // movement entirely.
     frac_x: f32,
     frac_y: f32,
+    // The output size, in pixels, refreshed every poll. Only an absolute pointer
+    // needs it: its position is reported as a fraction of the device and has to be
+    // scaled to the screen before it means anything.
+    screen_w: u32,
+    screen_h: u32,
+    // Last absolute pointer position we saw, in screen pixels. An absolute device
+    // (a VM's integrated pointer, a drawing tablet) reports where it is, not how far
+    // it moved, so we difference successive positions into the dx/dy the rest of the
+    // pipeline reads. None until the first event, which seeds it and moves nothing.
+    abs_last: Option<(f64, f64)>,
     keyboards: u32,
     pointers: u32,
     // Device node of the trackpad we muted for touch.rs, as libinput reports it.
@@ -289,15 +299,21 @@ pub fn init(grab: bool, set: &Settings) -> Option<Input> {
         pinch_scale: 1.0,
         frac_x: 0.0,
         frac_y: 0.0,
+        screen_w: 0,
+        screen_h: 0,
+        abs_last: None,
         keyboards: 0,
         pointers: 0,
         trackpad: None,
         trackpad_changed: false,
     };
     // Drain the initial device list, so devices are counted and the trackpad is
-    // muted before the first frame rather than after it.
-    poll(&mut inp);
+    // muted before the first frame rather than after it. No real size yet, so an
+    // absolute pointer's seed here would be wrong; clear it so the first real frame
+    // seeds cleanly and moves nothing.
+    poll(&mut inp, 0, 0);
     reset(&mut inp);
+    inp.abs_last = None;
     if inp.keyboards == 0 {
         eprintln!("yuka: input: libinput found no keyboard");
     }
@@ -341,6 +357,10 @@ pub fn init_host(set: &Settings) -> Input {
         pinch_scale: 1.0,
         frac_x: 0.0,
         frac_y: 0.0,
+        // Nested, the host owns the pointer; these two are unused.
+        screen_w: 0,
+        screen_h: 0,
+        abs_last: None,
         // One of each, as far as anything else is concerned: the host has them.
         keyboards: 1,
         pointers: 1,
@@ -396,12 +416,16 @@ fn bit_set(words: &[u64], bit: u16) -> bool {
 // Poll
 //
 
-pub fn poll(inp: &mut Input) {
+pub fn poll(inp: &mut Input, screen_w: i32, screen_h: i32) {
     inp.events.clear();
     if inp.li.is_none() {
         poll_host(inp);
         return;
     }
+    // An absolute pointer's position is a fraction of the device; the current output
+    // size is what turns it into a pixel. Refreshed here so a mode change is picked up.
+    inp.screen_w = screen_w.max(0) as u32;
+    inp.screen_h = screen_h.max(0) as u32;
     let mut p = Pointer::default();
     if let Some(li) = inp.li.as_mut() {
         if let Err(e) = li.dispatch() {
@@ -444,6 +468,21 @@ fn pointer_event(inp: &mut Input, p: &mut Pointer, event: PointerEvent) {
         PointerEvent::Motion(e) => {
             p.dx += e.dx() as f32;
             p.dy += e.dy() as f32;
+        }
+        // An absolute device (a VM's integrated pointer, a drawing tablet) reports
+        // where it is rather than how far it moved. Difference successive positions
+        // into the same dx/dy the relative path produces, so everything downstream,
+        // the hardware cursor and canvas panning alike, reads one kind of motion.
+        // The first event only seeds abs_last, so re-entering the display steps the
+        // cursor by that gap once and then tracks one to one.
+        PointerEvent::MotionAbsolute(e) => {
+            let x = e.absolute_x_transformed(inp.screen_w.max(1));
+            let y = e.absolute_y_transformed(inp.screen_h.max(1));
+            if let Some((lx, ly)) = inp.abs_last {
+                p.dx += (x - lx) as f32;
+                p.dy += (y - ly) as f32;
+            }
+            inp.abs_last = Some((x, y));
         }
         PointerEvent::Button(e) => {
             let down = e.button_state() == ButtonState::Pressed;

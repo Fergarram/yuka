@@ -1762,7 +1762,7 @@ fn main() {
         wl::state::flush(&mut server);
 
         if let Some(i) = inp.as_mut() {
-            input::poll(i);
+            input::poll(i, ray::screen_width(), ray::screen_height());
         }
 
         // Pick up an edited settings file. Every value is read where it is used, per
