@@ -20,6 +20,7 @@ smithay = { version = "0.7", default-features = false, features = ["wayland_fron
 libc = "0.2"
 input = "0.10.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+mlua = { version = "0.12.2", features = ["luajit", "vendored"] }
 
 [build-dependencies]
 cmake = "0.1"

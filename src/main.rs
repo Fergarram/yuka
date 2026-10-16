@@ -11,6 +11,7 @@ mod camera;
 mod cursor;
 mod egl;
 mod input;
+mod lua;
 mod ray;
 mod render;
 mod settings;
@@ -53,8 +54,8 @@ const BTN_MIDDLE: u32 = 0x112;
 // the size we asked for. A client that ignores the ask gets snapped back after this, so
 // a stretched window is never left lying about its size.
 const RESIZE_SETTLE_FRAMES: u32 = 90;
-// How often to stat the settings file. Once a second is instant to a human hitting
-// save, and 60 stats a minute is nothing next to a frame.
+// How often to look for a saved script. Once a second is instant to a human hitting
+// save, and 60 directory reads a minute is nothing next to a frame.
 const SETTINGS_POLL_FRAMES: u32 = 60;
 // How long to sleep per iteration while another VT owns the display.
 const VT_IDLE_MS: u64 = 30;
@@ -279,6 +280,17 @@ fn spawn_client(socket_name: &str, cmd: &str) -> Option<Child> {
     }
 }
 
+// Settings from a script load replace the ones in force, except trackpad_mode: reopening the
+// device is not something a file save should do, so the mode stays until the next start.
+fn adopt_settings(set: &mut settings::Settings, new: settings::Settings) {
+    let mode = set.trackpad_mode;
+    if new.trackpad_mode != mode {
+        eprintln!("yuka: settings: trackpad_mode change takes effect on restart");
+    }
+    *set = new;
+    set.trackpad_mode = mode;
+}
+
 // Whether two surfaces belong to the same client, which is what separates a dialog opening
 // in front of you from another application taking your keystrokes.
 fn same_client(a: &WlSurface, b: &WlSurface) -> bool {
@@ -412,7 +424,7 @@ fn route_input(
     // the pointer's current position is the difference between dragging from the point you
     // grabbed and dragging from wherever the pointer reached while the client was deciding.
     press_log: &mut Vec<(u32, f32, f32, u32)>,
-    // True on the frame Super+Escape was pressed, or three fingers went up.
+    // True on the frame the scripts asked to let go of everything, or three fingers tapped.
     let_go: bool,
     ptr: &input::Pointer,
     pressed: bool,
@@ -771,16 +783,8 @@ struct ScrollGesture {
     lock: ScrollLock,
     travel_x: f32,
     travel_y: f32,
-    // Whether the fingers are moving at all, and where what they are doing is going. Both are
-    // decided on the frame a gesture starts and held until it ends.
-    //
-    // Held, because otherwise the destination is re-decided every frame from things the gesture
-    // does not control. Let go of Super halfway through panning the canvas and the rest of the
-    // gesture goes to whatever the cursor happens to be over: the canvas stops, and an
-    // unfocused window's scroll view takes the tail of your pan. Which is what "the inertia
-    // lands in the wrong window" was.
-    active: bool,
-    to_client: bool,
+    // Where the gesture goes is not in here: the scripts decide it, and hold it for the whole
+    // gesture (see lua/init.lua). This is only what sending it to a client involves.
     // Whether we have actually sent this client axis values during this gesture, so an axis
     // sequence is open toward it.
     //
@@ -1097,13 +1101,15 @@ fn main() {
         .with_writer(std::io::stderr)
         .init();
 
-    // The feel of the thing lives in a file, not in the binary: sensitivities, gesture
-    // thresholds, camera rates. Re-read while running (see SETTINGS_POLL_FRAMES), so
-    // tuning is a save from another tty rather than a rebuild.
-    let conf_path =
-        std::env::var("YUKA_CONF").unwrap_or_else(|_| settings::DEFAULT_PATH.to_string());
-    let mut set = settings::init(&conf_path);
-    let mut conf_watch = settings::watch_new(&conf_path);
+    // Behaviour lives in the scripts, not in the binary: what the keys do, where a scroll
+    // goes, and the settings (lua/config.lua). Re-read while running (see
+    // SETTINGS_POLL_FRAMES), so tuning is a save from another tty rather than a rebuild.
+    // Scripts that fail to load leave the defaults and a message on screen.
+    let lua_dir = std::env::var("YUKA_LUA").unwrap_or_else(|_| lua::DEFAULT_DIR.to_string());
+    let (mut script, loaded_set) = lua::init(&lua_dir);
+    let mut set = loaded_set.unwrap_or_else(|| settings::from_pairs(&[], "defaults").0);
+    // Commands the scripts asked for this frame, drained as they are applied.
+    let mut cmds: Vec<lua::Cmd> = Vec::with_capacity(32);
 
     // Nested build: yuka is a client of another compositor, which owns the display
     // and the input devices. Everything that reaches for hardware stays out of it, so
@@ -1456,8 +1462,6 @@ fn main() {
         lock: ScrollLock::None,
         travel_x: 0.0,
         travel_y: 0.0,
-        active: false,
-        to_client: false,
         opened: false,
     };
     // Which of the two scales the zoom last settled at, which is the mode. Out here the canvas
@@ -1765,20 +1769,30 @@ fn main() {
             input::poll(i, ray::screen_width(), ray::screen_height());
         }
 
-        // Pick up an edited settings file. Every value is read where it is used, per
-        // event or per frame, so a save lands on the next frame with no further work.
-        // Super+R reloads on demand, for when you want to know that it took.
-        let forced = inp
-            .as_ref()
-            .map(|i| {
-                input::super_down(i)
-                    && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_R)
-            })
-            .unwrap_or(false);
-        if forced {
-            settings::reload(&mut conf_watch, &mut set);
+        // Pick up edited scripts. Every setting is read where it is used, per event or per
+        // frame, so a save lands on the next frame with no further work.
+        //
+        // Super+R reloads on demand, and is the scripts' own binding while they run. While
+        // they are missing or broken the engine answers it instead, since it is the one key
+        // that cannot live in the thing it brings back.
+        let scripts_down = !lua::loaded(&script) || script.error.is_some();
+        let forced = scripts_down
+            && inp
+                .as_ref()
+                .map(|i| {
+                    input::super_down(i)
+                        && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_R)
+                })
+                .unwrap_or(false);
+        let reloaded = if forced {
+            lua::reload(&mut script)
         } else if frame % SETTINGS_POLL_FRAMES == 0 {
-            settings::reload_if_changed(&mut conf_watch, &mut set);
+            lua::reload_if_changed(&mut script)
+        } else {
+            None
+        };
+        if let Some(new) = reloaded {
+            adopt_settings(&mut set, new);
         }
 
         // Say which way dmabufs are being handled, at startup and on every reload that
@@ -1835,17 +1849,8 @@ fn main() {
         }
 
         let super_down = inp.as_ref().map(input::super_down).unwrap_or(false);
-        // Super+Escape. Detected here rather than inside route_input, which used to do it,
-        // because half of what it does is the camera's and route_input has no camera.
-        let let_go = inp
-            .as_ref()
-            .map(|i| {
-                input::super_down(i)
-                    && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_ESC)
-            })
-            .unwrap_or(false);
         // What the fingers did, not what it did to the camera: where a scroll goes is
-        // decided below, alongside the wheel's, so a trackpad can scroll a window.
+        // decided by the scripts, alongside the wheel's, so a trackpad can scroll a window.
         let pad = match touchpad.as_mut() {
             Some(tp) => touch::update(tp, cursor.as_mut(), &set),
             None => touch::Gesture::default(),
@@ -1865,61 +1870,24 @@ fn main() {
         ptr.right_released |= taps.right_released;
         ptr.right |= taps.right;
         ptr.left |= taps.left;
-        // And its scroll joins the mouse's, in the same fields libinput fills when it
-        // drives the trackpad itself. Everything downstream then treats the two modes
-        // identically, including forwarding to whatever the pointer is over.
-        //
-        // Every window's hold on the keyboard, the pointer and the implicit grab is dropped
-        // by the key and by the swipe alike: stepping back to look at everything is not a
-        // moment when one window should still be taking your keystrokes.
-        // What lets go of every window: Super+Escape, and the three-finger tap.
+        // What lets go of every window: the scripts (Super+Escape by default), and the
+        // three-finger tap.
         //
         // A swipe used to do this, when it meant "step back from everything". It means "go to that
         // one" now and hands over focus rather than dropping it. The tap took the other half of the
         // old meaning: it is a gesture about where the view is, never about what has your typing,
         // so it lets go whichever of its three answers it gives, including the one that flies you
         // into a window. Landing in front of something is not the same as working in it.
-        let mut release_all = let_go || pad.three_finger_double_tap;
+        let mut release_all = pad.three_finger_double_tap;
 
-        // Whether this reaches the canvas or the window under the pointer is decided below,
-        // by whether Super is held. The pad reports the same thing either way.
+        // And its scroll joins the mouse's, in the same fields libinput fills when it
+        // drives the trackpad itself. Everything downstream then treats the two modes
+        // identically, including forwarding to whatever the pointer is over.
         ptr.scroll_x += pad.scroll_x;
         ptr.scroll_y += pad.scroll_y;
         ptr.pinch *= pad.pinch;
-        // Whether the wheel and the fingers belong to the canvas or to the window under the
-        // pointer. Super takes them for the canvas; otherwise they go to whatever is hovered.
-        // Two fingers belong to a window only while a window is being worked in. Nothing
-        // focused means nothing is being worked in, so they go to the canvas instead, and you
-        // do not have to reach for Super to move the view you are already looking at.
-        //
-        // Focus rather than hover, because hover is where the cursor happens to be resting
-        // and focus is what you last chose. Click a window and two fingers scroll it; click
-        // the canvas and the same two fingers move the canvas.
-        let pointer_on_client =
-            !super_down && focused.is_some() && hovered.is_some();
-        // A finger scroll's destination is that answer taken once, on the frame the fingers
-        // start moving, and kept until they lift. The wheel is not latched: a notch is a whole
-        // event with nothing to be halfway through.
-        let scrolling = ptr.scroll_x != 0.0 || ptr.scroll_y != 0.0;
         let scroll_ended = pad.scroll_ended || ptr.scroll_ended;
-        if scrolling && !scroll_gesture.active {
-            scroll_gesture.active = true;
-            scroll_gesture.to_client = pointer_on_client;
-        }
-        // The gesture is over when the fingers that made it are no longer both there, or when
-        // libinput says they lifted.
-        //
-        // Not on pad.scroll_ended. That fires as soon as the pan stops leading, which is what a
-        // swipe does as it slows down before letting go, and clearing the latch there let the last
-        // drift of the same swipe be re-decided against a Super that had already been released.
-        // Not on the whole hand leaving either: a two-finger scroll ends when one of the two does,
-        // and a palm left on the pad must not keep a finished gesture's destination alive.
         let pad_driving = set.trackpad_mode == input::TrackpadMode::Custom;
-        if ptr.scroll_ended || (pad_driving && pad.fingers < 2) {
-            scroll_gesture.active = false;
-        }
-        let scroll_to_client = scroll_gesture.active && scroll_gesture.to_client;
-        let scroll_to_canvas = scroll_gesture.active && !scroll_gesture.to_client;
         if let Some(cur) = cursor.as_mut() {
             cursor::move_by(cur, ptr.dx as i32, ptr.dy as i32);
         }
@@ -1931,64 +1899,119 @@ fn main() {
         } else {
             cursor.as_ref().map(cursor::pos)
         };
-        // Wheel-click drag also pans; moving the cursor by the same delta keeps
-        // the grabbed canvas point exactly under the cursor.
-        if super_down && ptr.middle {
-            cam.cx -= ptr.dx / cam.zoom;
-            cam.cy -= ptr.dy / cam.zoom;
-        }
         pressed |= ptr.left_pressed;
         released |= ptr.left_released;
 
-        // Debug labels on and off, so a run that started plain can answer a question
-        // about sampling without being restarted.
-        if let Some(i) = inp.as_ref() {
-            let toggle = input::super_down(i)
-                && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_I);
-            if toggle {
-                debug_labels = !debug_labels;
-                println!("yuka: debug labels {}", if debug_labels { "on" } else { "off" });
-            }
-            let toggle_fps = input::super_down(i)
-                && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_F);
-            if toggle_fps {
-                debug_fps = !debug_fps;
-                println!("yuka: fps counter {}", if debug_fps { "on" } else { "off" });
-            }
-            // Super+W asks the focused window to close, the way every desktop's close chord does.
-            //
-            // Asks. xdg_toplevel.close is a request, and a client may answer it with a dialog about
-            // unsaved work or ignore it entirely. Killing the process instead would be deciding on
-            // its behalf that whatever it was holding does not matter.
-            let close_window = input::super_down(i)
-                && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_W);
-            if close_window {
-                if let Some(surf) = focused.clone() {
-                    wl::state::close_toplevel(&state, &surf);
+        // The scripts' turn. They see the frame and say what should happen: bindings, where
+        // the wheel, the fingers and a pinch go, and what the canvas does with the ones that
+        // are its own. Applied here, in the order asked, before anything below reads the
+        // camera.
+        //
+        // Without scripts the route is the plain compositor answer, everything to the window
+        // being worked in, so a broken script still leaves applications usable.
+        let pointer_on_client = !super_down && focused.is_some() && hovered.is_some();
+        let fallback_route = lua::Route {
+            wheel: pointer_on_client,
+            fingers: pointer_on_client,
+            pinch: pointer_on_client,
+        };
+        let no_keys = [false; input::KEY_CODES];
+        let route = {
+            let f = lua::FrameIn {
+                keys: inp.as_ref().map(input::events).unwrap_or(&[]),
+                held: inp.as_ref().map(input::keys).unwrap_or(&no_keys),
+                super_down,
+                ctrl_down: inp.as_ref().map(input::ctrl_down).unwrap_or(false),
+                alt_down: inp.as_ref().map(input::alt_down).unwrap_or(false),
+                shift_down: inp.as_ref().map(input::shift_down).unwrap_or(false),
+                pointer: pointer_xy.map(|(x, y)| (x as f32, y as f32)),
+                dx: ptr.dx,
+                dy: ptr.dy,
+                wheel: ptr.wheel,
+                hwheel: ptr.hwheel,
+                middle: ptr.middle,
+                scroll_x: ptr.scroll_x,
+                scroll_y: ptr.scroll_y,
+                scroll_lifted: ptr.scroll_ended,
+                pad_driving,
+                fingers: pad.fingers as u32,
+                pinch: ptr.pinch,
+                focused: focused.as_ref().and_then(|s| render::window_id(&windows, s)),
+                // The window the hovered surface belongs to: the pointer may be over a
+                // subsurface or a popup, and the scripts name windows.
+                hovered: hovered
+                    .as_ref()
+                    .map(|s| wl::state::window_root(&state, s))
+                    .and_then(|s| render::window_id(&windows, &s)),
+                zoom: cam.zoom,
+                cx: cam.cx,
+                cy: cam.cy,
+                sw: ray::screen_width() as f32,
+                sh: ray::screen_height() as f32,
+                dt: ray::frame_time(),
+                frame,
+            };
+            lua::frame(&mut script, &f, &mut cmds, fallback_route)
+        };
+        let (sw, sh) = (ray::screen_width() as f32, ray::screen_height() as f32);
+        let mut reload_now = false;
+        for cmd in cmds.drain(..) {
+            match cmd {
+                lua::Cmd::Reload => reload_now = true,
+                lua::Cmd::ToggleDebug(which) => {
+                    let (flag, name) = match which {
+                        lua::Debug::Labels => (&mut debug_labels, "debug labels"),
+                        lua::Debug::Fps => (&mut debug_fps, "fps counter"),
+                        lua::Debug::Pad => (&mut debug_pad, "trackpad overlay"),
+                    };
+                    *flag = !*flag;
+                    println!("yuka: {name} {}", if *flag { "on" } else { "off" });
                 }
+                // Asks. xdg_toplevel.close is a request, and a client may answer it with a dialog
+                // about unsaved work or ignore it entirely. Killing the process instead would be
+                // deciding on its behalf that whatever it was holding does not matter.
+                lua::Cmd::Close(id) => {
+                    if let Some(surf) = render::surface_by_id(&windows, id) {
+                        wl::state::close_toplevel(&state, &surf);
+                    }
+                }
+                // Taken at the end of the draw, so what lands in the file is the frame that was
+                // on screen, cursor plane aside: that is a hardware overlay the GPU never
+                // composites, so it cannot be in a readback.
+                lua::Cmd::Screenshot => shot_now = true,
+                // A reset says where the zoom should be, so nothing may be on its way somewhere
+                // else, and neither may a zoom.
+                lua::Cmd::ZoomReset => {
+                    zoom_ease = None;
+                    camera::reset_zoom(&mut cam, &set);
+                }
+                lua::Cmd::ZoomResetAt(x, y) => {
+                    zoom_ease = None;
+                    camera::reset_zoom_at(&mut cam, x, y, sw, sh, &set);
+                }
+                lua::Cmd::ZoomAt(factor, x, y) => {
+                    zoom_ease = None;
+                    camera::zoom_at(&mut cam, factor, x, y, sw, sh, &set);
+                }
+                lua::Cmd::Pan(dx, dy) => {
+                    cam.cx += dx / cam.zoom;
+                    cam.cy += dy / cam.zoom;
+                }
+                lua::Cmd::ReleaseAll => release_all = true,
             }
-            let toggle_pad = input::super_down(i)
-                && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_P);
-            if toggle_pad {
-                debug_pad = !debug_pad;
-                println!("yuka: trackpad overlay {}", if debug_pad { "on" } else { "off" });
-            }
-            // Super+S grabs the frame. Taken at the end of the draw, so what lands in the
-            // file is the frame that was on screen, cursor plane aside: that is a hardware
-            // overlay the GPU never composites, so it cannot be in a readback.
-            shot_now = input::super_down(i)
-                && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_S);
         }
+        if reload_now {
+            if let Some(new) = lua::reload(&mut script) {
+                adopt_settings(&mut set, new);
+            }
+        }
+        // The stop goes even when the pointer has wandered off the window, because a client
+        // left holding an open sequence is the thing being fixed.
+        let forward_wheel = route.wheel;
+        let scroll_to_client = route.fingers;
 
-        // Zoom reset: Super+0 from the keyboard, Super + double middle click from
-        // the mouse. The trackpad's two-finger double tap lives in touch.rs.
-        let reset_key = inp
-            .as_ref()
-            .map(|i| {
-                input::super_down(i)
-                    && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_0)
-            })
-            .unwrap_or(false);
+        // Zoom reset from the mouse: Super + double middle click. The trackpad's two-finger
+        // double tap lives in touch.rs.
         let mut reset_click = false;
         if ptr.middle_pressed {
             let now_ms = start.elapsed().as_millis() as u32;
@@ -2000,80 +2023,12 @@ fn main() {
                 last_middle_ms = now_ms;
             }
         }
-        // Super+0 scales around the screen center; the middle click has a cursor
-        // to anchor on, so it keeps the canvas under the pointer fixed.
-        // A reset says where the zoom should be, so nothing may be on its way somewhere else.
-        if reset_click || reset_key {
-            zoom_ease = None;
-        }
+        // The middle click has a cursor to anchor on, so it keeps the canvas under the
+        // pointer fixed.
         if reset_click {
+            zoom_ease = None;
             let (cxp, cyp) = pointer_xy.unwrap_or((0, 0));
-            camera::reset_zoom_at(
-                &mut cam,
-                cxp as f32,
-                cyp as f32,
-                ray::screen_width() as f32,
-                ray::screen_height() as f32,
-                &set,
-            );
-        } else if reset_key {
-            camera::reset_zoom(&mut cam, &set);
-        }
-
-        // Wheel and middle-drag belong either to a client or to the canvas, never
-        // to both. Super forces the canvas. This reads the hover from the frame
-        // before on purpose: route_input updates it later in the frame, and using
-        // one value for both branches is what stops them both firing on the frame
-        // the pointer crosses a window edge.
-        // Out in the overview the canvas has the pointer already, so two fingers pan and
-        // pinch it with nothing held down. In close they belong to the window under the
-        // cursor unless Super takes them.
-        if super_down || focused.is_none() {
-            let (cxp, cyp) = pointer_xy.unwrap_or((0, 0));
-            if ptr.wheel != 0.0 {
-                // The wheel is a zoom of its own; whatever a pinch was settling toward is
-                // not where the wheel is going.
-                zoom_ease = None;
-                let wheel = if set.invert_scroll { -ptr.wheel } else { ptr.wheel };
-                camera::zoom_at(
-                    &mut cam,
-                    1.15_f32.powf(wheel),
-                    cxp as f32,
-                    cyp as f32,
-                    ray::screen_width() as f32,
-                    ray::screen_height() as f32,
-                    &set,
-                );
-            }
-            if ptr.hwheel != 0.0 {
-                let hwheel = if set.invert_scroll { -ptr.hwheel } else { ptr.hwheel };
-                cam.cx += hwheel * set.hwheel_pan / cam.zoom;
-            }
-            if ptr.pinch != 1.0 {
-                camera::zoom_at(
-                    &mut cam,
-                    ptr.pinch,
-                    cxp as f32,
-                    cyp as f32,
-                    ray::screen_width() as f32,
-                    ray::screen_height() as f32,
-                    &set,
-                );
-                // A pinch owns the zoom while it lasts, so anything the last one was still
-                // settling toward is no longer where we are going.
-                zoom_ease = None;
-            }
-        }
-
-        // Finger scroll pans the canvas when the gesture belongs to the canvas, whatever the
-        // keyboard has done since it started. The camera moves against the fingers so the canvas
-        // travels with them, matching touch.rs.
-        //
-        // Outside the Super test on purpose: that test decided the destination, once, above. A
-        // gesture that began on the canvas finishes on the canvas.
-        if scroll_to_canvas {
-            cam.cx -= ptr.scroll_x / cam.zoom;
-            cam.cy += ptr.scroll_y / cam.zoom;
+            camera::reset_zoom_at(&mut cam, cxp as f32, cyp as f32, sw, sh, &set);
         }
 
         // Nothing herds the zoom any more. A pinch is left exactly where the fingers left
@@ -2315,10 +2270,6 @@ fn main() {
                 }
             }
         }
-
-        // Super with plus or minus. Gated on Super inside, like everything else the canvas
-        // answers to, so it does not need to care whether a window has the keyboard.
-        camera::camera_update(&mut cam, inp.as_ref(), &set);
 
         render::prune_dead(&mut windows);
         render::animate(&mut windows, ray::frame_time());
@@ -3281,11 +3232,11 @@ fn main() {
             );
             // The stop goes even when the pointer has wandered off the window, because a
             // client left holding an open sequence is the thing being fixed.
-            if pointer_on_client || scroll_to_client || scroll_ended {
+            if forward_wheel || scroll_to_client || scroll_ended {
                 forward_scroll(
                     &mut state,
                     &ptr,
-                    pointer_on_client,
+                    forward_wheel,
                     scroll_to_client,
                     scroll_ended,
                     &mut scroll_gesture,
@@ -3298,7 +3249,7 @@ fn main() {
                 pad.zoom_started,
                 pad.zoom_ended || ptr.pinch_ended,
                 pad.pinch,
-                pointer_on_client,
+                route.pinch,
                 &mut pinch_active,
                 &mut pinch_scale,
                 time_ms,
@@ -3367,6 +3318,11 @@ fn main() {
                     ray::screen_height(),
                 );
             }
+        }
+        // Scripts that would not load or run say so on screen, since the log may be on a tty
+        // nobody is looking at.
+        if let Some(err) = script.error.as_ref() {
+            render::draw_script_error(err, ray::screen_width());
         }
         if screenshot && frame == shot_frame {
             ray::flush_batch();

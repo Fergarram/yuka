@@ -53,6 +53,10 @@ const CHILD_LIFT: f32 = 0.05;
 // (canvas_x/y); `z` is a purely visual lift toward the camera.
 pub struct Windows {
     pub surface: Vec<WlSurface>,
+    // A handle for code outside the protocol zone, scripts included, to name a window by.
+    // Never reused, so a handle to a window that has gone simply stops resolving, which is
+    // the job a generation counter does for a reused slot.
+    pub id: Vec<u64>,
     pub tex_id: Vec<u32>,
     pub tex_w: Vec<i32>,
     pub tex_h: Vec<i32>,
@@ -157,6 +161,8 @@ pub struct Windows {
     cascade: u32,
     // Next stack order to assign (monotonic; higher = more recently raised).
     next_order: u32,
+    // Next handle to hand out. Starts at 1 so 0 is never a window.
+    next_id: u64,
     // Reused scratch for repacking shm rows when stride != width*4.
     scratch: Vec<u8>,
     // Windows that became real this frame: a toplevel's first buffer, which is the moment it
@@ -183,6 +189,7 @@ pub struct DmabufCache {
 pub fn windows_new() -> Windows {
     Windows {
         surface: Vec::new(),
+        id: Vec::new(),
         tex_id: Vec::new(),
         tex_w: Vec::new(),
         tex_h: Vec::new(),
@@ -219,6 +226,7 @@ pub fn windows_new() -> Windows {
         place_at: (0.0, 0.0),
         cascade: 0,
         next_order: 0,
+        next_id: 1,
         scratch: Vec::new(),
         mapped: Vec::new(),
     }
@@ -367,6 +375,17 @@ fn index_of(windows: &Windows, surface: &WlSurface) -> Option<usize> {
     windows.surface.iter().position(|s| s == surface)
 }
 
+// The handle for a surface we hold, and the surface behind a handle. A handle whose window
+// has gone answers None.
+pub fn window_id(windows: &Windows, surface: &WlSurface) -> Option<u64> {
+    index_of(windows, surface).map(|i| windows.id[i])
+}
+
+pub fn surface_by_id(windows: &Windows, id: u64) -> Option<WlSurface> {
+    let i = windows.id.iter().position(|&x| x == id)?;
+    Some(windows.surface[i].clone())
+}
+
 // Remove windows whose surface has died (client closed), freeing any shm
 // texture we own. dmabuf textures belong to the cache and its buffer_destroyed
 // path, so we do not touch them here.
@@ -381,6 +400,7 @@ pub fn prune_dead(windows: &mut Windows) {
             ray::unload_texture(windows.tex_id[i]);
         }
         windows.surface.remove(i);
+        windows.id.remove(i);
         windows.tex_id.remove(i);
         windows.tex_w.remove(i);
         windows.tex_h.remove(i);
@@ -937,6 +957,22 @@ pub fn draw_frame_stats(fps: f32, ms: f32, worst_ms: f32) {
     ray::draw_text(&line, PAD * 2, PAD * 2, TEXT, colour);
 }
 
+// Why the scripts are not running, across the top of the screen. A few lines at most: the
+// first is where it went wrong, and a traceback past that belongs in the log.
+pub fn draw_script_error(text: &str, screen_w: i32) {
+    const PAD: i32 = 8;
+    const TEXT: i32 = 16;
+    const LINE: i32 = 20;
+    const MAX_LINES: usize = 6;
+    let bg = ray::Color { r: 60, g: 12, b: 16, a: 220 };
+    let fg = ray::Color { r: 255, g: 190, b: 180, a: 255 };
+    let count = text.lines().take(MAX_LINES).count() as i32;
+    ray::draw_rectangle(0, 0, screen_w, count * LINE + PAD * 2, bg);
+    for (i, line) in text.lines().take(MAX_LINES).enumerate() {
+        ray::draw_text(line, PAD, PAD + i as i32 * LINE, TEXT, fg);
+    }
+}
+
 // The trackpad, drawn in the bottom right corner: the surface at its real aspect ratio,
 // the button regions marked, a dot per finger, and what the gesture code currently
 // thinks is happening. Screen space, not canvas: it is an instrument, not content.
@@ -1454,6 +1490,8 @@ fn store_entry(
             let order = windows.next_order;
             windows.next_order += 1;
             windows.surface.push(surface.clone());
+            windows.id.push(windows.next_id);
+            windows.next_id += 1;
             windows.tex_id.push(tex_id);
             windows.tex_w.push(w);
             windows.tex_h.push(h);

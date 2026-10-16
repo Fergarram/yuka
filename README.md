@@ -9,8 +9,9 @@ protocol frontend is Smithay. On real hardware raylib owns the display and drive
 KMS directly; for development it can instead run nested as a client of another
 compositor.
 
-See `CLAUDE.md` for the design and coding conventions, `yuka.conf` for every
-tunable setting, and `devlog/` for the running history.
+See `CLAUDE.md` for the design and coding conventions, `lua/` for the behaviour
+(bindings, gesture routing) and every tunable setting, and `devlog/` for the
+running history.
 
 ## Requirements
 
@@ -160,21 +161,34 @@ cargo run --features windowed
 | `YUKA_SHOT[=<n>]` | Save a screenshot at frame n (a default frame if no number). |
 | `YUKA_LOG=<filter>` | Log filter, e.g. `YUKA_LOG=debug` or `YUKA_LOG=smithay=trace`. Default `info`. |
 | `YUKA_LOG_FILE=<path>` | Where `run_tty.sh` writes the log. |
-| `YUKA_CONF=<path>` | Settings file to read. Default `yuka.conf` in the working directory. |
+| `YUKA_LUA=<dir>` | Script directory to run. Default `lua` in the working directory. |
 | `YUKA_DEBUG_FPS`, `YUKA_DEBUG_INPUT`, `YUKA_DEBUG_LABELS`, `YUKA_DEBUG_PAD`, `YUKA_DEBUG_TREE` | Turn on individual debug overlays. |
 
 ### Settings and controls
 
-`yuka.conf` is read at startup and re-read while running: save the file and the
-change lands on the next frame, or press Super+R to reload on demand. Every knob
-is documented inline; defaults live in `src/settings.rs`.
+The Rust side is the engine; what it does with your input is decided by Lua
+scripts (LuaJIT) in `lua/`:
+
+- `lua/init.lua` is the entry point: key bindings, where the wheel, finger scroll
+  and pinch go (a window or the canvas), and what the canvas does with them. The
+  engine functions and the per-frame snapshot it receives are listed at the top.
+- `lua/config.lua` holds every tunable setting as a Lua table, documented inline.
+  Defaults live in `src/settings.rs`; a key left out falls back to them.
+- `lua/keys.lua` maps key names to evdev codes for chords like `"super+w"`.
+
+The scripts are read at startup and re-read while running: save any file under
+`lua/` and the change lands on the next frame, or press Super+R to reload on
+demand. Scripts that fail to load leave the previous ones running and show the
+error across the top of the screen. Ctrl+Alt+Backspace (quit) and Ctrl+Alt+Fn
+(switch VT) stay in the engine so a broken script can never lock you in.
 
 The canvas is driven with the Super key and the trackpad. Broadly: hold Super and
 two fingers pan and pinch the canvas, the wheel zooms, and a drag moves the window
 under the pointer (Super+right-drag resizes it); three fingers pan, pinch, and
-move between windows whatever the keyboard is doing; Super+Escape toggles the
-overview; Super+W asks the focused window to close. The exact bindings live in
-`src/input.rs` and the feel is tuned in `yuka.conf`.
+move between windows whatever the keyboard is doing; Super+Escape lets go of every
+window; Super+W asks the focused window to close. Keyboard bindings and scroll
+routing live in `lua/init.lua`; the three-finger gestures and Super+drag are still
+in `src/main.rs` and move to Lua next. The feel is tuned in `lua/config.lua`.
 
 ## Developing from macOS in a VM
 

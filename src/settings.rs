@@ -3,12 +3,12 @@
 //
 // The feel of the thing: trackpad sensitivities, gesture thresholds, camera rates.
 // These were consts, which meant a rebuild to answer "is 0.12 better than 0.09", and
-// feel is the one thing that cannot be reasoned about, only tried. So they are data
-// now, read from a file, and the file is re-read while yuka runs.
+// feel is the one thing that cannot be reasoned about, only tried. So they are data,
+// written as a Lua table in lua/config.lua and re-read whenever the scripts reload.
 //
-// One flat key = value per line, parsed here in a few dozen lines. No format library:
-// a flat set of numbers does not need nesting, and a parser we own cannot pull in a
-// dependency tree or fail in ways we cannot read.
+// The Lua boundary hands this module flat key and value strings, and every key is
+// parsed and checked here, so the rules for what a value may be live in one place
+// whatever wrote it.
 //
 // Unknown keys are reported and ignored rather than fatal, so a file from a newer or
 // older build still loads. Same for a value that will not parse: the default stands and
@@ -19,18 +19,8 @@
 // reopened for it, which happens at startup.
 //
 
-use std::path::Path;
-use std::time::SystemTime;
-
 use crate::input::TrackpadMode;
 use crate::render::{DmabufMode, DIR_DOWN, DIR_LEFT, DIR_NONE, DIR_RIGHT, DIR_UP};
-
-//
-// Constants
-//
-
-// Where the file lives, unless YUKA_CONF says otherwise.
-pub const DEFAULT_PATH: &str = "yuka.conf";
 
 //
 // Types
@@ -170,8 +160,6 @@ pub struct Settings {
     // Mac-natural scrolling: content follows the fingers. Also decides the sign clients
     // are sent, so the canvas and the app inside a window always agree.
     pub invert_scroll: bool,
-    // Canvas pixels panned per horizontal wheel notch, at zoom 1.
-    pub hwheel_pan: f32,
     // Pixels a client is told to scroll per wheel notch, alongside the discrete step.
     pub wheel_step_px: f32,
     // Gap within which a second middle click counts as a double click, milliseconds.
@@ -305,8 +293,6 @@ pub struct Settings {
     // having now that we draw the shadow a client puts around itself: an exact fit crops it
     // against the screen edge.
     pub fit_padding_px: f32,
-    // Keyboard zoom rate, for Super with plus or minus.
-    pub zoom_rate_per_sec: f32,
     // Zoom limits, and the scale the resets return to.
     pub zoom_min: f32,
     pub zoom_max: f32,
@@ -438,13 +424,6 @@ pub struct Settings {
     pub resize_corner_hold: f32,
 }
 
-// What the file is compared against: the values that ship, and the mtime that was last
-// loaded.
-pub struct Watch {
-    path: String,
-    mtime: Option<SystemTime>,
-}
-
 //
 // Defaults
 //
@@ -484,7 +463,6 @@ pub fn defaults() -> Settings {
         button_split: 0.5,
 
         invert_scroll: true,
-        hwheel_pan: 60.0,
         wheel_step_px: 15.0,
         double_click_ms: 400,
 
@@ -505,7 +483,6 @@ pub fn defaults() -> Settings {
         dmabuf_mode: DmabufMode::Hold,
 
         fit_padding_px: 0.0,
-        zoom_rate_per_sec: 2.0,
         zoom_min: 0.1,
         zoom_max: 8.0,
         zoom_default: 1.0,
@@ -554,34 +531,8 @@ pub fn client_hscroll_sign(set: &Settings) -> f32 {
 // Load
 //
 
-// Read the file over a set of defaults. A missing file is not an error: it means run
-// with what shipped.
-pub fn load(path: &str) -> Settings {
-    let mut set = defaults();
-    let Ok(text) = std::fs::read_to_string(path) else {
-        println!("yuka: settings: no {path}, using defaults");
-        return set;
-    };
-    let mut applied = 0usize;
-    for (n, raw) in text.lines().enumerate() {
-        let line = raw.split('#').next().unwrap_or("").trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            eprintln!("yuka: settings: {path}:{} is not key = value", n + 1);
-            continue;
-        };
-        if apply(&mut set, key.trim(), value.trim(), path, n + 1) {
-            applied += 1;
-        }
-    }
-    println!("yuka: settings: {applied} from {path}");
-    set
-}
-
 // One key. Returns whether it landed, so load can say how much of the file was used.
-fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) -> bool {
+pub fn apply(set: &mut Settings, key: &str, value: &str, origin: &str) -> bool {
     // Each arm reads the value in the type that key wants, and leaves the default in
     // place if it will not parse.
     macro_rules! f32_key {
@@ -592,7 +543,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
                     return true;
                 }
                 Err(_) => {
-                    eprintln!("yuka: settings: {path}:{line}: {key} wants a number, got '{value}'");
+                    eprintln!("yuka: settings: {origin}: {key} wants a number, got '{value}'");
                     return false;
                 }
             }
@@ -606,7 +557,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
                     return true;
                 }
                 Err(_) => {
-                    eprintln!("yuka: settings: {path}:{line}: {key} wants a number, got '{value}'");
+                    eprintln!("yuka: settings: {origin}: {key} wants a number, got '{value}'");
                     return false;
                 }
             }
@@ -619,7 +570,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
             "libinput" => set.trackpad_mode = TrackpadMode::Libinput,
             _ => {
                 eprintln!(
-                    "yuka: settings: {path}:{line}: trackpad_mode wants custom or libinput"
+                    "yuka: settings: {origin}: trackpad_mode wants custom or libinput"
                 );
                 return false;
             }
@@ -648,21 +599,20 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
         "rest_move_frac" => f32_key!(rest_move_frac),
         "button_strip" => f32_key!(button_strip),
         "button_split" => f32_key!(button_split),
-        "hwheel_pan" => f32_key!(hwheel_pan),
         "wheel_step_px" => f32_key!(wheel_step_px),
         "resize_min_px" => f32_key!(resize_min_px),
         "resize_stretch" => match value {
             "true" | "1" | "yes" => set.resize_stretch = true,
             "false" | "0" | "no" => set.resize_stretch = false,
             _ => {
-                eprintln!("yuka: settings: {path}:{line}: resize_stretch wants true or false");
+                eprintln!("yuka: settings: {origin}: resize_stretch wants true or false");
                 return false;
             }
         },
         "resize_wait_frames" => match value.parse::<u32>() {
             Ok(v) => set.resize_wait_frames = v.max(1),
             Err(_) => {
-                eprintln!("yuka: settings: {path}:{line}: resize_wait_frames wants a whole number");
+                eprintln!("yuka: settings: {origin}: resize_wait_frames wants a whole number");
                 return false;
             }
         },
@@ -671,13 +621,15 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
             "blit" => set.dmabuf_mode = DmabufMode::Blit,
             _ => {
                 eprintln!(
-                    "yuka: settings: {path}:{line}: dmabuf_mode wants hold or blit"
+                    "yuka: settings: {origin}: dmabuf_mode wants hold or blit"
                 );
                 return false;
             }
         },
         "fit_padding_px" => f32_key!(fit_padding_px),
-        "zoom_rate_per_sec" => f32_key!(zoom_rate_per_sec),
+        // Read by the scripts alone, from yk.config. Known here so they are not reported
+        // as unknown.
+        "hwheel_pan" | "zoom_rate_per_sec" => return true,
         "zoom_min" => f32_key!(zoom_min),
         "zoom_max" => f32_key!(zoom_max),
         "zoom_default" => f32_key!(zoom_default),
@@ -694,7 +646,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
             "true" | "1" | "yes" => set.swipe_natural = true,
             "false" | "0" | "no" => set.swipe_natural = false,
             _ => {
-                eprintln!("yuka: settings: {path}:{line}: swipe_natural wants true or false");
+                eprintln!("yuka: settings: {origin}: swipe_natural wants true or false");
                 return false;
             }
         },
@@ -718,7 +670,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
                     "down" => DIR_DOWN,
                     _ => {
                         eprintln!(
-                            "yuka: settings: {path}:{line}: spawn_order wants right, up, left, \
+                            "yuka: settings: {origin}: spawn_order wants right, up, left, \
                              down or nearest"
                         );
                         return false;
@@ -739,7 +691,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
             "always" => set.focus_new = FocusNew::Always,
             _ => {
                 eprintln!(
-                    "yuka: settings: {path}:{line}: focus_new wants never, same-client or always"
+                    "yuka: settings: {origin}: focus_new wants never, same-client or always"
                 );
                 return false;
             }
@@ -748,7 +700,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
             "true" | "1" | "yes" => set.spawn_travel = true,
             "false" | "0" | "no" => set.spawn_travel = false,
             _ => {
-                eprintln!("yuka: settings: {path}:{line}: spawn_travel wants true or false");
+                eprintln!("yuka: settings: {origin}: spawn_travel wants true or false");
                 return false;
             }
         },
@@ -756,7 +708,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
             "true" | "1" | "yes" => set.spawn_clear = true,
             "false" | "0" | "no" => set.spawn_clear = false,
             _ => {
-                eprintln!("yuka: settings: {path}:{line}: spawn_clear wants true or false");
+                eprintln!("yuka: settings: {origin}: spawn_clear wants true or false");
                 return false;
             }
         },
@@ -765,7 +717,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
             "true" | "1" | "yes" => set.mips_when_minified = true,
             "false" | "0" | "no" => set.mips_when_minified = false,
             _ => {
-                eprintln!("yuka: settings: {path}:{line}: mips_when_minified wants true or false");
+                eprintln!("yuka: settings: {origin}: mips_when_minified wants true or false");
                 return false;
             }
         },
@@ -774,7 +726,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
             "true" | "1" | "yes" => set.draw_shadows = true,
             "false" | "0" | "no" => set.draw_shadows = false,
             _ => {
-                eprintln!("yuka: settings: {path}:{line}: draw_shadows wants true or false");
+                eprintln!("yuka: settings: {origin}: draw_shadows wants true or false");
                 return false;
             }
         },
@@ -782,7 +734,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
             "true" | "1" | "yes" => set.debug_taps = true,
             "false" | "0" | "no" => set.debug_taps = false,
             _ => {
-                eprintln!("yuka: settings: {path}:{line}: debug_taps wants true or false");
+                eprintln!("yuka: settings: {origin}: debug_taps wants true or false");
                 return false;
             }
         },
@@ -790,7 +742,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
             "true" | "1" | "yes" => set.debug_jumps = true,
             "false" | "0" | "no" => set.debug_jumps = false,
             _ => {
-                eprintln!("yuka: settings: {path}:{line}: debug_jumps wants true or false");
+                eprintln!("yuka: settings: {origin}: debug_jumps wants true or false");
                 return false;
             }
         },
@@ -798,19 +750,19 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
             "true" | "1" | "yes" => set.invert_scroll = true,
             "false" | "0" | "no" => set.invert_scroll = false,
             _ => {
-                eprintln!("yuka: settings: {path}:{line}: invert_scroll wants true or false");
+                eprintln!("yuka: settings: {origin}: invert_scroll wants true or false");
                 return false;
             }
         },
         "double_click_ms" => match value.parse::<u32>() {
             Ok(v) => set.double_click_ms = v,
             Err(_) => {
-                eprintln!("yuka: settings: {path}:{line}: double_click_ms wants a whole number");
+                eprintln!("yuka: settings: {origin}: double_click_ms wants a whole number");
                 return false;
             }
         },
         _ => {
-            eprintln!("yuka: settings: {path}:{line}: unknown key '{key}'");
+            eprintln!("yuka: settings: {origin}: unknown key '{key}'");
             return false;
         }
     }
@@ -820,7 +772,7 @@ fn apply(set: &mut Settings, key: &str, value: &str, path: &str, line: usize) ->
 // Values that would break the code that reads them, rather than merely feel wrong.
 // Clamped rather than rejected: a file with one silly number should still load, and a
 // zoom range of zero would divide by it.
-fn sanitise(set: &mut Settings) {
+pub fn sanitise(set: &mut Settings) {
     set.spawn_gap = set.spawn_gap.max(0.0);
     set.cover_opacity = set.cover_opacity.clamp(0.0, 1.0);
     set.dmabuf_blit_below = set.dmabuf_blit_below.max(0.0);
@@ -860,50 +812,20 @@ fn sanitise(set: &mut Settings) {
 }
 
 //
-// Reload
+// Load
 //
 
-pub fn watch_new(path: &str) -> Watch {
-    Watch { path: path.to_string(), mtime: mtime_of(path) }
-}
-
-// Re-read the file if it has been written since the last look. Called on a frame
-// interval rather than every frame: one stat a second is free, and inotify would be
-// another fd and another failure mode for something a human triggers by saving a file.
-pub fn reload_if_changed(watch: &mut Watch, set: &mut Settings) -> bool {
-    let now = mtime_of(&watch.path);
-    if now == watch.mtime {
-        return false;
+// Defaults, then every pair in the order given, then the sanity pass. Returns how many
+// pairs landed alongside the settings, so the caller can say how much of the file was
+// used.
+pub fn from_pairs(pairs: &[(String, String)], origin: &str) -> (Settings, usize) {
+    let mut set = defaults();
+    let mut applied = 0usize;
+    for (key, value) in pairs {
+        if apply(&mut set, key, value, origin) {
+            applied += 1;
+        }
     }
-    watch.mtime = now;
-    let mode = set.trackpad_mode;
-    *set = load(&watch.path);
-    // Reopening the device is not something a file save should do, so the mode in force
-    // stays in force until the next start.
-    if set.trackpad_mode != mode {
-        eprintln!("yuka: settings: trackpad_mode change takes effect on restart");
-        set.trackpad_mode = mode;
-    }
-    sanitise(set);
-    true
-}
-
-// Also reload on demand, for when you want to know that it took.
-pub fn reload(watch: &mut Watch, set: &mut Settings) {
-    watch.mtime = mtime_of(&watch.path);
-    let mode = set.trackpad_mode;
-    *set = load(&watch.path);
-    set.trackpad_mode = mode;
-    sanitise(set);
-}
-
-fn mtime_of(path: &str) -> Option<SystemTime> {
-    std::fs::metadata(Path::new(path)).ok()?.modified().ok()
-}
-
-// The first load, including the sanity pass the reloads get.
-pub fn init(path: &str) -> Settings {
-    let mut set = load(path);
     sanitise(&mut set);
-    set
+    (set, applied)
 }
