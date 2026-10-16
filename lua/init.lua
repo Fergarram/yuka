@@ -33,8 +33,14 @@
 --   yk.draw_rect(x, y, w, h, c)   yk.draw_rect_lines(x, y, w, h, c)
 --   yk.draw_line(x1, y1, x2, y2, c)   yk.draw_circle(x, y, r, c)
 --   yk.draw_text(text, x, y, size, c)   yk.measure_text(text, size)
---   yk.route(wheel, fingers, pinch)
+--   yk.route_scroll(wheel, fingers, pinch)
 --                                 whether each goes to the client under the pointer
+--   yk.route_input(pointer, keys) whether clients get the pointer and key presses
+--   yk.move_window(id, x, y)      put a window's visible top-left at a canvas point
+--   yk.maximize(id, x, y, w, h)   fill a canvas rectangle with a window
+--   yk.unmaximize(id)             give it its own rectangle back
+--
+-- Nothing reaches clients unless yk.route_scroll and yk.route_input say so, every frame.
 --   yk.key_down(code)             whether a key is held right now
 --
 -- The frame snapshot (f):
@@ -65,6 +71,8 @@
 --                                          windows that drew their first frame, and whether
 --                                          each is from the client with the keyboard
 --   activated_count, activated[i]          windows another client asked to activate
+--   max_count, max_id[i], max_on[i]        windows asking to be maximized (on) or let go;
+--                                          unanswered ones are refused, or given their size back
 --
 -- Ctrl+Alt+Backspace (quit) and Ctrl+Alt+Fn (switch VT) are the engine's and cannot
 -- be rebound: they are how you get out when a script is wrong.
@@ -220,7 +228,12 @@ local function route(f)
         scroll.active = false
     end
     local fingers_to_client = scroll.active and scroll.to_client
-    yk.route(on_client, fingers_to_client, on_client)
+    yk.route_scroll(on_client, fingers_to_client, on_client)
+
+    -- Super is the compositor's modifier. While it is held the canvas claims the pointer, so
+    -- zooming and dragging never make the thing under the cursor react, and nothing typed
+    -- reaches a client, so Super+S does not also type an s into whatever has focus.
+    yk.route_input(not f.super, not f.super)
 
     -- What the canvas does with what is its own. The wheel and a pinch are zooms of their
     -- own, so whatever the view was travelling toward is not where it is going any more.
@@ -267,6 +280,8 @@ function yk.frame(f)
     route(f)
     local eaten = gestures.frame(f)
     grab.frame(f, eaten)
+    windows.click_focus(f, eaten)
+    windows.maximize_requests(f)
     view.step(f, f.pinch ~= 1, f.swiping)
     windows.drop_unseen_focus(f)
     looks.frame(f)

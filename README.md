@@ -178,8 +178,9 @@ scripts (LuaJIT) in `lua/`:
   clicks mean.
 - `lua/grab.lua` starts Super+drag moves and Super+right-drag resizes, and picks the
   corner a resize holds.
-- `lua/windows.lua` decides focus: new windows, activation requests, a focused
-  window leaving the view, and the programs started with yuka.
+- `lua/windows.lua` decides where new windows go, focus (click to focus, new
+  windows, activation requests, a focused window leaving the view), what maximize
+  means, and the programs started with yuka.
 - `lua/looks.lua` sets the background, fades windows that cover the focused one,
   and draws over the canvas through `yk.draw` (the fps counter lives here).
 - `lua/config.lua` holds the settings the engine itself reads (trackpad, rendering,

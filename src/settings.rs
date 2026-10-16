@@ -20,7 +20,7 @@
 //
 
 use crate::input::TrackpadMode;
-use crate::render::{DmabufMode, DIR_DOWN, DIR_LEFT, DIR_NONE, DIR_RIGHT, DIR_UP};
+use crate::render::DmabufMode;
 
 //
 // Types
@@ -180,28 +180,6 @@ pub struct Settings {
     // means fresher content from a client that ignores configures, at the cost of asking
     // one that is merely slow to redraw work it will throw away.
     pub resize_wait_frames: u32,
-    // Whether a new window looks for empty canvas instead of landing on what is already there.
-    //
-    // The cascade it replaces is what a desktop does because a desktop has one screenful and has to
-    // stack. A canvas has room, so a window arriving on top of your work is a choice nobody made.
-    //
-    // Nearest free space to the middle of the view, so it still arrives where you are looking, and
-    // false goes back to the cascade.
-    pub spawn_clear: bool,
-    // Which directions a new window tries before others when looking for room, in order.
-    //
-    // Nearest to the middle of the view is the rule, and this bends it: a direction named here is
-    // preferred over one named later, and both over one not named at all. So "right" alone means it
-    // opens to the right when there is room and does whatever is nearest when there is not, while
-    // naming all four decides every case.
-    //
-    // Written in the file as names, "right,up,left,down", and empty for no preference at all, which
-    // is nearest and nothing else. Held as ranks rather than as text, since Settings is Copy and
-    // four bytes say the same thing.
-    pub spawn_order: [u8; 4],
-    // The gap left around a window placed that way, in canvas units. Enough that two windows read
-    // as two rather than as a seam, and small enough that a crowded canvas still finds room.
-    pub spawn_gap: f32,
     // Whether to draw what a client padded around its window, which is where its shadow and
     // its rounded corners live.
     //
@@ -295,9 +273,6 @@ pub fn defaults() -> Settings {
         resize_stretch: false,
         resize_wait_frames: 8,
         draw_shadows: true,
-        spawn_clear: true,
-        spawn_order: [DIR_RIGHT, DIR_UP, DIR_LEFT, DIR_DOWN],
-        spawn_gap: 24.0,
         mips_when_minified: true,
         dmabuf_blit_below: 0.9,
         dmabuf_mode: DmabufMode::Hold,
@@ -436,45 +411,6 @@ pub fn apply(set: &mut Settings, key: &str, value: &str, origin: &str) -> bool {
         "zoom_max" => f32_key!(zoom_max),
         "zoom_default" => f32_key!(zoom_default),
         "fov_deg" => f32_key!(fov_deg),
-        "spawn_gap" => f32_key!(spawn_gap),
-        "spawn_order" => {
-            let mut order = [DIR_NONE; 4];
-            let mut at = 0;
-            for name in value.split(',') {
-                let name = name.trim();
-                if name.is_empty() || name == "nearest" {
-                    continue;
-                }
-                let dir = match name {
-                    "right" => DIR_RIGHT,
-                    "up" => DIR_UP,
-                    "left" => DIR_LEFT,
-                    "down" => DIR_DOWN,
-                    _ => {
-                        eprintln!(
-                            "yuka: settings: {origin}: spawn_order wants right, up, left, \
-                             down or nearest"
-                        );
-                        return false;
-                    }
-                };
-                // A direction named twice is the same preference stated twice, not a new one.
-                if order.contains(&dir) {
-                    continue;
-                }
-                order[at] = dir;
-                at += 1;
-            }
-            set.spawn_order = order;
-        }
-        "spawn_clear" => match value {
-            "true" | "1" | "yes" => set.spawn_clear = true,
-            "false" | "0" | "no" => set.spawn_clear = false,
-            _ => {
-                eprintln!("yuka: settings: {origin}: spawn_clear wants true or false");
-                return false;
-            }
-        },
         "mips_when_minified" => match value {
             "true" | "1" | "yes" => set.mips_when_minified = true,
             "false" | "0" | "no" => set.mips_when_minified = false,
@@ -535,7 +471,6 @@ pub fn apply(set: &mut Settings, key: &str, value: &str, origin: &str) -> bool {
 // Clamped rather than rejected: a file with one silly number should still load, and a
 // zoom range of zero would divide by it.
 pub fn sanitise(set: &mut Settings) {
-    set.spawn_gap = set.spawn_gap.max(0.0);
     set.dmabuf_blit_below = set.dmabuf_blit_below.max(0.0);
     set.zoom_min = set.zoom_min.max(0.001);
     set.zoom_max = set.zoom_max.max(set.zoom_min * 1.001);

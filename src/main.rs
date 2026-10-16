@@ -321,7 +321,9 @@ fn route_input(
     last_motion: &mut Option<(WlSurface, f32, f32)>,
     held: bool,
     debug: bool,
-    super_down: bool,
+    // Whether clients get the pointer this frame. When not (Super held, by default) the canvas
+    // has it.
+    to_clients: bool,
     // True while we are moving or resizing a window because the client asked us to. The
     // compositor owns the pointer for the duration of an xdg_toplevel move or resize, and a
     // client does not expect motion inside itself while it believes it is being dragged.
@@ -375,7 +377,7 @@ fn route_input(
     // The canvas claims the pointer: no hover, no buttons, no scroll for clients, so zooming
     // and dragging never make the thing under the cursor react. Pointer focus is withdrawn on
     // the way in, so nothing is left believing the cursor is still inside it.
-    if super_down {
+    if !to_clients {
         if hovered.is_some() {
             let serial = SERIAL_COUNTER.next_serial();
             pointer.motion(state, None, &MotionEvent { location: loc, serial, time: time_ms });
@@ -487,31 +489,8 @@ fn route_input(
         }
     }
 
-    if pressed {
-        match under.as_ref() {
-            Some((surf, _, _)) => {
-                // Pointer input goes to the exact surface under the cursor, but
-                // keyboard focus follows the *toplevel*, never a popup or a
-                // subsurface, and only when it actually changes.
-                //
-                // Both halves matter. Smithay implements a focus change as leave then
-                // enter, and a client reads leave on its toplevel as "you lost
-                // focus": Chromium destroys its open menus the instant it arrives. So
-                // handing focus to the popup killed the menu before the click landed,
-                // and re-sending focus a window already has would do the same for no
-                // reason at all.
-                //
-                // And focus alone: the window is not brought to the front. Clicking something to
-                // type in it should not rearrange the desk, and on a canvas the stack is mostly a
-                // detail of where things overlap rather than a pile you dig through. Raising is
-                // still what a Super+drag does, since picking a window up is the moment you did
-                // ask for it to be on top.
-                let window = wl::state::window_root(state, surf);
-                focus_window(state, focused, Some(window));
-            }
-            None => focus_window(state, focused, None),
-        }
-    }
+    // Keyboard focus is not decided here. Clicking to focus is the scripts' (yk.focus), and it
+    // has already happened by the time the press is sent below.
 
     let mut sent = false;
     for (button, down, up) in edges {
@@ -828,23 +807,21 @@ fn forward_scroll(
 // went on believing the key was held. A stuck Ctrl turns typing "a" into select-all, which
 // is how this was found. Delivery is Smithay's business: with no focus it updates state and
 // sends nothing, which is exactly what an empty canvas wants.
-// Forward keys to the focused client, minus the ones Super is holding.
-//
-// Super is the compositor's modifier: every chord behind it is ours, and a client hearing the
-// letter as well means Super+S both takes a screenshot and types an s into whatever has focus.
-// Two of them were filtered by name, which only ever covered the two that had been noticed.
-// So the rule is the general one: while Super is down nothing you type reaches a client.
+// Forward keys to the focused client, unless the scripts are keeping this frame's presses
+// (Route::keys; while Super is held, by default).
 //
 // Modifiers themselves still go. They are not typing, and xkb's idea of what is held has to
 // follow the keyboard or the next client to take focus inherits modifiers nobody is pressing.
 //
 // sent is what we have told the client is down, so a release only goes where its press went.
 // Without it, holding a letter, then pressing Super, then letting the letter go leaves the
-// client believing that key is still held: it never hears the release, because by then Super
-// was down. That is a key repeating forever in someone's editor.
+// client believing that key is still held: it never hears the release, because by then the
+// presses were being kept. That is a key repeating forever in someone's editor.
 fn forward_keys(
     state: &mut State,
     kb: &input::Input,
+    // Whether presses reach the client this frame. Not while Super is held, by default.
+    typing: bool,
     sent: &mut [bool; input::KEY_CODES],
     time_ms: u32,
 ) {
@@ -853,7 +830,7 @@ fn forward_keys(
         let i = code as usize;
         if !input::is_modifier(code) {
             if pressed {
-                if input::super_down(kb) {
+                if !typing {
                     continue;
                 }
                 if i < sent.len() {
@@ -882,6 +859,57 @@ fn forward_keys(
             |_, _, _| FilterResult::Forward,
         );
     }
+}
+
+// Maximizing, which on an infinite canvas has to be given a meaning rather than inherited from
+// one. There is no screen for a window to fill: what it fills is whatever canvas rectangle the
+// scripts name (the visible part of the canvas, by default), taken once when asked and fixed in
+// canvas space afterwards. This is the mechanics: remember what unmaximizing gives back, stop
+// anything animating the window, and tell the client its new size.
+#[allow(clippy::too_many_arguments)]
+fn maximize_window(
+    windows: &mut Windows,
+    state: &State,
+    settling: &mut Vec<(WlSurface, f32, f32, f32)>,
+    resize_settle: &mut Option<ResizeSettle>,
+    surf: &WlSurface,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) {
+    // Read before anything moves: this is what unmaximizing gives back.
+    if let (Some((ox, oy)), Some((ow, oh))) =
+        (render::window_origin(windows, surf), render::geo_size(windows, surf))
+    {
+        render::maximize(windows, surf, x, y, ox, oy, ow, oh);
+    }
+    // Same housekeeping as a client's own move: an animation still running would drag the
+    // window back off the shape we are about to give it.
+    settling.retain(|(s, ..)| s != surf);
+    if resize_settle.as_ref().map(|st| &st.surface) == Some(surf) {
+        *resize_settle = None;
+    }
+    render::clear_scale(windows, surf);
+    render::settle(windows, surf);
+    render::front(windows, surf);
+    render::set_window_origin(windows, surf, x, y);
+    wl::state::maximize_toplevel(state, surf, w.round() as i32, h.round() as i32, true);
+}
+
+// And back to the rectangle it had. A window we never maximized still gets an answer, at the
+// size it already is, because a client waiting on a configure it asked for is stuck until it
+// arrives.
+fn unmaximize_window(windows: &mut Windows, state: &State, surf: &WlSurface) {
+    let restore = render::unmaximize(windows, surf);
+    if let Some((x, y, _, _)) = restore {
+        render::set_window_origin(windows, surf, x, y);
+    }
+    let (w, h) = restore
+        .map(|(_, _, w, h)| (w, h))
+        .or_else(|| render::geo_size(windows, surf))
+        .unwrap_or((0.0, 0.0));
+    wl::state::maximize_toplevel(state, surf, w.round() as i32, h.round() as i32, false);
 }
 
 // Dragging a window that is filling the view takes it out of maximized first.
@@ -1201,6 +1229,9 @@ fn main() {
     let mut win_list = render::win_list_new();
     let mut mapped_ids: Vec<(u64, bool)> = Vec::with_capacity(8);
     let mut activated_ids: Vec<u64> = Vec::with_capacity(8);
+    let mut max_requests: Vec<(u64, bool)> = Vec::with_capacity(4);
+    // Which of this frame's maximize requests the scripts answered.
+    let mut max_answered: Vec<u64> = Vec::with_capacity(4);
 
     let start = Instant::now();
     // Behind the canvas, until the scripts say otherwise (yk.set_background).
@@ -1492,17 +1523,26 @@ fn main() {
             }
         }
 
+        // Clients asking to be maximized or let go of it, for the scripts to answer.
+        //
+        // Never at map time, which is decided here: a client that asks to be maximized before it
+        // has appeared is asking to open filling the screen, and a window that seizes the view on
+        // launch moves you somewhere you did not go. Refused rather than ignored, because a
+        // client that asked is owed a configure and sits waiting for one otherwise. It gets 0x0,
+        // the protocol's "your size is your own business".
+        max_requests.clear();
+        for (surf, on) in state.maximize_requests.drain(..).collect::<Vec<_>>() {
+            if on && render::geo_size(&windows, &surf).is_none() {
+                wl::state::decline_maximize(&state, &surf);
+                continue;
+            }
+            if let Some(id) = render::window_id(&windows, &surf) {
+                max_requests.push((id, on));
+            }
+        }
+
         // New windows open where the view is.
-        render::set_place_origin(
-            &mut windows,
-            cam.cx,
-            cam.cy,
-            render::Spawn {
-                clear: set.spawn_clear,
-                gap: set.spawn_gap,
-                order: set.spawn_order,
-            },
-        );
+        render::set_place_origin(&mut windows, cam.cx, cam.cy);
 
 
         // Send frame callbacks and flush BEFORE the vsync-blocking draw, so the
@@ -1709,6 +1749,7 @@ fn main() {
                 windows: &win_list,
                 mapped: &mapped_ids,
                 activated: &activated_ids,
+                max_requests: &max_requests,
             };
             lua::frame(&mut script, &f, &mut cmds)
         };
@@ -1718,6 +1759,7 @@ fn main() {
         let mut begin_resize: Option<(u64, f32, f32)> = None;
         let mut resize_corner: Option<(f32, f32)> = None;
         render::clear_alpha_targets(&mut windows);
+        max_answered.clear();
         for cmd in cmds.drain(..) {
             match cmd {
                 lua::Cmd::Reload => reload_now = true,
@@ -1767,6 +1809,33 @@ fn main() {
                         render::set_alpha_target(&mut windows, &surf, alpha);
                     }
                 }
+                lua::Cmd::Maximize(id, x, y, w, h) => {
+                    if let Some(surf) = render::surface_by_id(&windows, id) {
+                        maximize_window(
+                            &mut windows,
+                            &state,
+                            &mut settling,
+                            &mut resize_settle,
+                            &surf,
+                            x,
+                            y,
+                            w,
+                            h,
+                        );
+                        max_answered.push(id);
+                    }
+                }
+                lua::Cmd::Unmaximize(id) => {
+                    if let Some(surf) = render::surface_by_id(&windows, id) {
+                        unmaximize_window(&mut windows, &state, &surf);
+                        max_answered.push(id);
+                    }
+                }
+                lua::Cmd::MoveWindow(id, x, y) => {
+                    if let Some(surf) = render::surface_by_id(&windows, id) {
+                        render::set_window_origin(&mut windows, &surf, x, y);
+                    }
+                }
                 lua::Cmd::Background(rgba) => {
                     clear = ray::Color {
                         r: (rgba >> 24) as u8,
@@ -1780,6 +1849,20 @@ fn main() {
                     if let Some(child) = spawn_client(&server.socket_name, &cmd) {
                         children.push(child);
                     }
+                }
+            }
+        }
+        // A request the scripts let pass still gets its configure, since the client is waiting
+        // on one: refused if it asked for maximized, its own size back if it asked to leave.
+        for &(id, on) in max_requests.iter() {
+            if max_answered.contains(&id) {
+                continue;
+            }
+            if let Some(surf) = render::surface_by_id(&windows, id) {
+                if on {
+                    wl::state::decline_maximize(&state, &surf);
+                } else {
+                    unmaximize_window(&mut windows, &state, &surf);
                 }
             }
         }
@@ -1833,7 +1916,6 @@ fn main() {
         // avoid: the press has to reach the client and its request has to come back.
         let asked_move: Vec<(WlSurface, u32)> = state.move_requests.drain(..).collect();
         let asked_resize: Vec<(WlSurface, i32, i32, u32)> = state.resize_requests.drain(..).collect();
-        let asked_max: Vec<(WlSurface, bool)> = state.maximize_requests.drain(..).collect();
         {
             if let Some((surf, serial)) = asked_move.into_iter().last() {
                 // Anchor to the press the client is quoting. Between that press and this
@@ -1936,91 +2018,6 @@ fn main() {
                 }
             }
 
-            // Maximizing, which on an infinite canvas has to be given a meaning rather than
-            // inherited from one. There is no screen for a window to fill and no edges to
-            // stick to: what there is, at any moment, is the part of the canvas you can see.
-            // So maximized means exactly that rectangle, in canvas units, taken once when you
-            // ask for it.
-            //
-            // Fixed in canvas space rather than following the view afterwards, because a
-            // window that re-shaped itself every time you panned would be the one thing on
-            // the canvas that is not a place. Pan away from a maximized window and you leave
-            // it behind, the way you leave everything else behind.
-            //
-            // The zoom is left alone. A maximized window at 0.6 is a window filling a view
-            // you chose to be zoomed out, which is a coherent thing to want, and yanking the
-            // scale to 1:1 would be the canvas deciding it knows better.
-            for (surf, on) in asked_max {
-                // Never at map time. A client that asks to be maximized before it has appeared is
-                // asking to open filling the screen, and that is not a state to open in here: the
-                // view is a place you are, and a window that seizes it on launch moves you
-                // somewhere you did not go. New windows arrive at the size they chose, where the
-                // cascade puts them, and can be maximized afterwards by whoever is looking.
-                //
-                // Refused rather than ignored, because a client that asked is owed a configure and
-                // sits waiting for one otherwise. It gets 0x0, which is the protocol's "your size
-                // is your own business".
-                if on && render::geo_size(&windows, &surf).is_none() {
-                    wl::state::decline_maximize(&state, &surf);
-                    continue;
-                }
-                if on {
-                    let sw = ray::screen_width() as f32;
-                    let sh = ray::screen_height() as f32;
-                    // The visible rectangle at the z=0 plane, read through the same
-                    // projection the hit tests use, so what fills the view really fills it.
-                    let corners = (
-                        camera::screen_to_plane(cam3d, 0.0, 0.0, 0.0),
-                        camera::screen_to_plane(cam3d, sw, sh, 0.0),
-                    );
-                    let (Some((lx, ty)), Some((rx, by))) = corners else {
-                        continue;
-                    };
-                    // Read before anything moves: this is what unmaximizing gives back.
-                    if let (Some((x, y)), Some((w, h))) = (
-                        render::window_origin(&windows, &surf),
-                        render::geo_size(&windows, &surf),
-                    ) {
-                        render::maximize(&mut windows, &surf, lx, ty, x, y, w, h);
-                    }
-                    // Same housekeeping as a client's own move: an animation still running
-                    // would drag the window back off the shape we are about to give it.
-                    settling.retain(|(s, ..)| s != &surf);
-                    if resize_settle.as_ref().map(|st| &st.surface) == Some(&surf) {
-                        resize_settle = None;
-                    }
-                    render::clear_scale(&mut windows, &surf);
-                    render::settle(&mut windows, &surf);
-                    render::front(&mut windows, &surf);
-                    render::set_window_origin(&mut windows, &surf, lx, ty);
-                    wl::state::maximize_toplevel(
-                        &state,
-                        &surf,
-                        (rx - lx).round() as i32,
-                        (by - ty).round() as i32,
-                        true,
-                    );
-                } else {
-                    // And back to the rectangle it had. A window we never maximized still gets
-                    // an answer, at the size it already is, because a client waiting on a
-                    // configure it asked for is stuck until it arrives.
-                    let restore = render::unmaximize(&mut windows, &surf);
-                    if let Some((x, y, _, _)) = restore {
-                        render::set_window_origin(&mut windows, &surf, x, y);
-                    }
-                    let (w, h) = restore
-                        .map(|(_, _, w, h)| (w, h))
-                        .or_else(|| render::geo_size(&windows, &surf))
-                        .unwrap_or((0.0, 0.0));
-                    wl::state::maximize_toplevel(
-                        &state,
-                        &surf,
-                        w.round() as i32,
-                        h.round() as i32,
-                        false,
-                    );
-                }
-            }
         }
 
         // Super+right-drag resizes. Wayland has nothing to stretch: we send the client
@@ -2570,7 +2567,7 @@ fn main() {
                 &mut last_motion,
                 ptr.left || ptr.right || ptr.middle,
                 debug_input,
-                super_down,
+                route.pointer,
                 drag.as_ref().map(|d| d.from_client).unwrap_or(false)
                     || resize.as_ref().map(|r| !r.right_button).unwrap_or(false),
                 &mut press_log,
@@ -2610,7 +2607,7 @@ fn main() {
         // no client is listening, or the next client to get focus inherits modifiers that
         // nobody is holding.
         if let Some(i) = inp.as_ref() {
-            forward_keys(&mut state, i, &mut keys_sent, time_ms);
+            forward_keys(&mut state, i, route.keys, &mut keys_sent, time_ms);
         }
 
         // Everything routed this frame goes out now, not on the next iteration.

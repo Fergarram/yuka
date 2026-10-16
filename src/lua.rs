@@ -88,21 +88,33 @@ pub enum Cmd {
     WindowAlpha(u64, f32),
     // The colour behind the canvas, as 0xRRGGBBAA.
     Background(u32),
+    // Put a window's visible top-left at a canvas point.
+    MoveWindow(u64, f32, f32),
+    // Fill a canvas rectangle with a window, remembering what to give back, and tell the
+    // client. Or give it back. Answers a maximize request; also works unasked.
+    Maximize(u64, f32, f32, f32, f32),
+    Unmaximize(u64),
     // Start a program as a client of this compositor.
     Spawn(String),
 }
 
-// Where this frame's scrolling and pinching go. true means the client under the pointer,
-// false means nobody: what the canvas does with it is the script's own business.
+// What reaches clients this frame. true means the client under the pointer (or, for keys,
+// the one with the keyboard); false means nobody, and what the canvas does with it instead is
+// the script's own business.
 //
 // Only the destination. The protocol rules that come with sending to a client (axis
-// sequences that must be stopped, pinch sequences that must be ended) stay in the engine,
-// so a script cannot leave a client believing a gesture is still running.
+// sequences that must be stopped, pinch sequences that must be ended, releases that must
+// follow their presses) stay in the engine, so a script cannot leave a client believing a
+// gesture is still running or a key still held.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Route {
     pub wheel: bool,
     pub fingers: bool,
     pub pinch: bool,
+    // Hover, motion and buttons.
+    pub pointer: bool,
+    // Key presses. Modifiers and releases go regardless.
+    pub keys: bool,
 }
 
 // The frame as a script sees it. Filled by the main loop, copied into the VM once per
@@ -172,6 +184,10 @@ pub struct FrameIn<'a> {
     // the keyboard (or nothing had it), and windows another client asked to activate.
     pub mapped: &'a [(u64, bool)],
     pub activated: &'a [u64],
+    // Windows asking to be maximized (true) or let go of it (false). A request the script
+    // does not answer with yk.maximize or yk.unmaximize is answered for it: refused, or the
+    // window's own size back.
+    pub max_requests: &'a [(u64, bool)],
 }
 
 // What the functions a script calls write into. Lives in the VM's app data, so the
@@ -200,6 +216,8 @@ struct Lists {
     mapped: Table,
     mapped_welcome: Table,
     activated: Table,
+    max_id: Table,
+    max_on: Table,
 }
 
 // One loaded script set: the VM and the handles the frame call reuses, so a frame
@@ -325,6 +343,8 @@ fn load_vm(dir: &str) -> mlua::Result<(Vm, Vec<(String, String)>)> {
         mapped: list("mapped")?,
         mapped_welcome: list("mapped_welcome")?,
         activated: list("activated")?,
+        max_id: list("max_id")?,
+        max_on: list("max_on")?,
     };
     Ok((Vm { lua, frame_fn, draw_fn, snap, lists }, pairs))
 }
@@ -461,10 +481,31 @@ fn register(lua: &Lua, yk: &Table) -> mlua::Result<()> {
         push(lua, Cmd::Spawn(cmd));
         Ok(())
     })?)?;
-    yk.set("route", lua.create_function(|lua, (wheel, fingers, pinch): (bool, bool, bool)| {
+    yk.set("route_scroll", lua.create_function(|lua, (wheel, fingers, pinch): (bool, bool, bool)| {
         if let Some(mut io) = lua.app_data_mut::<Io>() {
-            io.route = Route { wheel, fingers, pinch };
+            io.route.wheel = wheel;
+            io.route.fingers = fingers;
+            io.route.pinch = pinch;
         }
+        Ok(())
+    })?)?;
+    yk.set("route_input", lua.create_function(|lua, (pointer, keys): (bool, bool)| {
+        if let Some(mut io) = lua.app_data_mut::<Io>() {
+            io.route.pointer = pointer;
+            io.route.keys = keys;
+        }
+        Ok(())
+    })?)?;
+    yk.set("move_window", lua.create_function(|lua, (id, x, y): (u64, f32, f32)| {
+        push(lua, Cmd::MoveWindow(id, x, y));
+        Ok(())
+    })?)?;
+    yk.set("maximize", lua.create_function(|lua, (id, x, y, w, h): (u64, f32, f32, f32, f32)| {
+        push(lua, Cmd::Maximize(id, x, y, w, h));
+        Ok(())
+    })?)?;
+    yk.set("unmaximize", lua.create_function(|lua, id: u64| {
+        push(lua, Cmd::Unmaximize(id));
         Ok(())
     })?)?;
     yk.set("key_down", lua.create_function(|lua, code: usize| {
@@ -694,5 +735,10 @@ fn fill_snapshot(vm: &Vm, f: &FrameIn) -> mlua::Result<()> {
     }
     t.raw_set("activated_count", f.activated.len())?;
     fill(&l.activated, f.activated)?;
+    t.raw_set("max_count", f.max_requests.len())?;
+    for (i, &(id, on)) in f.max_requests.iter().enumerate() {
+        l.max_id.raw_set(i + 1, id)?;
+        l.max_on.raw_set(i + 1, on)?;
+    }
     Ok(())
 }
