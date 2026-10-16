@@ -103,6 +103,42 @@ For an unbounded run with debug overlays on:
 ./run_debug.sh
 ```
 
+### Working from a terminal inside yuka
+
+To keep working from inside the canvas (an editor, a shell, a Claude Code session),
+run your work in tmux on the first VT and attach to it from the weston-terminal that
+yuka opens on startup.
+
+1. On VT1, start or keep a tmux session going (`tmux new -s main`, or whatever
+   is already running; `tmux ls` lists them).
+2. Switch to a spare VT (Ctrl+Alt+F3), log in, and start yuka without a frame
+   limit. `run_tty.sh` stops after a frame count, so use `run_debug.sh` or the
+   binary directly:
+
+   ```sh
+   cd ~/repos/yuka && ./target/debug/yuka > /tmp/yuka.txt 2>&1 < /dev/null
+   ```
+
+   The `< /dev/null` keeps raylib off the tty keyboard, which otherwise can come
+   back dead after yuka exits.
+3. Click the weston-terminal window to focus it and attach:
+
+   ```sh
+   tmux attach -t main
+   ```
+
+   Both clients now share the session. Use `tmux attach -d -t main` to detach the
+   VT1 client if the two sizes fight. The session survives yuka exiting, so
+   Ctrl+Alt+F1 still has it.
+
+There is no keybinding to launch a client yet. If the terminal is gone, start one
+from another VT against yuka's socket. yuka prints it at startup
+(`yuka: WAYLAND_DISPLAY=wayland-1`, in the log):
+
+```sh
+WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/run/user/$(id -u) weston-terminal &
+```
+
 ### Nested, for fast iteration
 
 From inside an existing Wayland (or X11) session, run the windowed build. It
