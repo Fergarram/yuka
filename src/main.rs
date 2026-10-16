@@ -53,6 +53,9 @@ const BTN_MIDDLE: u32 = 0x112;
 // How often to look for a saved script. Once a second is instant to a human hitting
 // save, and 60 directory reads a minute is nothing next to a frame.
 const SETTINGS_POLL_FRAMES: u32 = 60;
+// Cursor images are cached by key on the plane; the scripts' canvas cursors take keys from
+// here up, so they never collide with the ones clients name.
+const CANVAS_CURSOR_KEY: u32 = 1 << 20;
 // How long to sleep per iteration while another VT owns the display.
 const VT_IDLE_MS: u64 = 30;
 // Size of the window in the nested build. On DRM we take the whole screen instead.
@@ -630,60 +633,30 @@ fn forward_pinch(
     }
 }
 
-// Which axes of a finger scroll a client is currently being told about.
+// A finger scroll toward a client outlives a frame: whether an axis sequence is open toward
+// it, so it can be closed when the fingers lift.
 //
-// Two fingers travelling up a pad also wander sideways, by a pixel here and a fraction there,
-// and the canvas is happy to take both: panning diagonally is a thing you do. A client is not
-// the canvas. Libinput locks a touchpad scroll to one axis, and a terminal that scrolls under
-// libinput and sits dead under our own gestures is a terminal being handed a wandering second
-// axis it has to resolve against the first.
-//
-// But a browser and a map do want both, so the lock is a starting position rather than a
-// verdict: whichever axis leads at the start holds the gesture alone, and the moment the other
-// one is doing real work rather than wandering, both are sent for the rest of the gesture. The
-// camera's copy is never locked at all.
-#[derive(Clone, Copy, PartialEq)]
-enum ScrollLock {
-    None,
-    Vertical,
-    Horizontal,
-    Both,
-}
-
-// How much of the recent gesture the axis test remembers. Multiplying the running travel by
-// this once a frame makes it a window of roughly ten frames rather than the whole gesture, so
-// a scroll that turns a corner without lifting is judged on what the fingers are doing now.
-const SCROLL_TRAVEL_DECAY: f32 = 0.9;
-
-// A finger scroll in progress toward a client: which axes it is sending, and how far each has
-// travelled lately. It outlives a frame, so the main loop owns it.
+// The stop is what closes one. A client that received no values has nothing open, and telling it
+// a sequence ended anyway is not harmless: GTK takes the end of a scroll as the moment to release
+// its kinetic scrolling, so an unfocused window that heard nothing all gesture still runs the
+// inertia it was holding the instant we say stop. Which is a canvas pan leaking into a window
+// that was never scrolled.
 struct ScrollGesture {
-    lock: ScrollLock,
-    travel_x: f32,
-    travel_y: f32,
-    // Where the gesture goes is not in here: the scripts decide it, and hold it for the whole
-    // gesture (see lua/init.lua). This is only what sending it to a client involves.
-    // Whether we have actually sent this client axis values during this gesture, so an axis
-    // sequence is open toward it.
-    //
-    // The stop is what closes one. A client that received no values has nothing open, and telling
-    // it a sequence ended anyway is not harmless: GTK takes the end of a scroll as the moment to
-    // release its kinetic scrolling, so an unfocused window that heard nothing all gesture still
-    // runs the inertia it was holding the instant we say stop. Which is a canvas pan leaking into
-    // a window that was never scrolled.
     opened: bool,
 }
 
+// Forward scrolling to the client under the pointer. The wheel sends discrete v120 steps plus
+// the pixel value clients expect; the fingers send whatever the scripts worked out for this frame
+// (yk.scroll_client), already in the client's units and sign, axis lock and sensitivity applied.
 fn forward_scroll(
     state: &mut State,
     ptr: &input::Pointer,
     // Whether the wheel belongs to the client. Asked per event, because a notch is whole.
     wheel_to_client: bool,
-    // And whether the finger scroll does, which is the latched answer for the whole gesture.
-    fingers_to_client: bool,
+    // The finger scroll for the client this frame, if any.
+    fingers: Option<(f32, f32)>,
     // True on the frame a finger scroll finished, which has to be said out loud.
     scroll_ended: bool,
-    // The gesture in progress: which axes it is sending and how far each has travelled.
     gesture: &mut ScrollGesture,
     time_ms: u32,
     set: &settings::Settings,
@@ -708,44 +681,7 @@ fn forward_scroll(
         pointer.axis(state, frame);
         pointer.frame(state);
     }
-    // Values only for the side that owns the gesture. The stop below is sent either way, and
-    // this frame can be both the last of a canvas pan and the frame the stop goes out on: without
-    // this test the tail of a pan the canvas owned lands in the window under the cursor, which is
-    // the whole bug this latch exists for, arriving one frame later than before.
-    if fingers_to_client && (ptr.scroll_x != 0.0 || ptr.scroll_y != 0.0) {
-        // Finger scroll into a window gets its own sensitivity: the same gesture serves
-        // the canvas, where one to one is right, and a page, which usually wants more.
-        let sens = set.window_scroll_sens;
-        // What the fingers have been doing lately, on each axis, as a decaying sum.
-        gesture.travel_x = gesture.travel_x * SCROLL_TRAVEL_DECAY + ptr.scroll_x.abs();
-        gesture.travel_y = gesture.travel_y * SCROLL_TRAVEL_DECAY + ptr.scroll_y.abs();
-        // The first frame of a gesture decides which axis holds it. Whichever moved further
-        // wins, and a tie goes to the vertical, which is the one nearly every scroll is.
-        if gesture.lock == ScrollLock::None {
-            gesture.lock = if ptr.scroll_y.abs() >= ptr.scroll_x.abs() {
-                ScrollLock::Vertical
-            } else {
-                ScrollLock::Horizontal
-            };
-        }
-        // And the minor axis takes it back as soon as it is doing real work rather than
-        // wandering. Once both are going they stay going: a gesture that has been diagonal is
-        // a two-dimensional one, and dropping an axis under a hand still moving is worse than
-        // carrying one it has stopped using.
-        let frac = set.scroll_axis_lock_frac;
-        match gesture.lock {
-            ScrollLock::Vertical if gesture.travel_x >= gesture.travel_y * frac => {
-                gesture.lock = ScrollLock::Both;
-            }
-            ScrollLock::Horizontal if gesture.travel_y >= gesture.travel_x * frac => {
-                gesture.lock = ScrollLock::Both;
-            }
-            _ => {}
-        }
-        let send_v = gesture.lock == ScrollLock::Vertical || gesture.lock == ScrollLock::Both;
-        let send_h = gesture.lock == ScrollLock::Horizontal || gesture.lock == ScrollLock::Both;
-        let v = if send_v { ptr.scroll_y * scroll_sign * sens } else { 0.0 };
-        let h = if send_h { ptr.scroll_x * hscroll_sign * sens } else { 0.0 };
+    if let Some((h, v)) = fingers {
         if v != 0.0 || h != 0.0 {
             let mut frame = AxisFrame::new(time_ms).source(AxisSource::Finger);
             if v != 0.0 {
@@ -759,28 +695,18 @@ fn forward_scroll(
             gesture.opened = true;
         }
     }
-    // The end of a finger scroll is an event of its own, and the protocol requires it for
-    // this source: a client cannot see the pad, so a sequence never ended is one it goes on
-    // believing is running. Firefox is the one that showed it, by ignoring scrolls that came
-    // after a sequence it thought was still open.
-    //
-    // Only for a sequence we opened, though. See ScrollGesture::opened.
-    //
-    // Both axes, whichever was moving. Stopping one that was not is nothing to a client, and
-    // working out which were live is bookkeeping for no gain.
-    if scroll_ended {
-        gesture.lock = ScrollLock::None;
-        gesture.travel_x = 0.0;
-        gesture.travel_y = 0.0;
-        if gesture.opened {
-            gesture.opened = false;
-            let frame = AxisFrame::new(time_ms)
-                .source(AxisSource::Finger)
-                .stop(Axis::Vertical)
-                .stop(Axis::Horizontal);
-            pointer.axis(state, frame);
-            pointer.frame(state);
-        }
+    // The end of a finger scroll is an event of its own, and the protocol requires it for this
+    // source: a client cannot see the pad, so a sequence never ended is one it goes on believing
+    // is running. Firefox is the one that showed it, by ignoring scrolls that came after a
+    // sequence it thought was still open. Only for a sequence we opened, and both axes.
+    if scroll_ended && gesture.opened {
+        gesture.opened = false;
+        let frame = AxisFrame::new(time_ms)
+            .source(AxisSource::Finger)
+            .stop(Axis::Vertical)
+            .stop(Axis::Horizontal);
+        pointer.axis(state, frame);
+        pointer.frame(state);
     }
 }
 
@@ -1059,10 +985,8 @@ fn main() {
         dmabuf_formats.len()
     );
 
-    let shader = ray::load_shader("shaders/window.vert", "shaders/window.frag");
-    let alpha_loc = ray::shader_location(shader, "alphaBlend");
-    let swizzle_loc = ray::shader_location(shader, "swizzleBgra");
-    let fade_loc = ray::shader_location(shader, "windowAlpha");
+    // Window shaders by slot. Slot 0 is the built-in one until the scripts replace it.
+    let mut shaders = render::shaders_new("shaders/window.vert", "shaders/window.frag");
 
     let (mut server, mut state) =
         wl::state::init(
@@ -1143,6 +1067,11 @@ fn main() {
     let mut activated_ids: Vec<u64> = Vec::with_capacity(8);
     let mut max_requests: Vec<(u64, bool)> = Vec::with_capacity(4);
     let mut move_requests: Vec<(u64, f32, f32)> = Vec::with_capacity(2);
+    // Windows that went away last frame, for the scripts to hear about on this one.
+    let mut closed_ids: Vec<u64> = Vec::with_capacity(4);
+    // The cursor over empty canvas, by theme name, and the theme images looked up for it.
+    let mut canvas_cursor = String::from("default");
+    let mut canvas_cursors: Vec<(String, Option<xcursor::Image>)> = Vec::new();
     // What the labels overlay is shown, on the frames it is on.
     let mut inspect_list: Vec<render::Inspect> = Vec::new();
     // Which of this frame's maximize requests the scripts answered.
@@ -1213,12 +1142,7 @@ fn main() {
     let mut pinch_scale: f64 = 1.0;
     // And the finger scroll in progress toward a client, which outlives a frame for the same
     // reason: which axes it is sending, and how far each has travelled lately.
-    let mut scroll_gesture = ScrollGesture {
-        lock: ScrollLock::None,
-        travel_x: 0.0,
-        travel_y: 0.0,
-        opened: false,
-    };
+    let mut scroll_gesture = ScrollGesture { opened: false };
     // Which of the two scales the zoom last settled at, which is the mode. Out here the canvas
     // owns the pointer and no window hears anything; in there they are applications again.
     // Surface the pointer is currently over, so crossing into another one can
@@ -1635,6 +1559,7 @@ fn main() {
                 .and_then(|root| render::window_id(&windows, &root))
         });
         let no_keys = [false; input::KEY_CODES];
+        let pad_now = touchpad.as_ref().map(|tp| touch::view(tp, &set));
         let route = {
             let f = lua::FrameIn {
                 keys: inp.as_ref().map(input::events).unwrap_or(&[]),
@@ -1654,6 +1579,7 @@ fn main() {
                 scroll_x: ptr.scroll_x,
                 scroll_y: ptr.scroll_y,
                 scroll_lifted: ptr.scroll_ended,
+                scroll_ended,
                 pad_driving,
                 fingers: pad.fingers as u32,
                 pinch: ptr.pinch,
@@ -1699,6 +1625,8 @@ fn main() {
                 activated: &activated_ids,
                 max_requests: &max_requests,
                 move_requests: &move_requests,
+                closed: &closed_ids,
+                touches: pad_now.as_ref(),
             };
             lua::frame(&mut script, &f, &mut cmds)
         };
@@ -1776,6 +1704,21 @@ fn main() {
                         render::set_window_origin(&mut windows, &surf, x, y);
                     }
                 }
+                lua::Cmd::LoadShader { slot, vs, fs } => {
+                    if let Err(e) = render::load_shader_slot(&mut shaders, slot as usize, &vs, &fs) {
+                        eprintln!("yuka: {e}");
+                        script.error = Some(format!("shader: {e}"));
+                    }
+                }
+                lua::Cmd::ShaderUniform { slot, name, values, count } => {
+                    render::set_shader_uniform(&mut shaders, slot as usize, &name, &values[..count as usize]);
+                }
+                lua::Cmd::WindowShader { id, slot, params } => {
+                    if let Some(surf) = render::surface_by_id(&windows, id) {
+                        render::set_shader(&mut windows, &surf, slot, params);
+                    }
+                }
+                lua::Cmd::Cursor(name) => canvas_cursor = name,
                 lua::Cmd::Background(rgba) => {
                     clear = ray::Color {
                         r: (rgba >> 24) as u8,
@@ -1816,7 +1759,8 @@ fn main() {
         let forward_wheel = route.wheel;
         let scroll_to_client = route.fingers;
 
-        render::prune_dead(&mut windows);
+        closed_ids.clear();
+        render::prune_dead(&mut windows, &mut closed_ids);
         // The view lands on whole pixels whatever moved it: keys, wheel, middle drag,
         // trackpad, or a zoom reset that changed the scale without touching the pan. Applied
         // as the 3D camera is built rather than written back into cam, so no code path can
@@ -2332,8 +2276,31 @@ fn main() {
                         None => cursor::set_arrow(cur),
                     }
                 }
-                // A surface whose pixels we have not seen yet, and empty canvas.
-                _ => cursor::set_arrow(cur),
+                // A surface whose pixels we have not seen yet, and empty canvas: the scripts'
+                // cursor (yk.set_cursor), looked up in the theme once per name. "default" and a
+                // name the theme does not have are our own arrow.
+                _ => {
+                    let at = match canvas_cursors.iter().position(|(n, _)| *n == canvas_cursor) {
+                        Some(at) => at,
+                        None => {
+                            let found = if canvas_cursor == "default" {
+                                None
+                            } else {
+                                xcursor::load(&canvas_cursor, 0)
+                            };
+                            if found.is_none() && canvas_cursor != "default" {
+                                eprintln!("yuka: no theme cursor for {canvas_cursor}, using our own");
+                            }
+                            canvas_cursors.push((canvas_cursor.clone(), found));
+                            canvas_cursors.len() - 1
+                        }
+                    };
+                    match canvas_cursors[at].1.as_ref() {
+                        // Keys past the client's named cursors, so the two caches never collide.
+                        Some(image) => cursor::set_named(cur, CANVAS_CURSOR_KEY + at as u32, image),
+                        None => cursor::set_arrow(cur),
+                    }
+                }
             }
         }
 
@@ -2402,7 +2369,7 @@ fn main() {
             );
             // The stop goes even when the pointer has wandered off the window, because a
             // client left holding an open sequence is the thing being fixed.
-            if forward_wheel || scroll_to_client || scroll_ended {
+            if forward_wheel || scroll_to_client.is_some() || scroll_ended {
                 forward_scroll(
                     &mut state,
                     &ptr,
@@ -2451,14 +2418,7 @@ fn main() {
 
         ray::begin_drawing();
         ray::clear_background(clear);
-        render::draw_windows(
-            &windows,
-            cam3d,
-            shader,
-            alpha_loc,
-            swizzle_loc,
-            fade_loc,
-        );
+        render::draw_windows(&windows, cam3d, &shaders, start.elapsed().as_secs_f32());
         // The scripts' own drawing over the windows, overlays included. What the engine knows
         // that they want drawn is gathered only on the frames they ask for it.
         let (want_inspect, want_pad) = lua::wants(&script);
@@ -2467,7 +2427,7 @@ fn main() {
         } else {
             inspect_list.clear();
         }
-        let pad_view = if want_pad { touchpad.as_ref().map(|tp| touch::view(tp, &set)) } else { None };
+        let pad_view = if want_pad { pad_now } else { None };
         lua::draw(&mut script, cam3d, &mut inspect_list, pad_view);
         // Scripts that would not load or run say so on screen, since the log may be on a tty
         // nobody is looking at.
@@ -2513,7 +2473,7 @@ fn main() {
     if let Some(c) = cursor.as_mut() {
         cursor::destroy(c);
     }
-    ray::unload_shader(shader);
+    render::shaders_destroy(&mut shaders);
     ray::close_window();
     // Release the session last: logind restores our VT to a text console when the
     // connection goes.

@@ -16,7 +16,7 @@
 
 use crate::camera;
 use crate::egl::{self, Egl, EglImage};
-use crate::ray::{self, Shader, Vector3};
+use crate::ray::{self, Vector3};
 use crate::wl::state::{self, Keep, State};
 use smithay::reexports::wayland_server::backend::ObjectId;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -118,6 +118,10 @@ pub struct Windows {
     // Whether to draw what the client padded around its window, which is where its shadow and
     // its rounded corners live. See draw_windows.
     pub shadow: Vec<bool>,
+    // Which shader slot draws this window (0 is the built-in one), and four numbers of the
+    // scripts' own for it, handed to the shader as windowParams.
+    pub shader: Vec<u8>,
+    pub params: Vec<[f32; 4]>,
     pub maximized: Vec<bool>,
     // And the canvas point its visible top-left is pinned to while it is. Held every frame
     // rather than set once, because the offset between a surface and its visible top-left is
@@ -206,6 +210,8 @@ pub fn windows_new() -> Windows {
         filter: Vec::new(),
         alpha: Vec::new(),
         shadow: Vec::new(),
+        shader: Vec::new(),
+        params: Vec::new(),
         maximized: Vec::new(),
         max_x: Vec::new(),
         max_y: Vec::new(),
@@ -512,7 +518,7 @@ pub fn surface_by_id(windows: &Windows, id: u64) -> Option<WlSurface> {
 // Remove windows whose surface has died (client closed), freeing any shm
 // texture we own. dmabuf textures belong to the cache and its buffer_destroyed
 // path, so we do not touch them here.
-pub fn prune_dead(windows: &mut Windows) {
+pub fn prune_dead(windows: &mut Windows, closed: &mut Vec<u64>) {
     let mut i = 0;
     while i < windows.surface.len() {
         if windows.surface[i].is_alive() {
@@ -521,6 +527,9 @@ pub fn prune_dead(windows: &mut Windows) {
         }
         if windows.owns[i] && windows.tex_id[i] != 0 {
             ray::unload_texture(windows.tex_id[i]);
+        }
+        if !child(windows, i) {
+            closed.push(windows.id[i]);
         }
         windows.surface.remove(i);
         windows.id.remove(i);
@@ -546,6 +555,8 @@ pub fn prune_dead(windows: &mut Windows) {
         windows.filter.remove(i);
         windows.alpha.remove(i);
         windows.shadow.remove(i);
+        windows.shader.remove(i);
+        windows.params.remove(i);
         windows.maximized.remove(i);
         windows.max_x.remove(i);
         windows.max_y.remove(i);
@@ -744,6 +755,14 @@ pub fn hold_maximized(windows: &mut Windows) {
 // whether it is stretched to the size a resize is asking for.
 // Any animation of these is the scripts' too; this only stores what they arrived at. Popups and
 // subsurfaces take their parent's look when they are placed (sync_children).
+// Which shader draws a window and the four numbers handed to it (yk.window_shader).
+pub fn set_shader(windows: &mut Windows, surface: &WlSurface, slot: u8, params: [f32; 4]) {
+    if let Some(i) = index_of(windows, surface) {
+        windows.shader[i] = slot;
+        windows.params[i] = params;
+    }
+}
+
 // How far a window is lifted, 0 for one we do not hold.
 pub fn window_lift(windows: &Windows, surface: &WlSurface) -> f32 {
     index_of(windows, surface).map(|i| windows.z[i]).unwrap_or(0.0)
@@ -1001,6 +1020,8 @@ pub fn sync_children(windows: &mut Windows) {
         windows.order[j] = windows.order[parent];
         windows.alpha[j] = windows.alpha[parent];
         windows.shadow[j] = windows.shadow[parent];
+        windows.shader[j] = windows.shader[parent];
+        windows.params[j] = windows.params[parent];
         windows.placed[j] = true;
     }
 
@@ -1066,6 +1087,8 @@ pub fn sync_children(windows: &mut Windows) {
         windows.order[j] = windows.order[parent];
         windows.alpha[j] = windows.alpha[parent];
         windows.shadow[j] = windows.shadow[parent];
+        windows.shader[j] = windows.shader[parent];
+        windows.params[j] = windows.params[parent];
         windows.placed[j] = true;
     }
 }
@@ -1152,6 +1175,8 @@ fn store_entry(
             windows.filter.push(FILTER_UNSET);
             windows.alpha.push(1.0);
             windows.shadow.push(true);
+            windows.shader.push(0);
+            windows.params.push([0.0; 4]);
             windows.maximized.push(false);
             windows.max_x.push(0.0);
             windows.max_y.push(0.0);
@@ -1454,6 +1479,8 @@ pub fn destroy_owned(windows: &mut Windows) {
     windows.filter.clear();
     windows.alpha.clear();
     windows.shadow.clear();
+    windows.shader.clear();
+    windows.params.clear();
     windows.maximized.clear();
     windows.max_x.clear();
     windows.max_y.clear();
@@ -1469,17 +1496,110 @@ pub fn destroy_owned(windows: &mut Windows) {
 }
 
 //
-// Draw
+// Shaders
+//
+// Slots the scripts load window shaders into (yk.shader), by number. Slot 0 is the built-in
+// shader until a script replaces it. Every window shader is handed the same uniforms, and
+// declares whichever it uses:
+//
+//   sampler2D texture0, vec4 colDiffuse    raylib's own
+//   float swizzleBgra                      1 for shm buffers (BGRA), 0 for dmabuf
+//   float alphaBlend                       0; 1 forces opaque
+//   float windowAlpha                      the window's opacity (yk.window_look)
+//   vec4 windowParams                      the window's four numbers (yk.window_shader)
+//   vec2 windowSize                        drawn size in canvas units
+//   float time                             seconds since yuka started
+//
+// plus any the scripts set on the slot with yk.shader_uniform.
 //
 
-pub fn draw_windows(
-    windows: &Windows,
-    cam3d: ray::Camera3D,
-    shader: Shader,
+pub const SHADER_SLOTS: usize = 16;
+
+pub struct ShaderSlot {
+    pub shader: ray::Shader,
     alpha_loc: i32,
     swizzle_loc: i32,
     fade_loc: i32,
-) {
+    params_loc: i32,
+    size_loc: i32,
+    time_loc: i32,
+    // Uniforms the scripts set on this slot: name, location, value, how many floats.
+    globals: Vec<(String, i32, [f32; 4], u8)>,
+}
+
+pub struct Shaders {
+    pub slots: Vec<Option<ShaderSlot>>,
+}
+
+fn slot_from(shader: ray::Shader) -> ShaderSlot {
+    ShaderSlot {
+        shader,
+        alpha_loc: ray::shader_location(shader, "alphaBlend"),
+        swizzle_loc: ray::shader_location(shader, "swizzleBgra"),
+        fade_loc: ray::shader_location(shader, "windowAlpha"),
+        params_loc: ray::shader_location(shader, "windowParams"),
+        size_loc: ray::shader_location(shader, "windowSize"),
+        time_loc: ray::shader_location(shader, "time"),
+        globals: Vec::new(),
+    }
+}
+
+// The built-in shader in slot 0. It has to load: there is nothing to draw windows with
+// otherwise.
+pub fn shaders_new(vs: &str, fs: &str) -> Shaders {
+    let mut slots: Vec<Option<ShaderSlot>> = Vec::with_capacity(SHADER_SLOTS);
+    for _ in 0..SHADER_SLOTS {
+        slots.push(None);
+    }
+    slots[0] = Some(slot_from(ray::load_shader(vs, fs)));
+    Shaders { slots }
+}
+
+// Load a shader into a slot, replacing what was there. A shader that will not compile leaves
+// the slot as it was, so a typo costs the effect and never the windows.
+pub fn load_shader_slot(sh: &mut Shaders, slot: usize, vs: &str, fs: &str) -> Result<(), String> {
+    if slot >= SHADER_SLOTS {
+        return Err(format!("shader slot {slot} is past the last ({})", SHADER_SLOTS - 1));
+    }
+    let shader = ray::load_shader(vs, fs);
+    if !ray::shader_loaded(shader) {
+        return Err(format!("shader {vs} + {fs} did not compile, see the log"));
+    }
+    if let Some(old) = sh.slots[slot].take() {
+        ray::unload_shader(old.shader);
+    }
+    println!("yuka: shader slot {slot}: {vs} + {fs}");
+    sh.slots[slot] = Some(slot_from(shader));
+    Ok(())
+}
+
+pub fn set_shader_uniform(sh: &mut Shaders, slot: usize, name: &str, values: &[f32]) {
+    let Some(Some(s)) = sh.slots.get_mut(slot) else { return };
+    let n = values.len().min(4);
+    let mut v = [0.0f32; 4];
+    v[..n].copy_from_slice(&values[..n]);
+    if let Some(g) = s.globals.iter_mut().find(|g| g.0 == name) {
+        g.2 = v;
+        g.3 = n as u8;
+        return;
+    }
+    let loc = ray::shader_location(s.shader, name);
+    s.globals.push((name.to_string(), loc, v, n as u8));
+}
+
+pub fn shaders_destroy(sh: &mut Shaders) {
+    for slot in sh.slots.iter_mut() {
+        if let Some(s) = slot.take() {
+            ray::unload_shader(s.shader);
+        }
+    }
+}
+
+//
+// Draw
+//
+
+pub fn draw_windows(windows: &Windows, cam3d: ray::Camera3D, shaders: &Shaders, time: f32) {
     // Painter's order: stack order first, then z within a stack entry. Depth test is off,
     // so what is drawn last wins.
     //
@@ -1557,10 +1677,32 @@ pub fn draw_windows(
             (Vector3 { x: x + w, y: y + h, z }, u1, v1),
             (Vector3 { x, y: y + h, z }, u0, v1),
         ];
+        // The window's own slot, or the built-in one when that slot is empty.
+        let slot = shaders
+            .slots
+            .get(windows.shader[i] as usize)
+            .and_then(|s| s.as_ref())
+            .or(shaders.slots[0].as_ref());
+        let Some(sl) = slot else { continue };
+        let shader = sl.shader;
         ray::begin_shader_mode(shader);
-        ray::set_shader_float(shader, alpha_loc, 0.0);
-        ray::set_shader_float(shader, swizzle_loc, windows.swizzle[i]);
-        ray::set_shader_float(shader, fade_loc, windows.alpha[i]);
+        ray::set_shader_float(shader, sl.alpha_loc, 0.0);
+        ray::set_shader_float(shader, sl.swizzle_loc, windows.swizzle[i]);
+        ray::set_shader_float(shader, sl.fade_loc, windows.alpha[i]);
+        if sl.params_loc >= 0 {
+            ray::set_shader_vec(shader, sl.params_loc, &windows.params[i]);
+        }
+        if sl.size_loc >= 0 {
+            ray::set_shader_vec(shader, sl.size_loc, &[w, h]);
+        }
+        if sl.time_loc >= 0 {
+            ray::set_shader_float(shader, sl.time_loc, time);
+        }
+        for (_, loc, v, n) in sl.globals.iter() {
+            if *loc >= 0 {
+                ray::set_shader_vec(shader, *loc, &v[..*n as usize]);
+            }
+        }
         ray::draw_textured_quad(windows.tex_id[i], corners);
         ray::end_shader_mode();
     }

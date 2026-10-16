@@ -70,6 +70,27 @@ looks.tune = {
     -- (weston-editor does) would otherwise be shown stretched forever, and snapping back to
     -- the truth is better than lying about it indefinitely.
     stretch_hold_frames = 90,
+
+    -- Shaders, by slot. Slot 0 is what draws every window unless something says otherwise;
+    -- replace it to change how all of them look. Paths are from the directory yuka runs in,
+    -- and saving a shader reloads it like a script. A shader that will not compile leaves its
+    -- slot as it was and puts the error on screen. See src/render.rs (Shaders) for the
+    -- uniforms every window shader is handed.
+    shaders = {
+        [1] = { "shaders/window.vert", "shaders/desaturate.frag" },
+    },
+
+    -- How much colour drains out of windows you are not working in, through slot 1. 0 is off,
+    -- and draws them all with slot 0 exactly as before; 1 is grey.
+    unfocused_desaturate = 0.0,
+
+    -- The cursor over the canvas, by theme name: when nothing in particular is happening,
+    -- with Super held over a window (it can be picked up), while one is held, and while a
+    -- resize holds each corner. "default" is our own arrow.
+    cursor = "default",
+    cursor_grab = "grab",
+    cursor_held = "grabbing",
+    cursor_resize = { nw = "nw-resize", ne = "ne-resize", sw = "sw-resize", se = "se-resize" },
 }
 
 local tune = looks.tune
@@ -109,6 +130,41 @@ local seen = {}
 function looks.pick_up(id)
     lifted = id
     lifted_fresh = true
+end
+
+-- Which shader slot draws a window and the four numbers handed to it (windowParams). Slot 0 and
+-- nothing by default; this is the place to decide per window.
+function looks.window_shader(f, i)
+    if tune.unfocused_desaturate > 0 and f.win_id[i] ~= f.focused then
+        return 1, tune.unfocused_desaturate
+    end
+    return 0, 0
+end
+
+-- Load every shader in the table into its slot. Run as the scripts load, so a reload
+-- recompiles them.
+for slot, files in pairs(tune.shaders) do
+    yk.shader(slot, files[1], files[2])
+end
+
+-- The cursor over the canvas this frame, sent only when it changes.
+local cursor_now = nil
+
+local function canvas_cursor(f)
+    local want = tune.cursor
+    if f.resizing then
+        local v = f.resize_ey < 0 and "n" or "s"
+        local h = f.resize_ex < 0 and "w" or "e"
+        want = tune.cursor_resize[v .. h] or want
+    elseif f.dragging then
+        want = tune.cursor_held
+    elseif f.super and f.under then
+        want = tune.cursor_grab
+    end
+    if want ~= cursor_now then
+        cursor_now = want
+        yk.set_cursor(want)
+    end
 end
 
 -- Whether a window draws its shadow padding. One answer for all of them by default, but this
@@ -202,6 +258,7 @@ function looks.frame(f)
     notice_drop(f)
     notice_resize_end(f)
     find_covers(f)
+    canvas_cursor(f)
 
     local dt = math.min(f.dt, 0.05)
     local cam = view.cam
@@ -236,6 +293,8 @@ function looks.frame(f)
         end
 
         yk.window_look(id, alpha[id], z[id], looks.shadow(f, i), stretched(f, i, id))
+        local slot, p1, p2, p3, p4 = looks.window_shader(f, i)
+        yk.window_shader(id, slot, p1, p2, p3, p4)
     end
 
     -- Forget windows that have gone.

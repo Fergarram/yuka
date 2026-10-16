@@ -13,8 +13,11 @@ use std::ffi::{c_char, c_int, c_uint, c_void, CString};
 
 // rlgl pixel format for a 32 bit RGBA texture (bytes R,G,B,A).
 pub const PIXELFORMAT_R8G8B8A8: i32 = 7;
-// SetShaderValue uniform type for a single float.
+// SetShaderValue uniform types: one to four floats.
 pub const SHADER_UNIFORM_FLOAT: i32 = 0;
+pub const SHADER_UNIFORM_VEC2: i32 = 1;
+pub const SHADER_UNIFORM_VEC3: i32 = 2;
+pub const SHADER_UNIFORM_VEC4: i32 = 3;
 // rlgl primitive mode for quads.
 pub const RL_QUADS: i32 = 0x0007;
 // Camera projection: perspective.
@@ -114,6 +117,7 @@ extern "C" {
     );
     fn BeginShaderMode(shader: Shader);
     fn EndShaderMode();
+    fn rlGetShaderIdDefault() -> u32;
 
     // rlgl low level texture management.
     fn rlLoadTexture(
@@ -519,6 +523,24 @@ pub fn set_shader_float(shader: Shader, loc: i32, value: f32) {
             SHADER_UNIFORM_FLOAT,
         )
     };
+}
+
+// One to four floats into a uniform, as many as `values` holds.
+pub fn set_shader_vec(shader: Shader, loc: i32, values: &[f32]) {
+    let kind = match values.len() {
+        0 => return,
+        1 => SHADER_UNIFORM_FLOAT,
+        2 => SHADER_UNIFORM_VEC2,
+        3 => SHADER_UNIFORM_VEC3,
+        _ => SHADER_UNIFORM_VEC4,
+    };
+    unsafe { SetShaderValue(shader, loc, values.as_ptr() as *const c_void, kind) };
+}
+
+// Whether a shader is one we loaded. raylib answers a shader that will not compile or link
+// with its own default one rather than with an error, so that is the tell.
+pub fn shader_loaded(shader: Shader) -> bool {
+    shader.id != 0 && shader.id != unsafe { rlGetShaderIdDefault() }
 }
 
 pub fn begin_shader_mode(shader: Shader) {

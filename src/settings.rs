@@ -75,21 +75,6 @@ pub struct Settings {
     // Trackpad: two-finger gestures.
     // Canvas units panned per device unit of centroid travel.
     pub pan_sens: f32,
-    // And a multiplier on top of that for scroll that goes into a window instead of the
-    // canvas. Two-finger scroll is one gesture with two destinations, and the right speed
-    // for dragging a canvas around is not the right speed for scrolling a page: the canvas
-    // moves under your fingers one to one, while a page wants to move further than they
-    // do. 1.0 sends a window exactly what the canvas would have panned.
-    pub window_scroll_sens: f32,
-    // How much the minor axis of a finger scroll has to be doing, relative to the major one,
-    // before a window is told about it. Fingers travelling up a pad wander sideways, and a
-    // client that resolves one axis at a time can end up reading the wander instead of the
-    // scroll. Below this ratio the minor axis is held back and only the major one is sent;
-    // above it both go, so a genuinely diagonal gesture still scrolls a map or a wide page in
-    // two dimensions. Measured over the recent part of the gesture, not the whole of it, so
-    // turning a corner without lifting your fingers opens it up. 0 sends both axes always,
-    // which is what we did before this existed. The canvas is never locked either way.
-    pub scroll_axis_lock_frac: f32,
     // Travel before a pan or a pinch does anything, as a fraction of the pad. The pan
     // threshold doubles as the drift a tap is allowed.
     pub move_start_frac: f32,
@@ -218,8 +203,6 @@ pub fn defaults() -> Settings {
         tap_move_frac: 0.06,
 
         pan_sens: 0.12,
-        window_scroll_sens: 1.0,
-        scroll_axis_lock_frac: 0.5,
         move_start_frac: 0.012,
         pinch_start_frac: 0.02,
         swipe_frac: 0.15,
@@ -338,8 +321,6 @@ pub fn apply(set: &mut Settings, key: &str, value: &str, origin: &str) -> bool {
         "tap_max_secs" => f64_key!(tap_max_secs),
         "tap_move_frac" => f32_key!(tap_move_frac),
         "pan_sens" => f32_key!(pan_sens),
-        "window_scroll_sens" => f32_key!(window_scroll_sens),
-        "scroll_axis_lock_frac" => f32_key!(scroll_axis_lock_frac),
         "move_start_frac" => f32_key!(move_start_frac),
         "pinch_start_frac" => f32_key!(pinch_start_frac),
         "swipe_frac" => f32_key!(swipe_frac),
@@ -452,8 +433,6 @@ pub fn sanitise(set: &mut Settings) {
     set.pointer_start_frac = set.pointer_start_frac.max(0.0);
     set.pointer_slow_factor = set.pointer_slow_factor.clamp(0.0, 1.0);
     set.pointer_full_speed_frac = set.pointer_full_speed_frac.max(0.0);
-    set.window_scroll_sens = set.window_scroll_sens.max(0.0);
-    set.scroll_axis_lock_frac = set.scroll_axis_lock_frac.max(0.0);
     set.press_freeze_secs = set.press_freeze_secs.max(0.0);
     set.tap_max_secs = set.tap_max_secs.max(0.0);
     set.tap_move_frac = set.tap_move_frac.max(0.0);

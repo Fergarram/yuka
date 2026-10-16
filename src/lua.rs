@@ -38,6 +38,8 @@ use crate::settings::{self, Settings};
 
 // Where the scripts live, unless YUKA_LUA says otherwise.
 pub const DEFAULT_DIR: &str = "lua";
+// Where window shaders live, watched alongside the scripts.
+const SHADER_DIR: &str = "shaders";
 // The entry script, inside that directory.
 const ENTRY: &str = "init.lua";
 // How many entries a snapshot list is expected to carry. The tables are sized for this
@@ -91,6 +93,16 @@ pub enum Cmd {
     // client. Or give it back. Answers a maximize request; also works unasked.
     Maximize(u64, f32, f32, f32, f32),
     Unmaximize(u64),
+    // Load a window shader into a slot (0 is the built-in one), from a vertex and a fragment
+    // file. One that will not compile leaves the slot as it was.
+    LoadShader { slot: u8, vs: String, fs: String },
+    // Set a uniform on every window a slot draws: one to four floats.
+    ShaderUniform { slot: u8, name: String, values: [f32; 4], count: u8 },
+    // Which slot draws a window, and four numbers for it (windowParams).
+    WindowShader { id: u64, slot: u8, params: [f32; 4] },
+    // The cursor shown when no client has the pointer, by theme name ("default", "grabbing",
+    // "nwse-resize"...).
+    Cursor(String),
     // Start a program as a client of this compositor.
     Spawn(String),
 }
@@ -106,8 +118,10 @@ pub enum Cmd {
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Route {
     pub wheel: bool,
-    pub fingers: bool,
     pub pinch: bool,
+    // A finger scroll for the client under the pointer this frame, in the client's own units
+    // and sign, already shaped by the scripts (sensitivity, axis lock). None sends nothing.
+    pub fingers: Option<(f32, f32)>,
     // Hover, motion and buttons.
     pub pointer: bool,
     // Key presses. Modifiers and releases go regardless.
@@ -138,8 +152,10 @@ pub struct FrameIn<'a> {
     // Finger scroll this frame from whichever code drives the pad, positive up and right.
     pub scroll_x: f32,
     pub scroll_y: f32,
-    // The fingers making a scroll have lifted, as libinput reports it.
+    // The fingers making a scroll have lifted, as libinput reports it, and the scroll has
+    // stopped for any reason (lifted, or turned into something else), which ends a sequence.
     pub scroll_lifted: bool,
+    pub scroll_ended: bool,
     // Our own pad code is driving, and how many contacts it sees.
     pub pad_driving: bool,
     pub fingers: u32,
@@ -193,6 +209,10 @@ pub struct FrameIn<'a> {
     // Clients asking to be moved by their titlebar, with the screen point the press landed on.
     // A request the script does not accept with yk.accept_move is ignored.
     pub move_requests: &'a [(u64, f32, f32)],
+    // Windows that closed since the last frame.
+    pub closed: &'a [u64],
+    // Every contact on the trackpad as the gesture code sees it, when there is a pad.
+    pub touches: Option<&'a PadView>,
 }
 
 // What the functions a script calls write into. Lives in the VM's app data, so the
@@ -233,6 +253,12 @@ struct Lists {
     move_id: Table,
     move_x: Table,
     move_y: Table,
+    closed: Table,
+    touch_x: Table,
+    touch_y: Table,
+    touch_size: Table,
+    touch_resting: Table,
+    touch_faint: Table,
     mapped: Table,
     mapped_welcome: Table,
     activated: Table,
@@ -373,6 +399,12 @@ fn load_vm(dir: &str) -> mlua::Result<(Vm, Vec<(String, String)>)> {
         move_id: list("move_id")?,
         move_x: list("move_x")?,
         move_y: list("move_y")?,
+        closed: list("closed")?,
+        touch_x: list("touch_x")?,
+        touch_y: list("touch_y")?,
+        touch_size: list("touch_size")?,
+        touch_resting: list("touch_resting")?,
+        touch_faint: list("touch_faint")?,
         mapped: list("mapped")?,
         mapped_welcome: list("mapped_welcome")?,
         activated: list("activated")?,
@@ -410,14 +442,18 @@ fn config_pairs(t: &Table) -> mlua::Result<Vec<(String, String)>> {
     Ok(pairs)
 }
 
+// Newest modification time of the scripts and of the shaders they load, so saving either
+// reloads: a reload recompiles every shader the scripts ask for.
 fn newest_mtime(dir: &str) -> Option<SystemTime> {
     let mut newest: Option<SystemTime> = None;
-    let entries = std::fs::read_dir(dir).ok()?;
-    for entry in entries.flatten() {
-        let Ok(meta) = entry.metadata() else { continue };
-        let Ok(t) = meta.modified() else { continue };
-        if newest.map_or(true, |n| t > n) {
-            newest = Some(t);
+    for d in [dir, SHADER_DIR] {
+        let Ok(entries) = std::fs::read_dir(d) else { continue };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            let Ok(t) = meta.modified() else { continue };
+            if newest.map_or(true, |n| t > n) {
+                newest = Some(t);
+            }
         }
     }
     newest
@@ -516,12 +552,40 @@ fn register(lua: &Lua, yk: &Table) -> mlua::Result<()> {
         push(lua, Cmd::Spawn(cmd));
         Ok(())
     })?)?;
-    yk.set("route_scroll", lua.create_function(|lua, (wheel, fingers, pinch): (bool, bool, bool)| {
+    yk.set("route_scroll", lua.create_function(|lua, (wheel, pinch): (bool, bool)| {
         if let Some(mut io) = lua.app_data_mut::<Io>() {
             io.route.wheel = wheel;
-            io.route.fingers = fingers;
             io.route.pinch = pinch;
         }
+        Ok(())
+    })?)?;
+    yk.set("scroll_client", lua.create_function(|lua, (h, v): (f32, f32)| {
+        if let Some(mut io) = lua.app_data_mut::<Io>() {
+            io.route.fingers = Some((h, v));
+        }
+        Ok(())
+    })?)?;
+    yk.set("shader", lua.create_function(|lua, (slot, vs, fs): (u8, String, String)| {
+        push(lua, Cmd::LoadShader { slot, vs, fs });
+        Ok(())
+    })?)?;
+    yk.set("shader_uniform", lua.create_function(
+        |lua, (slot, name, a, b, c, d): (u8, String, f32, Option<f32>, Option<f32>, Option<f32>)| {
+            let count = 1 + b.is_some() as u8 + c.is_some() as u8 + d.is_some() as u8;
+            let values = [a, b.unwrap_or(0.0), c.unwrap_or(0.0), d.unwrap_or(0.0)];
+            push(lua, Cmd::ShaderUniform { slot, name, values, count });
+            Ok(())
+        },
+    )?)?;
+    yk.set("window_shader", lua.create_function(
+        |lua, (id, slot, a, b, c, d): (u64, u8, Option<f32>, Option<f32>, Option<f32>, Option<f32>)| {
+            let params = [a.unwrap_or(0.0), b.unwrap_or(0.0), c.unwrap_or(0.0), d.unwrap_or(0.0)];
+            push(lua, Cmd::WindowShader { id, slot, params });
+            Ok(())
+        },
+    )?)?;
+    yk.set("set_cursor", lua.create_function(|lua, name: String| {
+        push(lua, Cmd::Cursor(name));
         Ok(())
     })?)?;
     yk.set("route_input", lua.create_function(|lua, (pointer, keys): (bool, bool)| {
@@ -748,7 +812,6 @@ pub fn frame(s: &mut Script, f: &FrameIn, out: &mut Vec<Cmd>) -> Route {
     let vm = &s.vm;
 
     if let Some(mut io) = vm.lua.app_data_mut::<Io>() {
-        io.out.clear();
         io.route = Route::default();
         io.want_inspect = false;
         io.want_pad = false;
@@ -810,6 +873,7 @@ fn fill_snapshot(vm: &Vm, f: &FrameIn) -> mlua::Result<()> {
     t.raw_set("scroll_x", f.scroll_x)?;
     t.raw_set("scroll_y", f.scroll_y)?;
     t.raw_set("scroll_lifted", f.scroll_lifted)?;
+    t.raw_set("scroll_ended", f.scroll_ended)?;
     t.raw_set("pad_driving", f.pad_driving)?;
     t.raw_set("fingers", f.fingers)?;
     t.raw_set("pinch", f.pinch)?;
@@ -867,6 +931,21 @@ fn fill_snapshot(vm: &Vm, f: &FrameIn) -> mlua::Result<()> {
     fill(&l.win_rh, &w.restore_h)?;
     fill(&l.win_gw, &w.geo_w)?;
     fill(&l.win_gh, &w.geo_h)?;
+    t.raw_set("closed_count", f.closed.len())?;
+    fill(&l.closed, f.closed)?;
+    match f.touches {
+        Some(p) => {
+            t.raw_set("touch_count", p.count)?;
+            for i in 0..p.count {
+                l.touch_x.raw_set(i + 1, p.fingers[i].0)?;
+                l.touch_y.raw_set(i + 1, p.fingers[i].1)?;
+                l.touch_size.raw_set(i + 1, p.size[i].0)?;
+                l.touch_resting.raw_set(i + 1, p.resting[i])?;
+                l.touch_faint.raw_set(i + 1, p.faint[i])?;
+            }
+        }
+        None => t.raw_set("touch_count", 0)?,
+    }
     t.raw_set("move_count", f.move_requests.len())?;
     for (i, &(id, x, y)) in f.move_requests.iter().enumerate() {
         l.move_id.raw_set(i + 1, id)?;

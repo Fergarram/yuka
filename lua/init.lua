@@ -29,6 +29,12 @@
 --                                 how a window is drawn: opacity, lift (negative is nearer),
 --                                 shadow padding, and whether it is shown at the size a resize
 --                                 asks for; kept until changed, children follow
+--   yk.shader(slot, vs, fs)       load a window shader into a slot (0 is the built-in one)
+--   yk.shader_uniform(slot, name, a [, b, c, d])
+--                                 set a uniform on everything a slot draws
+--   yk.window_shader(id, slot [, p1, p2, p3, p4])
+--                                 which slot draws a window, and its windowParams
+--   yk.set_cursor(name)           the cursor over the canvas, by theme name
 --   yk.want_inspect(), yk.want_pad()
 --                                 gather engine data for yk.surfaces() / yk.pad() this frame
 --   yk.set_background(rgba)       the colour behind the canvas, 0xRRGGBBAA
@@ -42,8 +48,9 @@
 --   yk.to_screen(x, y, z)         a canvas point at lift z, on screen
 --   yk.surfaces()                 every drawable surface, for the labels overlay
 --   yk.pad()                      the trackpad as the gesture code sees it, or nil
---   yk.route_scroll(wheel, fingers, pinch)
---                                 whether each goes to the client under the pointer
+--   yk.route_scroll(wheel, pinch) whether each goes to the client under the pointer
+--   yk.scroll_client(h, v)        a finger scroll for that client this frame, in its own units
+--                                 and sign; the engine closes the sequence when it ends
 --   yk.route_input(pointer, keys) whether clients get the pointer and key presses
 --   yk.move_window(id, x, y)      put a window's visible top-left at a canvas point
 --   yk.maximize(id, x, y, w, h)   fill a canvas rectangle with a window
@@ -62,6 +69,7 @@
 --   wheel, hwheel, middle                  mouse wheels in notches, middle button held
 --   scroll_x, scroll_y                     finger scroll, positive up and right
 --   scroll_lifted                          libinput says the scrolling fingers lifted
+--   scroll_ended                           the scroll stopped for any reason
 --   pad_driving, fingers                   our pad code is driving, contacts on the pad
 --   pinch                                  pinch factor this frame, 1 for none
 --   swiping, swipe_progress                three fingers down, travel toward firing
@@ -87,6 +95,9 @@
 --   activated_count, activated[i]          windows another client asked to activate
 --   max_count, max_id[i], max_on[i]        windows asking to be maximized (on) or let go;
 --                                          unanswered ones are refused, or given their size back
+--   closed_count, closed[i]                windows that closed since the last frame
+--   touch_count, touch_x[i], touch_y[i], touch_size[i], touch_resting[i], touch_faint[i]
+--                                          every trackpad contact as fractions of the pad
 --   move_count, move_id[i], move_x[i], move_y[i]
 --                                          titlebar move requests and the press they quote
 --
@@ -113,6 +124,32 @@ local cfg = yk.config
 local tune = {
     -- Canvas pixels panned per horizontal wheel notch, at zoom 1.
     hwheel_pan = 60.0,
+
+    -- A multiplier on finger scroll that lands in a window rather than on the canvas. The same
+    -- gesture has two destinations: the canvas moves under your fingers one to one, while a
+    -- page usually wants to move further than they do. 1.0 sends a window exactly what the
+    -- canvas would have panned.
+    window_scroll_sens = 0.3,
+
+    -- How much the sideways part of a finger scroll has to be doing, relative to the part
+    -- going the way you meant, before a window hears about it at all.
+    --
+    -- Fingers travelling up a pad wander sideways, and some clients resolve one axis at a time
+    -- and end up reading the wander instead of the scroll: ghostty in mouse reporting mode,
+    -- which is what tmux puts it in, hears nothing at all when both axes arrive together. So
+    -- the axis that leads at the start of a gesture holds it alone, until the other one is
+    -- doing real work, at which point both are sent and a map or a wide page scrolls in two
+    -- dimensions as it should.
+    --
+    -- Judged over the last handful of frames rather than the whole gesture, so turning a
+    -- corner without lifting your fingers opens it up. 0 always sends both. Larger is
+    -- stickier: 1.0 wants the sideways travel to match the other axis before it counts. The
+    -- canvas is never locked either way.
+    scroll_axis_lock_frac = 0.25,
+
+    -- How much of the recent gesture the axis test remembers: the running travel is multiplied
+    -- by this once a frame, a window of roughly ten frames.
+    scroll_travel_decay = 0.9,
 }
 
 --
@@ -221,6 +258,33 @@ end
 -- window's scroll view takes the tail of your pan.
 local scroll = { active = false, to_client = false }
 
+-- Which axes a finger scroll toward a client is sending ("none", "v", "h" or "both"), and how far
+-- each has travelled lately, as a decaying sum.
+local lock = { axes = "none", tx = 0, ty = 0 }
+
+-- Shape this frame's finger scroll for a client: the axis lock, the sensitivity, and the
+-- client's sign, which is Wayland's (positive down) flipped by invert_scroll like the wheel.
+local function scroll_for_client(f)
+    lock.tx = lock.tx * tune.scroll_travel_decay + math.abs(f.scroll_x)
+    lock.ty = lock.ty * tune.scroll_travel_decay + math.abs(f.scroll_y)
+    -- The first frame decides which axis holds it, a tie going to the vertical.
+    if lock.axes == "none" then
+        lock.axes = math.abs(f.scroll_y) >= math.abs(f.scroll_x) and "v" or "h"
+    end
+    -- The minor axis takes it back once it is doing real work, and once both are going they
+    -- stay going: dropping an axis under a hand still moving is worse than carrying one.
+    local frac = tune.scroll_axis_lock_frac
+    if lock.axes == "v" and lock.tx >= lock.ty * frac then lock.axes = "both" end
+    if lock.axes == "h" and lock.ty >= lock.tx * frac then lock.axes = "both" end
+    local sign = cfg.invert_scroll == false and -1 or 1
+    local sens = tune.window_scroll_sens
+    local v = (lock.axes == "v" or lock.axes == "both") and f.scroll_y * sign * sens or 0
+    local h = (lock.axes == "h" or lock.axes == "both") and f.scroll_x * -sign * sens or 0
+    if v ~= 0 or h ~= 0 then
+        yk.scroll_client(h, v)
+    end
+end
+
 local function route(f)
     -- Super takes the wheel and the fingers for the canvas; otherwise they go to the window
     -- being worked in. Nothing focused means nothing is being worked in, so they go to the
@@ -245,7 +309,15 @@ local function route(f)
         scroll.active = false
     end
     local fingers_to_client = scroll.active and scroll.to_client
-    yk.route_scroll(on_client, fingers_to_client, on_client)
+    yk.route_scroll(on_client, on_client)
+    -- Values only for the side that owns the gesture: this frame can be both the last of a
+    -- canvas pan and the frame the stop goes out on.
+    if fingers_to_client and (f.scroll_x ~= 0 or f.scroll_y ~= 0) then
+        scroll_for_client(f)
+    end
+    if f.scroll_ended then
+        lock.axes, lock.tx, lock.ty = "none", 0, 0
+    end
 
     -- Super is the compositor's modifier. While it is held the canvas claims the pointer, so
     -- zooming and dragging never make the thing under the cursor react, and nothing typed

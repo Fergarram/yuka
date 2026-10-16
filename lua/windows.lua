@@ -54,6 +54,13 @@ windows.tune = {
     -- means to the right when there is room and whatever is nearest when there is not. Any of
     -- "right", "up", "left", "down"; empty for nearest and nothing else.
     spawn_order = { "right", "down" },
+
+    -- Where the keyboard goes when the window that had it closes.
+    --
+    --   "none"    nowhere: the next window waits to be clicked
+    --   "last"    the window you were in before it, if it is still on screen
+    --   "under"   whatever is under the pointer
+    focus_after_close = "none",
 }
 
 local tune = windows.tune
@@ -219,8 +226,45 @@ local function welcome(f, k)
     return true
 end
 
+-- The windows that had the keyboard, most recent last, for focus_after_close.
+local history = {}
+
+local function remember_focus(f)
+    local id = f.focused
+    if not id or history[#history] == id then return end
+    for k = #history, 1, -1 do
+        if history[k] == id then table.remove(history, k) end
+    end
+    history[#history + 1] = id
+    if #history > 32 then table.remove(history, 1) end
+end
+
+local function on_screen(f, i)
+    local lx, ty, rx, by = view.rect()
+    local x, y, w, h = f.win_x[i], f.win_y[i], f.win_w[i], f.win_h[i]
+    return x + w >= lx and x <= rx and y + h >= ty and y <= by
+end
+
+-- The focused window closed and the engine let go of the keyboard: hand it on, if asked to.
+local function focus_after_close(f)
+    if f.closed_count == 0 or f.focused then return end
+    if tune.focus_after_close == "under" and f.under then
+        yk.focus(f.under)
+    elseif tune.focus_after_close == "last" then
+        for k = #history, 1, -1 do
+            local i = windows.index(f, history[k])
+            if i and on_screen(f, i) then
+                yk.focus(history[k])
+                return
+            end
+        end
+    end
+end
+
 -- Windows that drew their first frame, and windows another client asked to activate.
 function windows.events(f)
+    remember_focus(f)
+    focus_after_close(f)
     if f.frame == 0 then
         for k = 1, #tune.startup do
             yk.spawn(tune.startup[k])
