@@ -87,16 +87,20 @@ pub struct Windows {
     pub geo_h: Vec<f32>,
     // 1.0 for shm (BGRA in memory), 0.0 for dmabuf (correct RGBA via EGL).
     pub swizzle: Vec<f32>,
-    // Live stretch during a resize drag, and 1.0 the rest of the time, which is every
-    // window almost always and every window at all unless resize_stretch is turned on.
+    // The quad's stretch, and 1.0 the rest of the time.
     //
     // A resize on Wayland is a request: we ask, the client renders, and its pixels arrive a
-    // round trip later. By default we wait for them, so the window is only ever the size the
-    // client has committed. With the stretch on, the quad is scaled here to where the cursor
-    // is while the client is asked for the same size in parallel, so the corner tracks your
-    // hand at the cost of showing content at a size it was not drawn at.
+    // round trip later. Unstretched, the window is only ever the size the client has
+    // committed. Stretched, the quad is scaled to the size being asked for (shown_w, shown_h)
+    // while the client catches up, so the corner tracks your hand at the cost of showing
+    // content at a size it was not drawn at. Whether a window is stretched is the scripts'
+    // (yk.window_look); the scale is worked out here every frame from what the client has
+    // committed, so its commits change the pixels without moving the corner.
     pub scale_x: Vec<f32>,
     pub scale_y: Vec<f32>,
+    pub stretch: Vec<bool>,
+    pub shown_w: Vec<f32>,
+    pub shown_h: Vec<f32>,
     // What we have told GL this texture's sampler is, so the choice is only pushed when it
     // actually changes rather than every frame. FILTER_UNSET whenever the texture is new and
     // nothing has been told to it yet, which is the one thing this column must never guess:
@@ -196,6 +200,9 @@ pub fn windows_new() -> Windows {
         swizzle: Vec::new(),
         scale_x: Vec::new(),
         scale_y: Vec::new(),
+        stretch: Vec::new(),
+        shown_w: Vec::new(),
+        shown_h: Vec::new(),
         filter: Vec::new(),
         alpha: Vec::new(),
         shadow: Vec::new(),
@@ -350,6 +357,9 @@ pub struct WinList {
     // The size a maximized window goes back to, and 0 for one that is not maximized.
     pub restore_w: Vec<f32>,
     pub restore_h: Vec<f32>,
+    // The size the client has committed, which is not the drawn size while stretched.
+    pub geo_w: Vec<f32>,
+    pub geo_h: Vec<f32>,
 }
 
 pub fn win_list_new() -> WinList {
@@ -364,6 +374,8 @@ pub fn win_list_new() -> WinList {
         z: Vec::with_capacity(32),
         restore_w: Vec::with_capacity(32),
         restore_h: Vec::with_capacity(32),
+        geo_w: Vec::with_capacity(32),
+        geo_h: Vec::with_capacity(32),
     }
 }
 
@@ -378,6 +390,8 @@ pub fn list_windows(windows: &Windows, out: &mut WinList) {
     out.z.clear();
     out.restore_w.clear();
     out.restore_h.clear();
+    out.geo_w.clear();
+    out.geo_h.clear();
     for i in 0..windows.surface.len() {
         if child(windows, i) || !drawable(windows, i) {
             continue;
@@ -394,6 +408,8 @@ pub fn list_windows(windows: &Windows, out: &mut WinList) {
         let max = windows.maximized[i];
         out.restore_w.push(if max { windows.restore_w[i] } else { 0.0 });
         out.restore_h.push(if max { windows.restore_h[i] } else { 0.0 });
+        out.geo_w.push(windows.geo_w[i]);
+        out.geo_h.push(windows.geo_h[i]);
     }
 }
 
@@ -437,18 +453,29 @@ pub fn geo_size(windows: &Windows, surface: &WlSurface) -> Option<(f32, f32)> {
     index_of(windows, surface).map(|i| (windows.geo_w[i], windows.geo_h[i]))
 }
 
-// Stretch a window without telling it. Only for the duration of a resize drag: the
-// texture is the old size, so the content is scaled, and a window left like this would
-// stay wrong until its next commit.
-pub fn set_scale(windows: &mut Windows, surface: &WlSurface, sx: f32, sy: f32) {
+// The size a resize is asking for, which a stretched window is shown at.
+pub fn stretch_to(windows: &mut Windows, surface: &WlSurface, w: f32, h: f32) {
     if let Some(i) = index_of(windows, surface) {
-        windows.scale_x[i] = sx.max(0.01);
-        windows.scale_y[i] = sy.max(0.01);
+        windows.shown_w[i] = w;
+        windows.shown_h[i] = h;
+        rescale(windows, i);
     }
 }
 
-pub fn clear_scale(windows: &mut Windows, surface: &WlSurface) {
-    if let Some(i) = index_of(windows, surface) {
+// How big a window is on screen: the asked size while stretched, what the client committed
+// otherwise.
+pub fn shown_size(windows: &Windows, surface: &WlSurface) -> Option<(f32, f32)> {
+    index_of(windows, surface)
+        .map(|i| (windows.geo_w[i] * windows.scale_x[i], windows.geo_h[i] * windows.scale_y[i]))
+}
+
+fn rescale(windows: &mut Windows, i: usize) {
+    let (gw, gh) = (windows.geo_w[i], windows.geo_h[i]);
+    let (w, h) = (windows.shown_w[i], windows.shown_h[i]);
+    if windows.stretch[i] && w > 0.0 && h > 0.0 && gw > 0.0 && gh > 0.0 {
+        windows.scale_x[i] = (w / gw).max(0.01);
+        windows.scale_y[i] = (h / gh).max(0.01);
+    } else {
         windows.scale_x[i] = 1.0;
         windows.scale_y[i] = 1.0;
     }
@@ -513,6 +540,9 @@ pub fn prune_dead(windows: &mut Windows) {
         windows.swizzle.remove(i);
         windows.scale_x.remove(i);
         windows.scale_y.remove(i);
+        windows.stretch.remove(i);
+        windows.shown_w.remove(i);
+        windows.shown_h.remove(i);
         windows.filter.remove(i);
         windows.alpha.remove(i);
         windows.shadow.remove(i);
@@ -710,7 +740,8 @@ pub fn hold_maximized(windows: &mut Windows) {
 }
 
 // How a window looks this frame, as the scripts say (yk.window_look): how opaque, how far it
-// is lifted toward the camera (negative z is nearer), and whether its shadow padding is drawn.
+// is lifted toward the camera (negative z is nearer), whether its shadow padding is drawn, and
+// whether it is stretched to the size a resize is asking for.
 // Any animation of these is the scripts' too; this only stores what they arrived at. Popups and
 // subsurfaces take their parent's look when they are placed (sync_children).
 // How far a window is lifted, 0 for one we do not hold.
@@ -718,11 +749,20 @@ pub fn window_lift(windows: &Windows, surface: &WlSurface) -> f32 {
     index_of(windows, surface).map(|i| windows.z[i]).unwrap_or(0.0)
 }
 
-pub fn set_look(windows: &mut Windows, surface: &WlSurface, alpha: f32, z: f32, shadow: bool) {
+pub fn set_look(
+    windows: &mut Windows,
+    surface: &WlSurface,
+    alpha: f32,
+    z: f32,
+    shadow: bool,
+    stretch: bool,
+) {
     if let Some(i) = index_of(windows, surface) {
         windows.alpha[i] = alpha.clamp(0.0, 1.0);
         windows.z[i] = z;
         windows.shadow[i] = shadow;
+        windows.stretch[i] = stretch;
+        rescale(windows, i);
     }
 }
 
@@ -1106,6 +1146,9 @@ fn store_entry(
             windows.swizzle.push(swizzle);
             windows.scale_x.push(1.0);
             windows.scale_y.push(1.0);
+            windows.stretch.push(false);
+            windows.shown_w.push(0.0);
+            windows.shown_h.push(0.0);
             windows.filter.push(FILTER_UNSET);
             windows.alpha.push(1.0);
             windows.shadow.push(true);
@@ -1405,6 +1448,9 @@ pub fn destroy_owned(windows: &mut Windows) {
     windows.swizzle.clear();
     windows.scale_x.clear();
     windows.scale_y.clear();
+    windows.stretch.clear();
+    windows.shown_w.clear();
+    windows.shown_h.clear();
     windows.filter.clear();
     windows.alpha.clear();
     windows.shadow.clear();

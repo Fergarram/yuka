@@ -50,10 +50,6 @@ const SHOT_FRAME: u32 = 200;
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
 const BTN_MIDDLE: u32 = 0x112;
-// How long to keep a released resize stretched while waiting for the client to commit
-// the size we asked for. A client that ignores the ask gets snapped back after this, so
-// a stretched window is never left lying about its size.
-const RESIZE_SETTLE_FRAMES: u32 = 90;
 // How often to look for a saved script. Once a second is instant to a human hitting
 // save, and 60 directory reads a minute is nothing next to a frame.
 const SETTINGS_POLL_FRAMES: u32 = 60;
@@ -132,10 +128,10 @@ struct Drag {
 // whatever size it has committed. The corner reaches your cursor when the client says it
 // has, which means nothing on screen is ever a size the window is not.
 //
-// resize_stretch trades that away for a corner that tracks your hand exactly, by scaling the
-// quad to the cursor while the client catches up. Off by default: the cost is showing content
-// at a size it was not drawn at, and having to take the difference back whenever the client
-// declines to follow.
+// A stretch trades that away for a corner that tracks your hand exactly, by scaling the quad
+// to the cursor while the client catches up. Whether to is the scripts' (looks.lua); the size
+// being asked for is handed to render::stretch_to every frame either way, and only shows when
+// the window is stretched.
 //
 // Sizes are computed from where the drag was grabbed rather than accumulated per frame, so
 // nothing drifts, and they are recomputed against whatever the client has actually committed,
@@ -192,15 +188,6 @@ const RESIZE_STUCK_COMMITS: u32 = 5;
 // cells and a pixel of rounding is not movement.
 const RESIZE_PROGRESS_PX: f32 = 4.0;
 
-// A resize that has been released and asked for, waiting for the client to answer so the
-// stretch can come off.
-struct ResizeSettle {
-    surface: WlSurface,
-    // The size the client was drawing when we asked. Any change from this means it has
-    // answered, whatever it decided.
-    was: (f32, f32),
-    frames: u32,
-}
 
 extern "C" fn on_signal(_sig: c_int) {
     RUNNING.store(false, Ordering::Relaxed);
@@ -870,7 +857,6 @@ fn forward_keys(
 fn maximize_window(
     windows: &mut Windows,
     state: &State,
-    resize_settle: &mut Option<ResizeSettle>,
     surf: &WlSurface,
     x: f32,
     y: f32,
@@ -883,12 +869,6 @@ fn maximize_window(
     {
         render::maximize(windows, surf, x, y, ox, oy, ow, oh);
     }
-    // A stretch still showing from a resize would pull the window off the shape we are about to
-    // give it.
-    if resize_settle.as_ref().map(|st| &st.surface) == Some(surf) {
-        *resize_settle = None;
-    }
-    render::clear_scale(windows, surf);
     render::front(windows, surf);
     render::set_window_origin(windows, surf, x, y);
     wl::state::maximize_toplevel(state, surf, w.round() as i32, h.round() as i32, true);
@@ -1153,7 +1133,6 @@ fn main() {
     let mut drag: Option<Drag> = None;
     // Active Super+right-drag resize, if any, and one released and waiting to be answered.
     let mut resize: Option<Resize> = None;
-    let mut resize_settle: Option<ResizeSettle> = None;
 
     // Programs the scripts started, killed on the way out.
     let mut children: Vec<Child> = Vec::new();
@@ -1698,6 +1677,7 @@ fn main() {
                     .as_ref()
                     .filter(|r| r.right_button)
                     .and_then(|r| render::window_id(&windows, &r.surface).map(|id| (id, r.edge_x, r.edge_y))),
+                stretching: resize.as_ref().and_then(|r| render::window_id(&windows, &r.surface)),
                 zoom: cam.zoom,
                 cx: cam.cx,
                 cy: cam.cy,
@@ -1766,9 +1746,9 @@ fn main() {
                 }
                 lua::Cmd::BeginResize(id, ex, ey) => begin_resize = Some((id, ex, ey)),
                 lua::Cmd::ResizeCorner(ex, ey) => resize_corner = Some((ex, ey)),
-                lua::Cmd::WindowLook(id, alpha, z, shadow) => {
+                lua::Cmd::WindowLook { id, alpha, z, shadow, stretch } => {
                     if let Some(surf) = render::surface_by_id(&windows, id) {
-                        render::set_look(&mut windows, &surf, alpha, z, shadow);
+                        render::set_look(&mut windows, &surf, alpha, z, shadow, stretch);
                     }
                 }
                 lua::Cmd::Maximize(id, x, y, w, h) => {
@@ -1776,7 +1756,6 @@ fn main() {
                         maximize_window(
                             &mut windows,
                             &state,
-                            &mut resize_settle,
                             &surf,
                             x,
                             y,
@@ -1898,13 +1877,9 @@ fn main() {
                     render::geo_size(&windows, &surf),
                     render::window_origin(&windows, &surf),
                 ) {
-                    // Same housekeeping the Super path does: a window still settling from
-                    // the last resize is carrying a stretch, and measuring a new drag
-                    // against a stretched window makes it jump.
-                    if resize_settle.as_ref().map(|st| &st.surface) == Some(&surf) {
-                        resize_settle = None;
-                    }
-                    render::clear_scale(&mut windows, &surf);
+                    // A stretch still held from the last resize starts from the window's real
+                    // size, or measuring the new drag against it makes it jump.
+                    render::stretch_to(&mut windows, &surf, w, h);
                     resize = Some(Resize {
                         surface: surf,
                         grab_x: gx,
@@ -1955,11 +1930,8 @@ fn main() {
             if let Some(root) = root {
                 if let Some((gx, gy)) = camera::screen_to_plane(cam3d, sxp, syp, 0.0) {
                     if let Some((w, h)) = render::geo_size(&windows, &root) {
-                        // A window still settling from a previous resize starts fresh.
-                        if resize_settle.as_ref().map(|s| &s.surface) == Some(&root) {
-                            resize_settle = None;
-                        }
-                        render::clear_scale(&mut windows, &root);
+                        // A window still stretched from a previous resize starts fresh.
+                        render::stretch_to(&mut windows, &root, w, h);
                         let (ox, oy) = render::window_origin(&windows, &root).unwrap_or((0.0, 0.0));
                         if debug_input {
                             println!(
@@ -2087,20 +2059,15 @@ fn main() {
             let held = if r.right_button { ptr.right } else { ptr.left };
             match (held && alive, want) {
                 (true, Some((w, h))) => {
-                    // The quad shows where the cursor is, scaled against whatever the
-                    // client has committed so far, so its commits change the pixels
-                    // without moving the corner.
-                    // With the stretch off, nothing moves until the client answers, which
-                    // is the conventional behaviour and what trails your hand on a slow
-                    // client. Both are worth being able to feel, so it is a setting.
+                    // The size the cursor asks for, which a stretched window shows at once,
+                    // scaled against whatever the client has committed so far. Unstretched,
+                    // nothing moves until the client answers, which is the conventional
+                    // behaviour and what trails your hand on a slow client.
                     let (gw, gh) = render::geo_size(&windows, &r.surface).unwrap_or((w, h));
-                    if set.resize_stretch {
-                        render::set_scale(&mut windows, &r.surface, w / gw, h / gh);
-                    }
-                    // How big the window is on screen this frame: the size the cursor is
-                    // asking for while the stretch is showing it, and otherwise simply what
-                    // the client has committed.
-                    let (shown_w, shown_h) = if set.resize_stretch { (w, h) } else { (gw, gh) };
+                    render::stretch_to(&mut windows, &r.surface, w, h);
+                    // How big the window is on screen this frame.
+                    let (shown_w, shown_h) =
+                        render::shown_size(&windows, &r.surface).unwrap_or((gw, gh));
                     // Dragging a near edge keeps the far one still, which means the window
                     // has to travel as it grows. Against the size on screen, not the size we
                     // asked for: with the stretch off those are different numbers for as long
@@ -2166,32 +2133,14 @@ fn main() {
                         // drag that finished.
                         let (w, h) = want.unwrap_or(was);
                         wl::state::resize_toplevel(&state, &r.surface, w as i32, h as i32, false);
-                        if set.resize_stretch {
-                            resize_settle = Some(ResizeSettle {
-                                surface: r.surface.clone(),
-                                was,
-                                frames: 0,
-                            });
-                        }
+                        // A stretched window goes on showing the size it ended on while the
+                        // client answers; how long it waits is the scripts'.
+                        render::stretch_to(&mut windows, &r.surface, w, h);
                     }
                     resize = None;
                 }
             }
         }
-        // Take the stretch off once the client has committed something new, or give up
-        // waiting. A client that refuses the size (weston-editor does) leaves us
-        // stretching a window that is never going to grow, and snapping back to the
-        // truth is better than lying about it indefinitely.
-        if let Some(st) = resize_settle.as_mut() {
-            let now = render::geo_size(&windows, &st.surface);
-            st.frames += 1;
-            let answered = now.map(|n| n != st.was).unwrap_or(true);
-            if answered || st.frames >= RESIZE_SETTLE_FRAMES {
-                render::clear_scale(&mut windows, &st.surface);
-                resize_settle = None;
-            }
-        }
-
         // A window picked up: by Super+drag, or by its own titlebar. Whether, which, and how it
         // looks while held are the scripts' (yk.begin_move, yk.accept_move, yk.window_look);
         // following the pointer is the engine's.
@@ -2206,12 +2155,6 @@ fn main() {
                 // surface coordinates, and a client's geometry offset sits between the two.
                 let (ax, ay) = anchor.unwrap_or((sxp, syp));
                 let (gx, gy) = camera::screen_to_plane(cam3d, ax, ay, 0.0).unwrap_or((ox, oy));
-                // A window still settling from a resize is carrying a stretch, and measuring a
-                // drag against a stretched window makes it jump.
-                if resize_settle.as_ref().map(|st| &st.surface) == Some(&surf) {
-                    resize_settle = None;
-                }
-                render::clear_scale(&mut windows, &surf);
                 // Ours comes to the front, since picking a window up is the moment you did ask
                 // for it to be on top, and consumes the press so it is not also a click. A
                 // client's own titlebar drag is the same kind of act as a click in it: neither

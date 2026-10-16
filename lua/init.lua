@@ -25,9 +25,10 @@
 --   yk.begin_resize(id, ex, ey)   resize from the pointer holding a corner, 1 or -1 per axis
 --   yk.resize_corner(ex, ey)      change the corner the resize in progress holds
 --   yk.spawn(cmd)                 start a program as a client
---   yk.window_look(id, alpha, z, shadow)
+--   yk.window_look(id, alpha, z, shadow, stretch)
 --                                 how a window is drawn: opacity, lift (negative is nearer),
---                                 shadow padding; kept until changed, children follow
+--                                 shadow padding, and whether it is shown at the size a resize
+--                                 asks for; kept until changed, children follow
 --   yk.want_inspect(), yk.want_pad()
 --                                 gather engine data for yk.surfaces() / yk.pad() this frame
 --   yk.set_background(rgba)       the colour behind the canvas, 0xRRGGBBAA
@@ -69,6 +70,7 @@
 --   focused, hovered, under                window ids, or nil
 --   dragging, right_pressed                the window being moved, the right button went down
 --   resizing, resize_ex, resize_ey         our resize in progress and the corner it holds
+--   stretching                             any resize in progress, ours or a client's
 --   zoom, cx, cy, sw, sh                   the view and the screen
 --   dt, time_ms, frame                     the clock
 --   zoom_min, zoom_max, zoom_default       the engine's zoom limits
@@ -77,6 +79,7 @@
 --                                          zoom * cam_dist / (cam_dist + z)
 --   win_count, win_id[i], win_x[i], win_y[i], win_w[i], win_h[i], win_max[i], win_order[i],
 --   win_z[i], win_rw[i], win_rh[i]         ... lift, and the size a maximized window goes back to
+--   win_gw[i], win_gh[i]                   the size the client has committed (win_w is drawn)
 --                                          every toplevel, drawn rectangle in canvas units
 --   mapped_count, mapped[i], mapped_welcome[i]
 --                                          windows that drew their first frame, and whether

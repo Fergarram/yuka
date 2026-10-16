@@ -204,22 +204,9 @@ return {
 
     -- Smallest a Super+right-drag will ask a window to be, in canvas units. Clients
     -- that declared their own minimum through set_min_size keep it; this is the floor
-    -- for the ones that did not.
-    --
-    -- A drag stretches the window locally so the corner tracks the cursor exactly, and
-    -- asks the client for the same size in parallel so its contents keep reflowing. The
-    -- stretch shrinks toward 1.0 as the client's buffer catches up.
+    -- for the ones that did not. Whether a resize stretches the window while the client
+    -- catches up is looks.tune.resize_stretch.
     resize_min_px = 120.0,
-    -- Whether a drag stretches the window locally while the client catches up.
-    --
-    -- Off is the conventional Wayland behaviour and the default: the window is whatever size
-    -- the client last committed, so the corner reaches your cursor only once the client has
-    -- answered. Nothing on screen is ever a size the window is not, which means no overshoot
-    -- past a minimum the client will refuse, and no snap back when you let go.
-    --
-    -- On, the quad is scaled to your cursor while the client catches up, so the corner tracks
-    -- your hand exactly and the contents are resampled until the client re-renders into them.
-    resize_stretch = false,
     -- How often the client is asked to re-render during a drag: the next ask waits for it
     -- to answer the last one, or for this many frames, whichever comes first. This does
     -- not affect how the corner tracks your cursor, only how fresh the pixels inside are.

@@ -79,10 +79,10 @@ pub enum Cmd {
     BeginResize(u64, f32, f32),
     // Change which corner the resize in progress holds.
     ResizeCorner(f32, f32),
-    // How a window looks: opacity, lift toward the camera (negative z is nearer), and whether
-    // its shadow padding is drawn. Kept until changed; popups and subsurfaces follow their
+    // How a window looks: opacity, lift toward the camera (negative z is nearer), whether its
+    // shadow padding is drawn, and whether it is stretched to the size a resize asks for. Kept until changed; popups and subsurfaces follow their
     // parent.
-    WindowLook(u64, f32, f32, bool),
+    WindowLook { id: u64, alpha: f32, z: f32, shadow: bool, stretch: bool },
     // The colour behind the canvas, as 0xRRGGBBAA.
     Background(u32),
     // Put a window's visible top-left at a canvas point.
@@ -161,6 +161,8 @@ pub struct FrameIn<'a> {
     pub dragging: Option<u64>,
     pub right_pressed: bool,
     pub resizing: Option<(u64, f32, f32)>,
+    // Any resize in progress, ours or a client's edge drag.
+    pub stretching: Option<u64>,
     // The view, the screen, and the clock.
     pub zoom: f32,
     pub cx: f32,
@@ -226,6 +228,8 @@ struct Lists {
     win_z: Table,
     win_rw: Table,
     win_rh: Table,
+    win_gw: Table,
+    win_gh: Table,
     move_id: Table,
     move_x: Table,
     move_y: Table,
@@ -364,6 +368,8 @@ fn load_vm(dir: &str) -> mlua::Result<(Vm, Vec<(String, String)>)> {
         win_z: list("win_z")?,
         win_rw: list("win_rw")?,
         win_rh: list("win_rh")?,
+        win_gw: list("win_gw")?,
+        win_gh: list("win_gh")?,
         move_id: list("move_id")?,
         move_x: list("move_x")?,
         move_y: list("move_y")?,
@@ -485,8 +491,8 @@ fn register(lua: &Lua, yk: &Table) -> mlua::Result<()> {
         push(lua, Cmd::ResizeCorner(edge(ex), edge(ey)));
         Ok(())
     })?)?;
-    yk.set("window_look", lua.create_function(|lua, (id, alpha, z, shadow): (u64, f32, f32, bool)| {
-        push(lua, Cmd::WindowLook(id, alpha, z, shadow));
+    yk.set("window_look", lua.create_function(|lua, (id, alpha, z, shadow, stretch): (u64, f32, f32, bool, Option<bool>)| {
+        push(lua, Cmd::WindowLook { id, alpha, z, shadow, stretch: stretch.unwrap_or(false) });
         Ok(())
     })?)?;
     yk.set("want_inspect", lua.create_function(|lua, ()| {
@@ -819,6 +825,7 @@ fn fill_snapshot(vm: &Vm, f: &FrameIn) -> mlua::Result<()> {
     t.raw_set("under", f.under)?;
     t.raw_set("dragging", f.dragging)?;
     t.raw_set("right_pressed", f.right_pressed)?;
+    t.raw_set("stretching", f.stretching)?;
     match f.resizing {
         Some((id, ex, ey)) => {
             t.raw_set("resizing", id)?;
@@ -858,6 +865,8 @@ fn fill_snapshot(vm: &Vm, f: &FrameIn) -> mlua::Result<()> {
     fill(&l.win_z, &w.z)?;
     fill(&l.win_rw, &w.restore_w)?;
     fill(&l.win_rh, &w.restore_h)?;
+    fill(&l.win_gw, &w.geo_w)?;
+    fill(&l.win_gh, &w.geo_h)?;
     t.raw_set("move_count", f.move_requests.len())?;
     for (i, &(id, x, y)) in f.move_requests.iter().enumerate() {
         l.move_id.raw_set(i + 1, id)?;

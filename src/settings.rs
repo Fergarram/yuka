@@ -163,17 +163,6 @@ pub struct Settings {
     // Smallest a Super+right-drag will ask a window to be, in canvas units, for clients
     // that never declared a minimum of their own.
     pub resize_min_px: f32,
-    // Whether a resize drag stretches the window locally while it waits for the client.
-    //
-    // Off by default, which is what every other Wayland compositor does: the window is
-    // whatever size the client last committed, and the corner reaches the cursor when the
-    // client says it has. Nothing on screen is ever a size the window is not, so there is
-    // no overshoot to take back and no snap when the drag ends.
-    //
-    // On, the quad is scaled to the cursor while the client catches up. The corner tracks
-    // your hand exactly, at the cost of showing content at a size it was not drawn at, and
-    // of having to undo the difference whenever the client declines to follow.
-    pub resize_stretch: bool,
     // During a resize drag the quad already shows the size you are dragging to, so this
     // only paces how often the client is asked to re-render into it: the next ask waits
     // for the client to answer, or for this many frames, whichever comes first. Lower
@@ -257,7 +246,6 @@ pub fn defaults() -> Settings {
         debug_taps: false,
         debug_jumps: false,
         resize_min_px: 120.0,
-        resize_stretch: false,
         resize_wait_frames: 8,
         mips_when_minified: true,
         dmabuf_blit_below: 0.9,
@@ -368,14 +356,6 @@ pub fn apply(set: &mut Settings, key: &str, value: &str, origin: &str) -> bool {
         "button_split" => f32_key!(button_split),
         "wheel_step_px" => f32_key!(wheel_step_px),
         "resize_min_px" => f32_key!(resize_min_px),
-        "resize_stretch" => match value {
-            "true" | "1" | "yes" => set.resize_stretch = true,
-            "false" | "0" | "no" => set.resize_stretch = false,
-            _ => {
-                eprintln!("yuka: settings: {origin}: resize_stretch wants true or false");
-                return false;
-            }
-        },
         "resize_wait_frames" => match value.parse::<u32>() {
             Ok(v) => set.resize_wait_frames = v.max(1),
             Err(_) => {
