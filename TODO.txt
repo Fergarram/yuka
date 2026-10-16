@@ -14,7 +14,7 @@ BUGS:
 [ ] The idle finger on buttons area should not trigger in the middle of other gestures like the 3 finger swipe
 [ ] It seems that some new windows or sub-surfaces or whatever from a window parent render as new window using the nearest empty space thing
 [ ] Sometimes moving cursor near edges or corners doesn't really show the resize thing. We should handle that ourselves because it sucks.
-[ ] 3-finger double tap, when it focuses a window it should not move it up the z index
+[x] 3-finger double tap, when it focuses a window it should not move it up the z index
 
 ---
 
@@ -24,7 +24,7 @@ IMPROVEMENTS OR TESTS:
 
 [ ] is there a way to make the cursor movement not lag when the fps are low?
 
-[ ] mod+w for closing focused window
+[x] mod+w for closing focused window
 
 [ ] design three-finger gesture to grab windows when not in focus and be able to lift and resize with one hand
 
