@@ -76,6 +76,14 @@ pub enum Cmd {
     EatPress,
     // Let go of every window: keyboard, pointer and implicit grab.
     ReleaseAll,
+    // Pick a window up at the pointer, and whether it lifts toward the camera. Consumes the
+    // press. Follows the pointer until the left button comes up.
+    BeginMove(u64, bool),
+    // Resize a window from the pointer, holding a corner: per axis, 1 for the far edge (right,
+    // bottom) and -1 for the near one. Follows until the right button comes up.
+    BeginResize(u64, f32, f32),
+    // Change which corner the resize in progress holds.
+    ResizeCorner(f32, f32),
     // Start a program as a client of this compositor.
     Spawn(String),
 }
@@ -135,8 +143,11 @@ pub struct FrameIn<'a> {
     pub focused: Option<u64>,
     pub hovered: Option<u64>,
     pub under: Option<u64>,
-    // A window is being moved by a drag.
+    // A window is being moved by a drag, the right button went down, and the resize in
+    // progress, ours rather than a client's: window and the corner it holds.
     pub dragging: bool,
+    pub right_pressed: bool,
+    pub resizing: Option<(u64, f32, f32)>,
     // The view, the screen, and the clock.
     pub zoom: f32,
     pub cx: f32,
@@ -354,6 +365,11 @@ fn push(lua: &Lua, cmd: Cmd) {
     }
 }
 
+// An edge direction as the engine wants it: exactly -1 or 1.
+fn edge(v: f32) -> f32 {
+    if v < 0.0 { -1.0 } else { 1.0 }
+}
+
 fn debug_named(name: &str) -> mlua::Result<Debug> {
     match name {
         "labels" => Ok(Debug::Labels),
@@ -404,6 +420,18 @@ fn register(lua: &Lua, yk: &Table) -> mlua::Result<()> {
     })?)?;
     yk.set("release_all", lua.create_function(|lua, ()| {
         push(lua, Cmd::ReleaseAll);
+        Ok(())
+    })?)?;
+    yk.set("begin_move", lua.create_function(|lua, (id, lift): (u64, bool)| {
+        push(lua, Cmd::BeginMove(id, lift));
+        Ok(())
+    })?)?;
+    yk.set("begin_resize", lua.create_function(|lua, (id, ex, ey): (u64, f32, f32)| {
+        push(lua, Cmd::BeginResize(id, edge(ex), edge(ey)));
+        Ok(())
+    })?)?;
+    yk.set("resize_corner", lua.create_function(|lua, (ex, ey): (f32, f32)| {
+        push(lua, Cmd::ResizeCorner(edge(ex), edge(ey)));
         Ok(())
     })?)?;
     yk.set("spawn", lua.create_function(|lua, cmd: String| {
@@ -523,6 +551,19 @@ fn fill_snapshot(vm: &Vm, f: &FrameIn) -> mlua::Result<()> {
     t.raw_set("hovered", f.hovered)?;
     t.raw_set("under", f.under)?;
     t.raw_set("dragging", f.dragging)?;
+    t.raw_set("right_pressed", f.right_pressed)?;
+    match f.resizing {
+        Some((id, ex, ey)) => {
+            t.raw_set("resizing", id)?;
+            t.raw_set("resize_ex", ex)?;
+            t.raw_set("resize_ey", ey)?;
+        }
+        None => {
+            t.raw_set("resizing", Value::Nil)?;
+            t.raw_set("resize_ex", 0)?;
+            t.raw_set("resize_ey", 0)?;
+        }
+    }
 
     t.raw_set("zoom", f.zoom)?;
     t.raw_set("cx", f.cx)?;

@@ -283,43 +283,6 @@ fn focus_window(state: &mut State, focused: &mut Option<WlSurface>, next: Option
     *focused = next;
 }
 
-// Which corner of a window a point pulls on, as a direction per axis: 1 for the far edge
-// (right, bottom), -1 for the near one. split_x and split_y say where each axis divides, as a
-// fraction of the window, so 0.5 is down the middle and 0.25 puts the boundary a quarter of
-// the way in and hands three quarters of that axis to the far side.
-//
-// Measured from the window's own edges rather than tested against its bounds, so it still
-// answers once the cursor has left the window entirely, which it does for most of a drag.
-fn corner_at(
-    px: f32,
-    py: f32,
-    ox: f32,
-    oy: f32,
-    w: f32,
-    h: f32,
-    split_x: f32,
-    split_y: f32,
-) -> (f32, f32) {
-    (
-        if px < ox + w * split_x { -1.0 } else { 1.0 },
-        if py < oy + h * split_y { -1.0 } else { 1.0 },
-    )
-}
-
-// Where an axis divides for a drag currently holding a given side of it. The side being held
-// keeps `hold` of the axis, so the boundary sits out of its way: hold the far side and it
-// moves toward the near edge, and the other way round.
-//
-// Asked with the corner in force rather than the one the drag started on, which is what makes
-// it hysteresis instead of a one-time bias: crossing over re-homes to the new corner, whose
-// own boundary is then the same distance away on the other side. Between the two the corner
-// does not change at all, so with hold at 0.75 the middle half of the window is a band where
-// a drag simply keeps doing what it was doing.
-fn corner_split(start_edge: f32, hold: f32) -> f32 {
-    let hold = hold.clamp(0.5, 0.95);
-    if start_edge > 0.0 { 1.0 - hold } else { hold }
-}
-
 // Where the press with this serial landed and on which frame, or the current pointer if we
 // no longer have it. A client quotes the serial of the press that started a move or resize,
 // and that press is the only honest anchor for the drag. The frame comes back with it so the
@@ -1734,6 +1697,12 @@ fn main() {
                     .and_then(|s| render::window_id(&windows, &s)),
                 under,
                 dragging: drag.is_some(),
+                right_pressed: ptr.right_pressed,
+                // Only our own resize: a client dragging its own edge named the edge.
+                resizing: resize
+                    .as_ref()
+                    .filter(|r| r.right_button)
+                    .and_then(|r| render::window_id(&windows, &r.surface).map(|id| (id, r.edge_x, r.edge_y))),
                 zoom: cam.zoom,
                 cx: cam.cx,
                 cy: cam.cy,
@@ -1753,6 +1722,10 @@ fn main() {
             lua::frame(&mut script, &f, &mut cmds)
         };
         let mut reload_now = false;
+        // Grabs the scripts started this frame, picked up by the move and resize blocks below.
+        let mut begin_move: Option<(u64, bool)> = None;
+        let mut begin_resize: Option<(u64, f32, f32)> = None;
+        let mut resize_corner: Option<(f32, f32)> = None;
         for cmd in cmds.drain(..) {
             match cmd {
                 lua::Cmd::Reload => reload_now = true,
@@ -1795,6 +1768,9 @@ fn main() {
                     }
                 }
                 lua::Cmd::EatPress => pressed = false,
+                lua::Cmd::BeginMove(id, lift) => begin_move = Some((id, lift)),
+                lua::Cmd::BeginResize(id, ex, ey) => begin_resize = Some((id, ex, ey)),
+                lua::Cmd::ResizeCorner(ex, ey) => resize_corner = Some((ex, ey)),
                 lua::Cmd::ReleaseAll => release_all = true,
                 lua::Cmd::Spawn(cmd) => {
                     if let Some(child) = spawn_client(&server.socket_name, &cmd) {
@@ -2059,11 +2035,13 @@ fn main() {
         // mode you could be in without being told: a plain drag moved a window or worked in
         // it depending on a gesture made minutes earlier, with nothing on screen to say
         // which. One way to pick a window up, and it is the same everywhere.
-        let grab_windows = super_down;
-        if ptr.right_pressed && grab_windows && resize.is_none() {
-            if let Some((surf, ..)) = render::window_at(&windows, cam3d, sxp, syp) {
+        //
+        // When one starts, on which window and holding which corner is the scripts' call
+        // (yk.begin_resize); from here on it is mechanics.
+        if let (Some((id, edge_x, edge_y)), None) = (begin_resize.take(), resize.as_ref()) {
+            let root = render::surface_by_id(&windows, id);
+            if let Some(root) = root {
                 if let Some((gx, gy)) = camera::screen_to_plane(cam3d, sxp, syp, 0.0) {
-                    let root = wl::state::window_root(&mut state, &surf);
                     if let Some((w, h)) = render::geo_size(&windows, &root) {
                         // A window still settling from a previous resize starts fresh.
                         if resize_settle.as_ref().map(|s| &s.surface) == Some(&root) {
@@ -2071,21 +2049,6 @@ fn main() {
                         }
                         render::clear_scale(&mut windows, &root);
                         let (ox, oy) = render::window_origin(&windows, &root).unwrap_or((0.0, 0.0));
-                        // Which corner the drag holds, from the quadrant the press landed in.
-                        // Grab near the top left and the top left is what moves, the way every
-                        // other desktop does it, instead of always dragging the bottom right
-                        // corner however you grabbed the window.
-                        //
-                        // The opposite corner is what stays nailed down, and a near edge moving
-                        // means the window's origin travels as it grows, which the Resize block
-                        // already knows how to do for a client dragging its own edge.
-                        //
-                        // Always a corner, never a single edge. Splitting into nine rather than
-                        // four would add pure horizontal and vertical drags, at the cost of a
-                        // middle region where a drag resizes nothing at all.
-                        // An even split here: nothing has begun yet, so there is no quadrant
-                        // to favour. What it picks becomes the one favoured from now on.
-                        let (edge_x, edge_y) = corner_at(gx, gy, ox, oy, w, h, 0.5, 0.5);
                         if debug_input {
                             println!(
                                 "yuka: resize grabbed {:.0},{:.0} into {w:.0}x{h:.0}, holding the {} corner",
@@ -2126,34 +2089,18 @@ fn main() {
         }
         if let Some(r) = resize.as_mut() {
             let alive = r.surface.is_alive();
-            // Which corner the drag holds, re-tested every frame against the side of the
-            // window the cursor is on. The press decides where it starts and after that it
-            // follows your hand: cross the middle and the opposite corner takes over without
-            // letting go of the button.
-            //
-            // The consequence, chosen deliberately: shrinking inward eventually carries the
-            // cursor past the middle, the corner changes hands, and the window starts growing
-            // the other way instead of shrinking further. Going back the way you came undoes
-            // it, so it reads as pushing the window's edges around rather than as a mode.
+            // Which corner the drag holds can change without letting go: the scripts re-test it
+            // every frame (yk.resize_corner) and this re-seeds the drag when they move it.
             //
             // Only for our own drag. A client dragging its own edge named which edge that was,
             // and a request to move the right edge must not turn into moving the top one.
-            if alive && r.right_button {
+            let corner = resize_corner.take().filter(|_| alive && r.right_button);
+            if let Some((ex, ey)) = corner {
                 if let (Some((cx, cy)), Some((ow, oh)), Some((ox, oy))) = (
                     camera::screen_to_plane(cam3d, sxp, syp, 0.0),
                     render::geo_size(&windows, &r.surface),
                     render::window_origin(&windows, &r.surface),
                 ) {
-                    let (ex, ey) = corner_at(
-                        cx,
-                        cy,
-                        ox,
-                        oy,
-                        ow,
-                        oh,
-                        corner_split(r.edge_x, set.resize_corner_hold),
-                        corner_split(r.edge_y, set.resize_corner_hold),
-                    );
                     if ex != r.edge_x || ey != r.edge_y {
                         if debug_input {
                             println!(
@@ -2333,10 +2280,14 @@ fn main() {
             }
         }
 
-        if pressed && grab_windows && drag.is_none() {
-            if let Some((surf, ox, oy)) =
-                render::window_at(&windows, cam3d, sxp, syp)
-            {
+        // Super+drag picks a window up. Whether, which, and whether it lifts toward the camera
+        // are the scripts' (yk.begin_move); the press that started it is consumed, so it is not
+        // also focused or forwarded.
+        let grab = begin_move.take().filter(|_| drag.is_none());
+        if let Some((id, lift)) = grab {
+            let surf = render::surface_by_id(&windows, id);
+            let origin = surf.as_ref().and_then(|s| render::surface_origin(&windows, s));
+            if let (Some(surf), Some((ox, oy))) = (surf, origin) {
                 // Re-grabbing a still-settling window: cancel its settle.
                 settling.retain(|(s, ..)| s != &surf);
                 // Offset from the window origin to the grabbed point, captured
@@ -2347,17 +2298,7 @@ fn main() {
                 // and where it is.
                 unmaximize_for_drag(&mut windows, &state, &surf, cam3d, gx, gy);
                 let (ox, oy) = render::surface_origin(&windows, &surf).unwrap_or((ox, oy));
-                // In the overview, picking a window up lifts it toward the camera, which is
-                // the canvas idiom for having it in your hand and reads well when you can see
-                // the whole desk. At 1:1 it only comes to the front and stays on the plane: a
-                // lift there is perspective applied to something already filling the screen,
-                // so it swims rather than rises, and it takes the window off the pixel grid
-                // while you are close enough to watch that happen.
-                //
-                // Asked of the mode rather than of the zoom. They agree once a gesture has
-                // settled, but mid-pinch the zoom is somewhere in between and a drag started
-                // then would decide from a number that is still moving.
-                if cam.zoom < set.zoom_default {
+                if lift {
                     render::raise(&mut windows, &surf);
                 } else {
                     render::front(&mut windows, &surf);

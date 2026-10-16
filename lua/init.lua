@@ -21,6 +21,9 @@
 --   yk.front(id)                  bring a window to the top of the stack
 --   yk.eat_press()                this frame's left press goes no further
 --   yk.release_all()              let go of every window
+--   yk.begin_move(id, lift)       pick a window up at the pointer, consuming the press
+--   yk.begin_resize(id, ex, ey)   resize from the pointer holding a corner, 1 or -1 per axis
+--   yk.resize_corner(ex, ey)      change the corner the resize in progress holds
 --   yk.spawn(cmd)                 start a program as a client
 --   yk.route(wheel, fingers, pinch)
 --                                 whether each goes to the client under the pointer
@@ -42,7 +45,8 @@
 --   swipe_dx, swipe_dy, swipe_fired        their direction, and the lift that commits
 --   tap3                                   three fingers tapped twice
 --   focused, hovered, under                window ids, or nil
---   dragging                               a window is being moved
+--   dragging, right_pressed                a window is being moved, the right button went down
+--   resizing, resize_ex, resize_ey         our resize in progress and the corner it holds
 --   zoom, cx, cy, sw, sh                   the view and the screen
 --   dt, time_ms, frame                     the clock
 --   zoom_min, zoom_max, zoom_default       the engine's zoom limits
@@ -62,6 +66,7 @@ local keys = require("keys")
 local view = require("view")
 local windows = require("windows")
 local gestures = require("gestures")
+local grab = require("grab")
 
 yk.config = require("config")
 
@@ -251,7 +256,8 @@ function yk.frame(f)
     dispatch_keys(f)
     held_keys(f)
     route(f)
-    gestures.frame(f)
+    local eaten = gestures.frame(f)
+    grab.frame(f, eaten)
     view.step(f, f.pinch ~= 1, f.swiping)
     windows.drop_unseen_focus(f)
     view.finish()

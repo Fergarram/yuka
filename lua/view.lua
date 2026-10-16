@@ -148,6 +148,11 @@ function view.reset(sx, sy)
     view.zoom_at(cam.default / cam.zoom, sx or cam.sw * 0.5, sy or cam.sh * 0.5)
 end
 
+-- The canvas point under a screen point.
+function view.to_canvas(sx, sy)
+    return cam.cx + (sx - cam.sw * 0.5) / cam.zoom, cam.cy + (sy - cam.sh * 0.5) / cam.zoom
+end
+
 -- The visible canvas rectangle: left, top, right, bottom.
 function view.rect()
     local hw, hh = cam.sw * 0.5 / cam.zoom, cam.sh * 0.5 / cam.zoom

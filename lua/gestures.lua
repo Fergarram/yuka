@@ -147,7 +147,9 @@ end
 
 -- Super with a double click on a window brings it to you. It eats the press, so the second
 -- click cannot also pick the window up and move it out from under the view on its way there.
+-- Returns whether it did.
 local function double_click(f)
+    local eaten = false
     if f.pressed and f.super and not f.dragging and f.under then
         if f.time_ms - last_left_ms <= f.double_click_ms and last_left_id == f.under then
             last_left_ms, last_left_id = -100000, nil
@@ -156,6 +158,7 @@ local function double_click(f)
                 yk.front(f.under)
                 windows.go_to(f, i, false)
                 yk.eat_press()
+                eaten = true
             end
         else
             last_left_ms, last_left_id = f.time_ms, f.under
@@ -172,12 +175,15 @@ local function double_click(f)
             last_middle_ms = f.time_ms
         end
     end
+    return eaten
 end
 
+-- Returns whether the left press was taken, so nothing after this starts a drag from it.
 function gestures.frame(f)
     swipe(f)
-    double_click(f)
+    local eaten = double_click(f)
     tap(f)
+    return eaten
 end
 
 return gestures

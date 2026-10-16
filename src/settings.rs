@@ -255,16 +255,6 @@ pub struct Settings {
     // Perspective field of view in degrees. Larger means more parallax on a lifted
     // window.
     pub fov_deg: f32,
-    // How much of each axis the corner a resize started on keeps, while that resize lasts.
-    //
-    // A drag can change which corner it holds without letting go, decided by which side of
-    // the window the cursor is on. Splitting the window down the middle makes that too easy
-    // to trigger by accident: shrinking inward walks the cursor toward the middle, and
-    // crossing it hands the drag to the opposite corner just as you are getting somewhere.
-    // So the corner you grabbed keeps this much of each axis and the boundary moves out of
-    // its way. 0.5 is an even split and no bias at all; 0.75 gives the starting quadrant
-    // three quarters of the window in both directions.
-    pub resize_corner_hold: f32,
 }
 
 //
@@ -327,7 +317,6 @@ pub fn defaults() -> Settings {
         zoom_max: 8.0,
         zoom_default: 1.0,
         fov_deg: 40.0,
-        resize_corner_hold: 0.75,
     }
 }
 
@@ -458,7 +447,6 @@ pub fn apply(set: &mut Settings, key: &str, value: &str, origin: &str) -> bool {
         "zoom_max" => f32_key!(zoom_max),
         "zoom_default" => f32_key!(zoom_default),
         "fov_deg" => f32_key!(fov_deg),
-        "resize_corner_hold" => f32_key!(resize_corner_hold),
         "spawn_gap" => f32_key!(spawn_gap),
         "spawn_order" => {
             let mut order = [DIR_NONE; 4];

@@ -176,6 +176,8 @@ scripts (LuaJIT) in `lua/`:
   to a window, the 1:1 detent.
 - `lua/gestures.lua` says what the three-finger swipe and tap and the Super double
   clicks mean.
+- `lua/grab.lua` starts Super+drag moves and Super+right-drag resizes, and picks the
+  corner a resize holds.
 - `lua/windows.lua` decides focus: new windows, activation requests, a focused
   window leaving the view, and the programs started with yuka.
 - `lua/config.lua` holds the settings the engine itself reads (trackpad, rendering,
@@ -195,8 +197,7 @@ The canvas is driven with the Super key and the trackpad. Broadly: hold Super an
 two fingers pan and pinch the canvas, the wheel zooms, and a drag moves the window
 under the pointer (Super+right-drag resizes it); three fingers pan, pinch, and
 move between windows whatever the keyboard is doing; Super+Escape lets go of every
-window; Super+W asks the focused window to close. All of that lives in `lua/`,
-except Super+drag and Super+right-drag, which are still in `src/main.rs`.
+window; Super+W asks the focused window to close. All of that lives in `lua/`.
 
 ## Developing from macOS in a VM
 
