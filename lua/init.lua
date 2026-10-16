@@ -16,10 +16,12 @@
 --   yk.toggle_debug(name)         "labels", "fps" or "pad"
 --   yk.close(id)                  ask a window to close
 --   yk.screenshot()               save the frame to shot-<n>.png
---   yk.zoom_reset([x, y])         back to zoom_default, around a screen point
---   yk.zoom_at(factor, x, y)      scale the view, holding a screen point still
---   yk.pan(dx, dy)                move the view, in screen pixels
+--   yk.set_camera(cx, cy, zoom)   put the view here (view.lua does this for you)
+--   yk.focus(id)                  give a window the keyboard, nil for nobody
+--   yk.front(id)                  bring a window to the top of the stack
+--   yk.eat_press()                this frame's left press goes no further
 --   yk.release_all()              let go of every window
+--   yk.spawn(cmd)                 start a program as a client
 --   yk.route(wheel, fingers, pinch)
 --                                 whether each goes to the client under the pointer
 --   yk.key_down(code)             whether a key is held right now
@@ -30,23 +32,49 @@
 --   super, ctrl, alt, shift                modifiers held
 --   x, y                                   pointer in screen pixels, nil without one
 --   dx, dy                                 pointer motion this frame
+--   pressed, middle_pressed                left and middle press edges
 --   wheel, hwheel, middle                  mouse wheels in notches, middle button held
 --   scroll_x, scroll_y                     finger scroll, positive up and right
 --   scroll_lifted                          libinput says the scrolling fingers lifted
 --   pad_driving, fingers                   our pad code is driving, contacts on the pad
 --   pinch                                  pinch factor this frame, 1 for none
---   focused, hovered                       window ids, or nil
---   zoom, cx, cy, sw, sh, dt, frame        the view, screen size, frame time
+--   swiping, swipe_progress                three fingers down, travel toward firing
+--   swipe_dx, swipe_dy, swipe_fired        their direction, and the lift that commits
+--   tap3                                   three fingers tapped twice
+--   focused, hovered, under                window ids, or nil
+--   dragging                               a window is being moved
+--   zoom, cx, cy, sw, sh                   the view and the screen
+--   dt, time_ms, frame                     the clock
+--   zoom_min, zoom_max, zoom_default       the engine's zoom limits
+--   double_click_ms                        the double click gap
+--   win_count, win_id[i], win_x[i], win_y[i], win_w[i], win_h[i], win_max[i]
+--                                          every toplevel, drawn rectangle in canvas units
+--   mapped_count, mapped[i], mapped_welcome[i]
+--                                          windows that drew their first frame, and whether
+--                                          each is from the client with the keyboard
+--   activated_count, activated[i]          windows another client asked to activate
 --
 -- Ctrl+Alt+Backspace (quit) and Ctrl+Alt+Fn (switch VT) are the engine's and cannot
 -- be rebound: they are how you get out when a script is wrong.
 --
 
 local keys = require("keys")
+local view = require("view")
+local windows = require("windows")
+local gestures = require("gestures")
 
 yk.config = require("config")
 
 local cfg = yk.config
+
+--
+-- Tuning
+--
+
+local tune = {
+    -- Canvas pixels panned per horizontal wheel notch, at zoom 1.
+    hwheel_pan = 60.0,
+}
 
 --
 -- Bindings
@@ -117,7 +145,10 @@ bind("super+s", function() yk.screenshot() end)
 bind("super+w", function(f) yk.close(f.focused) end)
 
 -- Back to 1:1 around the middle of the screen.
-bind("super+0", function() yk.zoom_reset() end)
+bind("super+0", function()
+    view.stop()
+    view.reset()
+end)
 
 -- Lets go of every window and leaves the view exactly where it is. A key with no
 -- direction cannot say where to go, and made to guess it moved the canvas out from
@@ -133,8 +164,9 @@ local function held_keys(f)
     local zoom_in = yk.key_down(keys.equal) or yk.key_down(keys.kpplus)
     local zoom_out = yk.key_down(keys.minus) or yk.key_down(keys.kpminus)
     if zoom_in == zoom_out then return end
-    local step = 1 + (cfg.zoom_rate_per_sec or 2.0) * f.dt
-    yk.zoom_at(zoom_in and step or 1 / step, f.sw * 0.5, f.sh * 0.5)
+    local step = 1 + view.tune.zoom_rate_per_sec * f.dt
+    view.stop()
+    view.zoom_at(zoom_in and step or 1 / step, f.sw * 0.5, f.sh * 0.5)
 end
 
 --
@@ -176,30 +208,33 @@ local function route(f)
     local fingers_to_client = scroll.active and scroll.to_client
     yk.route(on_client, fingers_to_client, on_client)
 
-    -- What the canvas does with what is its own.
+    -- What the canvas does with what is its own. The wheel and a pinch are zooms of their
+    -- own, so whatever the view was travelling toward is not where it is going any more.
     local x, y = f.x or 0, f.y or 0
     if f.super or f.focused == nil then
         if f.wheel ~= 0 then
             local wheel = cfg.invert_scroll == false and f.wheel or -f.wheel
-            yk.zoom_at(1.15 ^ wheel, x, y)
+            view.stop()
+            view.zoom_at(1.15 ^ wheel, x, y)
         end
         if f.hwheel ~= 0 then
             local hwheel = cfg.invert_scroll == false and f.hwheel or -f.hwheel
-            yk.pan(hwheel * (cfg.hwheel_pan or 60.0), 0)
+            view.pan(hwheel * tune.hwheel_pan, 0)
         end
         if f.pinch ~= 1 then
-            yk.zoom_at(f.pinch, x, y)
+            view.stop()
+            view.zoom_at(f.pinch, x, y)
         end
     end
     -- A gesture that began on the canvas finishes on the canvas, whatever the keyboard has
     -- done since. The view moves against the fingers so the canvas travels with them.
     if scroll.active and not scroll.to_client then
-        yk.pan(-f.scroll_x, f.scroll_y)
+        view.pan(-f.scroll_x, f.scroll_y)
     end
     -- Super with the wheel held down drags the canvas; the grabbed point stays under the
     -- cursor because the view moves by exactly the cursor's delta.
     if f.super and f.middle then
-        yk.pan(-f.dx, -f.dy)
+        view.pan(-f.dx, -f.dy)
     end
 end
 
@@ -207,8 +242,17 @@ end
 -- Frame
 --
 
+-- The order matters where two things touch the same state: window events first, so a window
+-- that just opened is focused before anything asks; input next; then the view settles, and
+-- only once it has does a focused window that left it let go.
 function yk.frame(f)
+    view.begin(f)
+    windows.events(f)
     dispatch_keys(f)
     held_keys(f)
     route(f)
+    gestures.frame(f)
+    view.step(f, f.pinch ~= 1, f.swiping)
+    windows.drop_unseen_focus(f)
+    view.finish()
 end

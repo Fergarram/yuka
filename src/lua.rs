@@ -1,9 +1,10 @@
 //
 // Lua boundary
 //
-// The scripts are where yuka's behaviour lives: what a key does, where a scroll goes,
-// what the settings are. The engine runs them, hands them a snapshot of the frame, and
-// takes back a list of commands. Nothing in here decides anything.
+// The scripts are where yuka's behaviour lives: what a key does, what a gesture means,
+// where a scroll goes, how the view moves, which window gets focus. The engine runs
+// them, hands them a snapshot of the frame, and takes back a list of commands. Nothing
+// in here decides anything.
 //
 // Like the Smithay zone, this module is shaped by an external API: mlua wants its own
 // traits and reference counted handles, and they stay in here. What crosses out is
@@ -24,8 +25,9 @@
 
 use std::time::SystemTime;
 
-use mlua::{Function, Lua, Table, Value};
+use mlua::{Function, IntoLua, Lua, Table, Value};
 
+use crate::render::WinList;
 use crate::settings::{self, Settings};
 
 //
@@ -36,9 +38,9 @@ use crate::settings::{self, Settings};
 pub const DEFAULT_DIR: &str = "lua";
 // The entry script, inside that directory.
 const ENTRY: &str = "init.lua";
-// How many key events a frame is expected to carry. The snapshot arrays are sized for this
+// How many entries a snapshot list is expected to carry. The tables are sized for this
 // once and grow if a frame ever has more.
-const KEYS_HINT: usize = 16;
+const LIST_HINT: usize = 32;
 // Same count of keycodes input.rs tracks.
 const KEY_CODES: usize = crate::input::KEY_CODES;
 
@@ -55,27 +57,31 @@ pub enum Debug {
 }
 
 // What a script can ask the engine to do. Drained in order after each call.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum Cmd {
     // Re-read the scripts, as a save would.
     Reload,
     ToggleDebug(Debug),
-    // Ask a window to close. The handle is a render::Windows id.
+    // Ask a window to close. Handles are render::Windows ids.
     Close(u64),
     Screenshot,
-    // Back to the default zoom, around the middle of the screen or a screen point.
-    ZoomReset,
-    ZoomResetAt(f32, f32),
-    // Scale the view by a factor, holding a screen point still.
-    ZoomAt(f32, f32, f32),
-    // Move the view, in screen pixels. Positive x shows more of what is to the right.
-    Pan(f32, f32),
+    // Put the view here: canvas centre and zoom. The zoom is held to the engine's limits.
+    SetCamera(f32, f32, f32),
+    // Give the keyboard to a window, or to nothing.
+    Focus(Option<u64>),
+    // Bring a window to the top of the stack.
+    Front(u64),
+    // This frame's left press is the script's, and goes no further: no drag starts from it
+    // and no client hears it.
+    EatPress,
     // Let go of every window: keyboard, pointer and implicit grab.
     ReleaseAll,
+    // Start a program as a client of this compositor.
+    Spawn(String),
 }
 
 // Where this frame's scrolling and pinching go. true means the client under the pointer,
-// false means nobody: what the canvas does with it is a Cmd of its own.
+// false means nobody: what the canvas does with it is the script's own business.
 //
 // Only the destination. The protocol rules that come with sending to a client (axis
 // sequences that must be stopped, pinch sequences that must be ended) stay in the engine,
@@ -99,9 +105,12 @@ pub struct FrameIn<'a> {
     pub shift_down: bool,
     // Screen position of the pointer, when there is one.
     pub pointer: Option<(f32, f32)>,
-    // Pointer motion this frame, and the mouse's wheels and middle button.
+    // Pointer motion this frame, the left and middle button edges, the wheels and the middle
+    // button level.
     pub dx: f32,
     pub dy: f32,
+    pub pressed: bool,
+    pub middle_pressed: bool,
     pub wheel: f32,
     pub hwheel: f32,
     pub middle: bool,
@@ -115,17 +124,39 @@ pub struct FrameIn<'a> {
     pub fingers: u32,
     // Pinch factor this frame, 1.0 for none.
     pub pinch: f32,
-    // Window handles, or None.
+    // Three fingers: on the pad, how far toward firing (1 at the trigger), which way as a unit
+    // vector in screen sense, fired on lift, and tapped twice.
+    pub swiping: bool,
+    pub swipe_progress: f32,
+    pub swipe_dir: (f32, f32),
+    pub swipe_fired: bool,
+    pub tap3: bool,
+    // Window handles, or None. Under is the window beneath the pointer.
     pub focused: Option<u64>,
     pub hovered: Option<u64>,
-    // The view.
+    pub under: Option<u64>,
+    // A window is being moved by a drag.
+    pub dragging: bool,
+    // The view, the screen, and the clock.
     pub zoom: f32,
     pub cx: f32,
     pub cy: f32,
     pub sw: f32,
     pub sh: f32,
     pub dt: f32,
+    pub time_ms: u32,
     pub frame: u32,
+    // Engine settings the scripts also need to know.
+    pub zoom_min: f32,
+    pub zoom_max: f32,
+    pub zoom_default: f32,
+    pub double_click_ms: u32,
+    // Every toplevel on the canvas.
+    pub windows: &'a WinList,
+    // Windows that drew their first frame, with whether each came from the client that has
+    // the keyboard (or nothing had it), and windows another client asked to activate.
+    pub mapped: &'a [(u64, bool)],
+    pub activated: &'a [u64],
 }
 
 // What the functions a script calls write into. Lives in the VM's app data, so the
@@ -136,14 +167,29 @@ struct Io {
     held: Vec<bool>,
 }
 
+// The list tables inside the snapshot, kept so a frame refills them rather than making new
+// ones.
+struct Lists {
+    key_code: Table,
+    key_press: Table,
+    win_id: Table,
+    win_x: Table,
+    win_y: Table,
+    win_w: Table,
+    win_h: Table,
+    win_max: Table,
+    mapped: Table,
+    mapped_welcome: Table,
+    activated: Table,
+}
+
 // One loaded script set: the VM and the handles the frame call reuses, so a frame
 // allocates no tables.
 struct Vm {
     lua: Lua,
     frame_fn: Function,
     snap: Table,
-    key_code: Table,
-    key_press: Table,
+    lists: Lists,
 }
 
 pub struct Script {
@@ -235,12 +281,26 @@ fn load_vm(dir: &str) -> mlua::Result<(Vm, Vec<(String, String)>)> {
         _ => return Err(mlua::Error::RuntimeError("yk.config is not a table".into())),
     };
 
-    let snap = lua.create_table_with_capacity(0, 32)?;
-    let key_code = lua.create_table_with_capacity(KEYS_HINT, 0)?;
-    let key_press = lua.create_table_with_capacity(KEYS_HINT, 0)?;
-    snap.raw_set("key_code", key_code.clone())?;
-    snap.raw_set("key_press", key_press.clone())?;
-    Ok((Vm { lua, frame_fn, snap, key_code, key_press }, pairs))
+    let snap = lua.create_table_with_capacity(0, 64)?;
+    let list = |name: &str| -> mlua::Result<Table> {
+        let t = lua.create_table_with_capacity(LIST_HINT, 0)?;
+        snap.raw_set(name, t.clone())?;
+        Ok(t)
+    };
+    let lists = Lists {
+        key_code: list("key_code")?,
+        key_press: list("key_press")?,
+        win_id: list("win_id")?,
+        win_x: list("win_x")?,
+        win_y: list("win_y")?,
+        win_w: list("win_w")?,
+        win_h: list("win_h")?,
+        win_max: list("win_max")?,
+        mapped: list("mapped")?,
+        mapped_welcome: list("mapped_welcome")?,
+        activated: list("activated")?,
+    };
+    Ok((Vm { lua, frame_fn, snap, lists }, pairs))
 }
 
 // The config table flattened to the key and value strings settings.rs parses. Lists become
@@ -324,23 +384,30 @@ fn register(lua: &Lua, yk: &Table) -> mlua::Result<()> {
         push(lua, Cmd::Screenshot);
         Ok(())
     })?)?;
-    yk.set("zoom_reset", lua.create_function(|lua, (x, y): (Option<f32>, Option<f32>)| {
-        push(lua, match (x, y) {
-            (Some(x), Some(y)) => Cmd::ZoomResetAt(x, y),
-            _ => Cmd::ZoomReset,
-        });
+    yk.set("set_camera", lua.create_function(|lua, (cx, cy, zoom): (f32, f32, f32)| {
+        push(lua, Cmd::SetCamera(cx, cy, zoom));
         Ok(())
     })?)?;
-    yk.set("zoom_at", lua.create_function(|lua, (factor, x, y): (f32, f32, f32)| {
-        push(lua, Cmd::ZoomAt(factor, x, y));
+    yk.set("focus", lua.create_function(|lua, id: Option<u64>| {
+        push(lua, Cmd::Focus(id));
         Ok(())
     })?)?;
-    yk.set("pan", lua.create_function(|lua, (dx, dy): (f32, f32)| {
-        push(lua, Cmd::Pan(dx, dy));
+    yk.set("front", lua.create_function(|lua, id: Option<u64>| {
+        if let Some(id) = id {
+            push(lua, Cmd::Front(id));
+        }
+        Ok(())
+    })?)?;
+    yk.set("eat_press", lua.create_function(|lua, ()| {
+        push(lua, Cmd::EatPress);
         Ok(())
     })?)?;
     yk.set("release_all", lua.create_function(|lua, ()| {
         push(lua, Cmd::ReleaseAll);
+        Ok(())
+    })?)?;
+    yk.set("spawn", lua.create_function(|lua, cmd: String| {
+        push(lua, Cmd::Spawn(cmd));
         Ok(())
     })?)?;
     yk.set("route", lua.create_function(|lua, (wheel, fingers, pinch): (bool, bool, bool)| {
@@ -376,8 +443,7 @@ pub fn frame(s: &mut Script, f: &FrameIn, out: &mut Vec<Cmd>) -> Route {
 
     let mut route = Route::default();
     if let Some(mut io) = vm.lua.app_data_mut::<Io>() {
-        out.extend_from_slice(&io.out);
-        io.out.clear();
+        out.extend(io.out.drain(..));
         route = io.route;
     }
     match result {
@@ -400,17 +466,29 @@ pub fn frame(s: &mut Script, f: &FrameIn, out: &mut Vec<Cmd>) -> Route {
     route
 }
 
+// Entries 1..=n of a list table. Entries past n from a longer earlier frame are left
+// alone: every list comes with its count, and nothing reads past it.
+fn fill<T: IntoLua + Copy>(t: &Table, values: &[T]) -> mlua::Result<()> {
+    for (i, v) in values.iter().enumerate() {
+        t.raw_set(i + 1, *v)?;
+    }
+    Ok(())
+}
+
 fn fill_snapshot(vm: &Vm, f: &FrameIn) -> mlua::Result<()> {
     let t = &vm.snap;
+    let l = &vm.lists;
+
     for (i, &(code, pressed)) in f.keys.iter().enumerate() {
-        vm.key_code.raw_set(i + 1, code)?;
-        vm.key_press.raw_set(i + 1, pressed)?;
+        l.key_code.raw_set(i + 1, code)?;
+        l.key_press.raw_set(i + 1, pressed)?;
     }
     t.raw_set("key_count", f.keys.len())?;
     t.raw_set("super", f.super_down)?;
     t.raw_set("ctrl", f.ctrl_down)?;
     t.raw_set("alt", f.alt_down)?;
     t.raw_set("shift", f.shift_down)?;
+
     match f.pointer {
         Some((x, y)) => {
             t.raw_set("x", x)?;
@@ -423,6 +501,8 @@ fn fill_snapshot(vm: &Vm, f: &FrameIn) -> mlua::Result<()> {
     }
     t.raw_set("dx", f.dx)?;
     t.raw_set("dy", f.dy)?;
+    t.raw_set("pressed", f.pressed)?;
+    t.raw_set("middle_pressed", f.middle_pressed)?;
     t.raw_set("wheel", f.wheel)?;
     t.raw_set("hwheel", f.hwheel)?;
     t.raw_set("middle", f.middle)?;
@@ -432,14 +512,46 @@ fn fill_snapshot(vm: &Vm, f: &FrameIn) -> mlua::Result<()> {
     t.raw_set("pad_driving", f.pad_driving)?;
     t.raw_set("fingers", f.fingers)?;
     t.raw_set("pinch", f.pinch)?;
+    t.raw_set("swiping", f.swiping)?;
+    t.raw_set("swipe_progress", f.swipe_progress)?;
+    t.raw_set("swipe_dx", f.swipe_dir.0)?;
+    t.raw_set("swipe_dy", f.swipe_dir.1)?;
+    t.raw_set("swipe_fired", f.swipe_fired)?;
+    t.raw_set("tap3", f.tap3)?;
+
     t.raw_set("focused", f.focused)?;
     t.raw_set("hovered", f.hovered)?;
+    t.raw_set("under", f.under)?;
+    t.raw_set("dragging", f.dragging)?;
+
     t.raw_set("zoom", f.zoom)?;
     t.raw_set("cx", f.cx)?;
     t.raw_set("cy", f.cy)?;
     t.raw_set("sw", f.sw)?;
     t.raw_set("sh", f.sh)?;
     t.raw_set("dt", f.dt)?;
+    t.raw_set("time_ms", f.time_ms)?;
     t.raw_set("frame", f.frame)?;
+    t.raw_set("zoom_min", f.zoom_min)?;
+    t.raw_set("zoom_max", f.zoom_max)?;
+    t.raw_set("zoom_default", f.zoom_default)?;
+    t.raw_set("double_click_ms", f.double_click_ms)?;
+
+    let w = f.windows;
+    t.raw_set("win_count", w.id.len())?;
+    fill(&l.win_id, &w.id)?;
+    fill(&l.win_x, &w.x)?;
+    fill(&l.win_y, &w.y)?;
+    fill(&l.win_w, &w.w)?;
+    fill(&l.win_h, &w.h)?;
+    fill(&l.win_max, &w.maximized)?;
+
+    t.raw_set("mapped_count", f.mapped.len())?;
+    for (i, &(id, welcome)) in f.mapped.iter().enumerate() {
+        l.mapped.raw_set(i + 1, id)?;
+        l.mapped_welcome.raw_set(i + 1, welcome)?;
+    }
+    t.raw_set("activated_count", f.activated.len())?;
+    fill(&l.activated, f.activated)?;
     Ok(())
 }

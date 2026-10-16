@@ -170,10 +170,18 @@ The Rust side is the engine; what it does with your input is decided by Lua
 scripts (LuaJIT) in `lua/`:
 
 - `lua/init.lua` is the entry point: key bindings, where the wheel, finger scroll
-  and pinch go (a window or the canvas), and what the canvas does with them. The
-  engine functions and the per-frame snapshot it receives are listed at the top.
-- `lua/config.lua` holds every tunable setting as a Lua table, documented inline.
-  Defaults live in `src/settings.rs`; a key left out falls back to them.
+  and pinch go (a window or the canvas), and the order everything runs in each
+  frame. The engine functions and the per-frame snapshot are listed at the top.
+- `lua/view.lua` moves the camera: zoom and pan, the spring that carries the view
+  to a window, the 1:1 detent.
+- `lua/gestures.lua` says what the three-finger swipe and tap and the Super double
+  clicks mean.
+- `lua/windows.lua` decides focus: new windows, activation requests, a focused
+  window leaving the view, and the programs started with yuka.
+- `lua/config.lua` holds the settings the engine itself reads (trackpad, rendering,
+  zoom limits), documented inline. Defaults live in `src/settings.rs`; a key left
+  out falls back to them. Tuning for behaviour lives in a `tune` table at the top
+  of the module that uses it.
 - `lua/keys.lua` maps key names to evdev codes for chords like `"super+w"`.
 
 The scripts are read at startup and re-read while running: save any file under
@@ -187,9 +195,8 @@ The canvas is driven with the Super key and the trackpad. Broadly: hold Super an
 two fingers pan and pinch the canvas, the wheel zooms, and a drag moves the window
 under the pointer (Super+right-drag resizes it); three fingers pan, pinch, and
 move between windows whatever the keyboard is doing; Super+Escape lets go of every
-window; Super+W asks the focused window to close. Keyboard bindings and scroll
-routing live in `lua/init.lua`; the three-finger gestures and Super+drag are still
-in `src/main.rs` and move to Lua next. The feel is tuned in `lua/config.lua`.
+window; Super+W asks the focused window to close. All of that lives in `lua/`,
+except Super+drag and Super+right-drag, which are still in `src/main.rs`.
 
 ## Developing from macOS in a VM
 

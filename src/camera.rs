@@ -37,29 +37,6 @@ pub fn camera_new(set: &Settings) -> Camera {
     Camera { cx: 400.0, cy: 220.0, zoom: set.zoom_default }
 }
 
-// Back to 1:1. The canvas point at the screen center stays put, so the view
-// scales around whatever you were looking at.
-pub fn reset_zoom(cam: &mut Camera, set: &Settings) {
-    cam.zoom = set.zoom_default;
-}
-
-// Back to 1:1 around a screen point, so the canvas under that point stays put.
-pub fn reset_zoom_at(cam: &mut Camera, sx: f32, sy: f32, sw: f32, sh: f32, set: &Settings) {
-    zoom_at(cam, set.zoom_default / cam.zoom, sx, sy, sw, sh, set);
-}
-
-// Zoom by `factor` while keeping the canvas point currently under the screen
-// pixel (sx, sy) fixed there. Used for cursor-anchored pinch zoom.
-pub fn zoom_at(cam: &mut Camera, factor: f32, sx: f32, sy: f32, sw: f32, sh: f32, set: &Settings) {
-    // Canvas point under (sx, sy) at the current zoom.
-    let px = cam.cx + (sx - sw * 0.5) / cam.zoom;
-    let py = cam.cy + (sy - sh * 0.5) / cam.zoom;
-    cam.zoom = (cam.zoom * factor).clamp(set.zoom_min, set.zoom_max);
-    // Re-center so that point stays under (sx, sy).
-    cam.cx = px - (sx - sw * 0.5) / cam.zoom;
-    cam.cy = py - (sy - sh * 0.5) / cam.zoom;
-}
-
 // Whether pixel alignment is worth doing at this zoom, which is the one question both the
 // view and the windows have to answer the same way.
 //
@@ -102,17 +79,6 @@ pub fn snapped_center(cam: &Camera, sw: f32, sh: f32) -> (f32, f32) {
         ((cam.cx * cam.zoom - half_w).round() + half_w) / cam.zoom,
         ((cam.cy * cam.zoom - half_h).round() + half_h) / cam.zoom,
     )
-}
-
-// What the view covers on the canvas, as left, top, right, bottom at the z = 0 plane.
-//
-// Flat maths rather than a ray cast: the 3D camera is built so one canvas unit is exactly `zoom`
-// screen pixels there, so casting through it would give the same four numbers more slowly. Through
-// the aligned centre, so it agrees with what was drawn.
-pub fn view_rect(cam: &Camera, sw: f32, sh: f32) -> (f32, f32, f32, f32) {
-    let (cx, cy) = snapped_center(cam, sw, sh);
-    let (half_w, half_h) = (sw * 0.5 / cam.zoom, sh * 0.5 / cam.zoom);
-    (cx - half_w, cy - half_h, cx + half_w, cy + half_h)
 }
 
 // Build the perspective 3D camera. It floats on the -z side of the canvas,

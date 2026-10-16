@@ -276,10 +276,48 @@ pub fn visible(windows: &Windows, i: usize) -> (f32, f32, f32, f32) {
     )
 }
 
-// A window's drawn rectangle in canvas units, for a caller that has a surface rather than an index.
-// The same rectangle the hit test uses, so what is judged to be on screen is what is on screen.
-pub fn window_rect(windows: &Windows, surface: &WlSurface) -> Option<(f32, f32, f32, f32)> {
-    index_of(windows, surface).map(|i| visible(windows, i))
+// The windows a script can see this frame: every drawable toplevel, by handle, with its drawn
+// rectangle. Children are left out, since they are placed off their parents and are not
+// anything a script would go to. Reused across frames, cleared and refilled by list_windows.
+pub struct WinList {
+    pub id: Vec<u64>,
+    pub x: Vec<f32>,
+    pub y: Vec<f32>,
+    pub w: Vec<f32>,
+    pub h: Vec<f32>,
+    pub maximized: Vec<bool>,
+}
+
+pub fn win_list_new() -> WinList {
+    WinList {
+        id: Vec::with_capacity(32),
+        x: Vec::with_capacity(32),
+        y: Vec::with_capacity(32),
+        w: Vec::with_capacity(32),
+        h: Vec::with_capacity(32),
+        maximized: Vec::with_capacity(32),
+    }
+}
+
+pub fn list_windows(windows: &Windows, out: &mut WinList) {
+    out.id.clear();
+    out.x.clear();
+    out.y.clear();
+    out.w.clear();
+    out.h.clear();
+    out.maximized.clear();
+    for i in 0..windows.surface.len() {
+        if child(windows, i) || !drawable(windows, i) {
+            continue;
+        }
+        let (x, y, w, h) = visible(windows, i);
+        out.id.push(windows.id[i]);
+        out.x.push(x);
+        out.y.push(y);
+        out.w.push(w);
+        out.h.push(h);
+        out.maximized.push(windows.maximized[i]);
+    }
 }
 
 // Which way a new window prefers to look for room, as indices into this list. 255 is "no more
@@ -1194,49 +1232,6 @@ fn spot_free(windows: &Windows, x: f32, y: f32, w: f32, h: f32, gap: f32) -> boo
         }
     }
     true
-}
-
-// The nearest window in a direction from a point, or None when there is nothing that way.
-//
-// A cone rather than a half plane: a window at right angles to the swipe is not "that way", however
-// close it is, and treating it as a candidate would make the gesture feel like it was guessing.
-// Within the cone the score is how far along the direction it lies plus a penalty for how far off
-// the line, so a window straight ahead beats a nearer one off to the side.
-pub fn nearest_in_direction(
-    windows: &Windows,
-    from: (f32, f32),
-    dir: (f32, f32),
-) -> Option<WlSurface> {
-    // How far off the line a candidate may be, as a fraction of how far along it is. 1.0 is a
-    // forty-five degree cone either side, which covers a hand that swipes diagonally by accident
-    // without reaching windows nobody was pointing at.
-    const SPREAD: f32 = 1.0;
-    // And how much being off the line costs against being far away, which is what makes a window
-    // straight ahead win over a closer one to the side.
-    const OFF_AXIS: f32 = 2.0;
-
-    let mut best: Option<(f32, usize)> = None;
-    for i in 0..windows.surface.len() {
-        if child(windows, i) || !drawable(windows, i) {
-            continue;
-        }
-        let (x, y, w, h) = visible(windows, i);
-        let (vx, vy) = (x + w * 0.5 - from.0, y + h * 0.5 - from.1);
-        let along = vx * dir.0 + vy * dir.1;
-        // Behind you, or where you already are.
-        if along <= 1.0 {
-            continue;
-        }
-        let across = (vx * dir.1 - vy * dir.0).abs();
-        if across > along * SPREAD {
-            continue;
-        }
-        let score = along + across * OFF_AXIS;
-        if best.map_or(true, |(b, _)| score < b) {
-            best = Some((score, i));
-        }
-    }
-    best.map(|(_, i)| windows.surface[i].clone())
 }
 
 // Where to put a new window: the nearest place to the middle of the view where it lands on nothing.

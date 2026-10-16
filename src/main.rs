@@ -81,57 +81,6 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 // a window and a right drag resizes it. Released, everything belongs to whatever is under the
 // pointer, which is what a compositor is supposed to do.
 
-// A journey the view is on, and the spring carrying it.
-//
-// The spring drives a progress from 0 to 1 rather than the zoom and the centre themselves, and
-// both are read off that progress. Which is the whole reason it is built this way: one spring
-// cannot fall out of step with itself, so the scale and the pan arrive together, and when it
-// overshoots they overshoot together and come back together. Two springs, one per half, would
-// have to be kept in agreement about where "past the end" is.
-//
-// `to` is a canvas position the centre travels to, which is what "bring me that window" means.
-// Without it the journey turns around a fixed screen point, ax and ay, which is what the swipes
-// and the 1:1 detent do: the scale changes and the view stays where it was pointed.
-struct Journey {
-    // The scale it left and the one it is going to. Read geometrically: scale is not perceived
-    // linearly, so halfway along is the geometric mean rather than the arithmetic one.
-    from_zoom: f32,
-    target: f32,
-    to: Option<(f32, f32)>,
-    // How far the centre was from its destination when it started, in screen pixels. Screen
-    // rather than canvas, because what you watch is the canvas distance times the zoom and the
-    // zoom is moving: eased in canvas units the view barely moves at first and then slides at the
-    // end, which is a pan and a zoom disagreeing about how far along they are.
-    from_off: (f32, f32),
-    ax: f32,
-    ay: f32,
-    // The spring itself: where it is between the two ends, and how fast. Progress can pass 1 and
-    // come back, which is the overshoot.
-    p: f32,
-    v: f32,
-    // Which pair of spring numbers carries it. A swipe wants a different character from a journey
-    // to a window: the fingers already made the motion, so the spring is only finishing it, and
-    // bounce there reads as the view arguing with the hand that just let go. Read per frame rather
-    // than copied in, so both pairs stay live to a reload.
-    swipe: bool,
-}
-
-// Start one from where the view is now.
-fn journey_to(
-    cam: &camera::Camera,
-    target: f32,
-    to: Option<(f32, f32)>,
-    ax: f32,
-    ay: f32,
-    swipe: bool,
-) -> Journey {
-    let from_off = match to {
-        Some((tx, ty)) => ((tx - cam.cx) * cam.zoom, (ty - cam.cy) * cam.zoom),
-        None => (0.0, 0.0),
-    };
-    Journey { from_zoom: cam.zoom, target, to, from_off, ax, ay, p: 0.0, v: 0.0, swipe }
-}
-
 // A cursor image a client has committed, and where the pointer is inside it.
 //
 // The hotspot is ours rather than the client's copy, because the two are in different
@@ -972,66 +921,6 @@ fn forward_keys(
     }
 }
 
-// Where the view has to be for a window to look the way it asks to look, when you send the view
-// to it.
-//
-// 1:1 for an ordinary window that fits, which is its own pixel size and what it was drawn for.
-//
-// Two things pull away from that.
-//
-// A maximized window took the shape of the view at the moment you asked for it, so 1:1 would show
-// that rectangle at some other scale than the one that made it, which is the single arrangement
-// where it is not filling anything. The view fits to it instead and it fills the screen again.
-//
-// And a window too big for the screen does not fit at 1:1 by definition: sending the view to it
-// would put you in the middle of it with its edges off both sides, which is not being shown a
-// window, it is being dropped into one. So the view goes out far enough to hold it. Only out,
-// never in: a small window is left at its own size rather than blown up to fill a screen it was
-// never drawn for.
-//
-// The fit is the smaller of the two ratios, so the whole window is in view rather than cropped on
-// one axis.
-fn zoom_for_window(
-    windows: &render::Windows,
-    surface: &WlSurface,
-    set: &settings::Settings,
-) -> f32 {
-    let Some((w, h)) = render::geo_size(windows, surface) else {
-        return set.zoom_default;
-    };
-    if w <= 0.0 || h <= 0.0 {
-        return set.zoom_default;
-    }
-    let (sw, sh) = (ray::screen_width() as f32, ray::screen_height() as f32);
-    let zoom = if render::is_maximized(windows, surface) {
-        // Exactly the view, with no margin. Maximized means it was given the shape of the screen,
-        // and a maximized window with a gap around it is not maximized, it is a large window.
-        (sw / w).min(sh / h)
-    } else {
-        // A window too big for the screen gets the margin, because here the fit is ours rather
-        // than the window's: nothing about the window says it should touch the edges, and the
-        // room is what makes it read as a window rather than as a wall. Floored at a pixel, so a
-        // silly padding cannot invert the fit.
-        let pw = (sw - set.fit_padding_px * 2.0).max(1.0);
-        let ph = (sh - set.fit_padding_px * 2.0).max(1.0);
-        set.zoom_default.min((pw / w).min(ph / h))
-    };
-    zoom.clamp(set.zoom_min, set.zoom_max)
-}
-
-// Which way a swipe reaches, from the way the fingers went.
-//
-// Natural is the canvas following your hand, so a swipe down brings down what was above you and the
-// view therefore travels up. The other way sends the view where the fingers went. One line, but it
-// has to be asked in two places, the slide and the search, and they must never disagree.
-fn swipe_way(dir: (f32, f32), set: &settings::Settings) -> (f32, f32) {
-    if set.swipe_natural {
-        (-dir.0, -dir.1)
-    } else {
-        dir
-    }
-}
-
 // Dragging a window that is filling the view takes it out of maximized first.
 //
 // Only when it is actually filling it. Maximized here is a size, not a mode that owns a screen,
@@ -1345,18 +1234,13 @@ fn main() {
     // z returns to 0 so perspective does not slide it toward the screen center.
     let mut settling: Vec<(WlSurface, f32, f32, f32)> = Vec::new();
 
-    // Spawn a few test clients (shm terminals + dmabuf triangles) so the canvas
-    // has several windows to pan and zoom around.
-    let test_clients = [
-        "weston-terminal",
-        "weston-editor",
-        "weston-clickdot",
-        "weston-smoke",
-    ];
-    let mut children: Vec<Child> = test_clients
-        .iter()
-        .filter_map(|c| spawn_client(&server.socket_name, c))
-        .collect();
+    // Programs the scripts started, killed on the way out.
+    let mut children: Vec<Child> = Vec::new();
+    // What the scripts see of the canvas each frame, and the window events since the last
+    // one. Reused, so a frame allocates nothing for them.
+    let mut win_list = render::win_list_new();
+    let mut mapped_ids: Vec<(u64, bool)> = Vec::with_capacity(8);
+    let mut activated_ids: Vec<u64> = Vec::with_capacity(8);
 
     let start = Instant::now();
     let clear = ray::Color { r: 24, g: 24, b: 32, a: 255 };
@@ -1415,50 +1299,12 @@ fn main() {
     let mut cursor_moved: Vec<(ObjectId, i32, i32)> = Vec::new();
     // The dragged window's geometry as last seen, to notice the client changing it.
     let mut drag_geo: Option<(f32, f32, f32, f32)> = None;
-    // When the last middle button press landed, for the double click chord.
-    let mut last_middle_ms: u32 = 0;
-    // And the last left click on a window, for the Super + double click that brings one to
-    // you. The surface comes with it, because two clicks on two different windows are two
-    // first clicks rather than a double one.
     // Which keycodes a client has been told are down, so a release always follows its press.
     let mut keys_sent = [false; input::KEY_CODES];
-    let mut last_left_ms: u32 = 0;
-    let mut last_left_window: Option<WlSurface> = None;
     // Whether Super+S was pressed this frame, and how many shots this run has taken. The
     // number goes in the filename so a second one does not quietly replace the first.
     let mut shot_now = false;
     let mut shots: u32 = 0;
-    // A zoom on its way somewhere, or None when nothing is travelling. The anchor is kept
-    // rather than re-read so the canvas point it turns around stays put for the whole
-    // journey, even if the cursor moves meanwhile.
-    //
-    // Two things use it. A released pinch heads for 1:1 around the fingers, and the overview
-    // heads for overview_zoom around the middle of the screen, which is what "the centre of
-    // the camera" means once it is a screen point.
-    let mut zoom_ease: Option<Journey> = None;
-    // A scale the view was deliberately sent to, when it is not zoom_default: the fit of a window
-    // it was told to go to. Remembered so the 1:1 detent leaves it alone.
-    //
-    // The two disagree otherwise, and it looks like a bug because it is one. Fitting a maximized
-    // window with a margin lands near 1:1 by construction, since the window is the size of the
-    // screen and the margin is small, and the detent then reads that as a zoom that drifted and
-    // pulls it the rest of the way, throwing the margin away in a second journey. A drift is what
-    // the detent is for; a fit is not a drift.
-    //
-    // Only while the zoom is still sitting where it was put. Move it by any means, by a hair, and
-    // this stops matching and the detent goes back to work.
-    let mut zoom_placed: Option<f32> = None;
-    // A three-finger swipe being made rather than having been made: where the view was when the
-    // fingers landed, what each direction would do from there, and where the scale is turned
-    // around. Held for as long as the fingers are down.
-    struct SwipePreview {
-        // Where the view was when the fingers landed. Everything the gesture does is measured from
-        // here: the slide while it is being made, the direction the search is done in, and the
-        // place it comes back to when there is nothing that way.
-        from_cx: f32,
-        from_cy: f32,
-    }
-    let mut swipe_preview: Option<SwipePreview> = None;
     // A pinch sequence in progress toward a client, and how far it has scaled since it began.
     // The protocol reports the total rather than the step, and a sequence outlives a frame.
     let mut pinch_active = false;
@@ -1645,43 +1491,19 @@ fn main() {
             );
         }
 
-        // A window that has just drawn its first frame takes the keyboard, so that something
-        // you launched is something you can type into without hunting for it.
-        //
-        // Only from the client that already had focus, or when nothing had it. That is the
-        // difference between a dialog opening in front of you, which you want, and an
-        // application you left running in the background helping itself to your keystrokes
-        // mid-sentence, which is the reason compositors stopped letting clients do this at
-        // all. The protocol's own answer for the wider case is xdg_activation_v1, where the
-        // app doing the launching hands over a token proving a user asked for it; we do not
-        // implement it, so anything that is not the focused client waits to be clicked.
+        // Windows that have just drawn their first frame, for the scripts to decide about: whether
+        // one takes the keyboard, whether the view goes to it. Each comes with whether it is from
+        // the client that already has the keyboard, or nothing had it, which is the difference
+        // between a dialog opening in front of you and a background application helping itself
+        // to your keystrokes.
+        mapped_ids.clear();
         for surface in windows.mapped.drain(..).collect::<Vec<_>>() {
-            let welcome = match set.focus_new {
-                settings::FocusNew::Never => false,
-                settings::FocusNew::Always => true,
-                settings::FocusNew::SameClient => match focused.as_ref() {
-                    Some(current) => same_client(current, &surface),
-                    None => true,
-                },
+            let welcome = match focused.as_ref() {
+                Some(current) => same_client(current, &surface),
+                None => true,
             };
-            if welcome {
-                // No raise needed: a window is given the frontmost stack order as it is
-                // stored, and nothing between there and here can have changed that.
-                focus_window(&mut state, &mut focused, Some(surface.clone()));
-                // And the view goes to it, on the same journey a double click makes.
-                //
-                // A canvas is larger than the screen, so a window that opened in clear space may
-                // have opened somewhere you are not looking, and one you launched and cannot find
-                // is worse than one that landed on your work. Behind the same welcome test as the
-                // focus above, so an application helping itself to a window in the background
-                // cannot help itself to your view either.
-                if set.spawn_travel {
-                    if let Some((wx, wy)) = render::window_center(&windows, &surface) {
-                        let target = zoom_for_window(&windows, &surface, &set);
-                        zoom_placed = (target != set.zoom_default).then_some(target);
-                        zoom_ease = Some(journey_to(&cam, target, Some((wx, wy)), 0.0, 0.0, false));
-                    }
-                }
+            if let Some(id) = render::window_id(&windows, &surface) {
+                mapped_ids.push((id, welcome));
             }
         }
 
@@ -1702,41 +1524,17 @@ fn main() {
             }
         }
 
-        // And focus a window another client asked us to activate. This is the case our own
-        // rule above cannot reach: you clicked a link in one application and a different one
-        // opened the page. The token is what makes it safe to honour, and whether to trust it
-        // was decided at the protocol boundary; by the time it arrives here it is a window the
-        // user asked for.
-        //
-        // Raised as well as focused, since the point of an activation is that the user wants
-        // to see the thing.
+        // Windows another client asked us to activate: you clicked a link in one application and
+        // a different one opened the page. The token is what makes it safe to honour, and whether
+        // to trust it was decided at the protocol boundary; by the time it arrives here it is a
+        // window the user asked for. What to do about it is the scripts'.
+        activated_ids.clear();
         for surface in state.activation_requests.drain(..).collect::<Vec<_>>() {
             if !surface.is_alive() {
                 continue;
             }
-            render::front(&mut windows, &surface);
-            focus_window(&mut state, &mut focused, Some(surface.clone()));
-            // And go to it if it is not already all on screen.
-            //
-            // An application activating one of its windows means "the thing you asked for is here",
-            // and here is a place on a canvas larger than the view. Partly visible counts as not
-            // here: a window with half of itself off the edge is one you would have to go and find
-            // anyway, and the journey is cheaper than the hunt.
-            //
-            // Fully visible is left alone. The window has focus and you can see all of it, and
-            // moving the view then would be motion for its own sake.
-            let (sw, sh) = (ray::screen_width() as f32, ray::screen_height() as f32);
-            let (lx, ty, rx, by) = camera::view_rect(&cam, sw, sh);
-            if let Some((x, y, w, h)) = render::window_rect(&windows, &surface) {
-                let all_on_screen = x >= lx && y >= ty && x + w <= rx && y + h <= by;
-                if !all_on_screen {
-                    if let Some((wx, wy)) = render::window_center(&windows, &surface) {
-                        let target = zoom_for_window(&windows, &surface, &set);
-                        zoom_placed = (target != set.zoom_default).then_some(target);
-                        zoom_ease =
-                            Some(journey_to(&cam, target, Some((wx, wy)), 0.0, 0.0, false));
-                    }
-                }
+            if let Some(id) = render::window_id(&windows, &surface) {
+                activated_ids.push(id);
             }
         }
 
@@ -1861,15 +1659,9 @@ fn main() {
         ptr.right_released |= taps.right_released;
         ptr.right |= taps.right;
         ptr.left |= taps.left;
-        // What lets go of every window: the scripts (Super+Escape by default), and the
-        // three-finger tap.
-        //
-        // A swipe used to do this, when it meant "step back from everything". It means "go to that
-        // one" now and hands over focus rather than dropping it. The tap took the other half of the
-        // old meaning: it is a gesture about where the view is, never about what has your typing,
-        // so it lets go whichever of its three answers it gives, including the one that flies you
-        // into a window. Landing in front of something is not the same as working in it.
-        let mut release_all = pad.three_finger_double_tap;
+        // What lets go of every window, which is the scripts' to ask for (Super+Escape and the
+        // three-finger tap, by default).
+        let mut release_all = false;
 
         // And its scroll joins the mouse's, in the same fields libinput fills when it
         // drives the trackpad itself. Everything downstream then treats the two modes
@@ -1893,11 +1685,18 @@ fn main() {
         pressed |= ptr.left_pressed;
         released |= ptr.left_released;
 
-        // The scripts' turn. They see the frame and say what should happen: bindings, where
-        // the wheel, the fingers and a pinch go, and what the canvas does with the ones that
-        // are its own. Applied here, in the order asked, before anything below reads the
-        // camera.
-        //
+        // The scripts' turn. They see the frame and say what should happen: bindings, gestures,
+        // where the wheel, the fingers and a pinch go, how the view moves, which window has the
+        // keyboard. Applied here, in the order asked, before anything below reads the camera.
+        let (sw, sh) = (ray::screen_width() as f32, ray::screen_height() as f32);
+        render::list_windows(&windows, &mut win_list);
+        // The window under the pointer, by the view as it stands before the scripts move it.
+        let under = pointer_xy.and_then(|(x, y)| {
+            let cam3d = camera::camera_3d(&cam, ray::screen_width(), ray::screen_height(), &set);
+            render::window_at(&windows, cam3d, x as f32, y as f32)
+                .map(|(surf, ..)| wl::state::window_root(&state, &surf))
+                .and_then(|root| render::window_id(&windows, &root))
+        });
         let no_keys = [false; input::KEY_CODES];
         let route = {
             let f = lua::FrameIn {
@@ -1910,6 +1709,8 @@ fn main() {
                 pointer: pointer_xy.map(|(x, y)| (x as f32, y as f32)),
                 dx: ptr.dx,
                 dy: ptr.dy,
+                pressed,
+                middle_pressed: ptr.middle_pressed,
                 wheel: ptr.wheel,
                 hwheel: ptr.hwheel,
                 middle: ptr.middle,
@@ -1919,6 +1720,11 @@ fn main() {
                 pad_driving,
                 fingers: pad.fingers as u32,
                 pinch: ptr.pinch,
+                swiping: pad.swiping,
+                swipe_progress: pad.swipe_progress,
+                swipe_dir: pad.swipe_dir,
+                swipe_fired: pad.swipe_fired,
+                tap3: pad.three_finger_double_tap,
                 focused: focused.as_ref().and_then(|s| render::window_id(&windows, s)),
                 // The window the hovered surface belongs to: the pointer may be over a
                 // subsurface or a popup, and the scripts name windows.
@@ -1926,17 +1732,26 @@ fn main() {
                     .as_ref()
                     .map(|s| wl::state::window_root(&state, s))
                     .and_then(|s| render::window_id(&windows, &s)),
+                under,
+                dragging: drag.is_some(),
                 zoom: cam.zoom,
                 cx: cam.cx,
                 cy: cam.cy,
-                sw: ray::screen_width() as f32,
-                sh: ray::screen_height() as f32,
+                sw,
+                sh,
                 dt: ray::frame_time(),
+                time_ms: start.elapsed().as_millis() as u32,
                 frame,
+                zoom_min: set.zoom_min,
+                zoom_max: set.zoom_max,
+                zoom_default: set.zoom_default,
+                double_click_ms: set.double_click_ms,
+                windows: &win_list,
+                mapped: &mapped_ids,
+                activated: &activated_ids,
             };
             lua::frame(&mut script, &f, &mut cmds)
         };
-        let (sw, sh) = (ray::screen_width() as f32, ray::screen_height() as f32);
         let mut reload_now = false;
         for cmd in cmds.drain(..) {
             match cmd {
@@ -1962,25 +1777,30 @@ fn main() {
                 // on screen, cursor plane aside: that is a hardware overlay the GPU never
                 // composites, so it cannot be in a readback.
                 lua::Cmd::Screenshot => shot_now = true,
-                // A reset says where the zoom should be, so nothing may be on its way somewhere
-                // else, and neither may a zoom.
-                lua::Cmd::ZoomReset => {
-                    zoom_ease = None;
-                    camera::reset_zoom(&mut cam, &set);
+                lua::Cmd::SetCamera(cx, cy, zoom) => {
+                    cam.cx = cx;
+                    cam.cy = cy;
+                    cam.zoom = zoom.clamp(set.zoom_min, set.zoom_max);
                 }
-                lua::Cmd::ZoomResetAt(x, y) => {
-                    zoom_ease = None;
-                    camera::reset_zoom_at(&mut cam, x, y, sw, sh, &set);
+                // Keyboard focus follows the toplevel, never a popup or a subsurface.
+                lua::Cmd::Focus(id) => {
+                    let next = id
+                        .and_then(|id| render::surface_by_id(&windows, id))
+                        .map(|s| wl::state::window_root(&state, &s));
+                    focus_window(&mut state, &mut focused, next);
                 }
-                lua::Cmd::ZoomAt(factor, x, y) => {
-                    zoom_ease = None;
-                    camera::zoom_at(&mut cam, factor, x, y, sw, sh, &set);
+                lua::Cmd::Front(id) => {
+                    if let Some(surf) = render::surface_by_id(&windows, id) {
+                        render::front(&mut windows, &surf);
+                    }
                 }
-                lua::Cmd::Pan(dx, dy) => {
-                    cam.cx += dx / cam.zoom;
-                    cam.cy += dy / cam.zoom;
-                }
+                lua::Cmd::EatPress => pressed = false,
                 lua::Cmd::ReleaseAll => release_all = true,
+                lua::Cmd::Spawn(cmd) => {
+                    if let Some(child) = spawn_client(&server.socket_name, &cmd) {
+                        children.push(child);
+                    }
+                }
             }
         }
         if reload_now {
@@ -1993,267 +1813,6 @@ fn main() {
         let forward_wheel = route.wheel;
         let scroll_to_client = route.fingers;
 
-        // Zoom reset from the mouse: Super + double middle click. The trackpad's two-finger
-        // double tap lives in touch.rs.
-        let mut reset_click = false;
-        if ptr.middle_pressed {
-            let now_ms = start.elapsed().as_millis() as u32;
-            if super_down && now_ms.saturating_sub(last_middle_ms) <= set.double_click_ms {
-                reset_click = true;
-                // Consumed, so a third click does not reset again.
-                last_middle_ms = 0;
-            } else {
-                last_middle_ms = now_ms;
-            }
-        }
-        // The middle click has a cursor to anchor on, so it keeps the canvas under the
-        // pointer fixed.
-        if reset_click {
-            zoom_ease = None;
-            let (cxp, cyp) = pointer_xy.unwrap_or((0, 0));
-            camera::reset_zoom_at(&mut cam, cxp as f32, cyp as f32, sw, sh, &set);
-        }
-
-        // Nothing herds the zoom any more. A pinch is left exactly where the fingers left
-        // it, at any scale between the limits, which is what makes the canvas free: the view
-        // is a place you are rather than one of two places you may be.
-        //
-        // Which way of working is in force is therefore no longer a question about the zoom.
-        // It is said outright, by the three-finger swipes and by Super+Escape below, and it
-        // stays said until one of them says otherwise. Zooming inside either one changes what
-        // you can see and not what your hands do.
-
-        // Three fingers, and Super+Escape, move the whole canvas rather than a piece of it,
-        // so they turn around the middle of the screen rather than the cursor.
-        //
-        // The fingers name a direction: up steps back far enough to see where everything is,
-        // down comes home to 1:1. The key has no direction, so it toggles on where you
-        // already are, which makes one chord both "show me everything" and "put me back".
-        //
-        // Letting go of the windows is the other half of both, and happens in route_input.
-        // Not for a swipe down: coming home from the overview leaves focus alone, because by
-        // then there is nothing focused to leave.
-        // Where a gesture sends the view, if anywhere. Each is a step with somewhere it
-        // stops rather than a toggle, so the same gesture repeated walks in one direction and
-        // then does nothing more.
-        //
-        // Two destinations rather than two steppers. Up goes to the overview and down comes home
-        // to 1:1, from wherever you are, and each does nothing only when you are already there.
-        //
-        // Both used to be conditional, and each was missing the case you most want it in. Down
-        // answered only from out past 1:1, so zoomed in it did nothing, which is exactly where
-        // there is nothing on screen to aim a pinch at. Up was a two-step, in to 1:1 and then out
-        // to the overview, so from a scale of your own it took two gestures to see the desk, and
-        // from just inside the overview it took two to get out.
-        //
-        // The reasoning for the old up was that a view you pinched to is a place you chose, and
-        // that a gesture should not overrule it. But that is what the gesture is for: it says show
-        // me everything, and the answer to it cannot depend on where you happened to be standing.
-        // One gesture that always means the same thing beats one that means it half the time.
-        //
-        // Super+Escape moves nothing. It lets go of every window and leaves the view exactly
-        // where you had put it, which is the whole of what it is for: a key with no direction
-        // cannot say where to go, and made to guess it moved the canvas out from under work
-        // that only wanted the keyboard back.
-        // Close enough to 1:1 to count as being there, which is what decides whether a tap steps
-        // back or comes in. Wider than the detent's own settling, so a zoom the detent has just
-        // finished pulling home is unambiguously home.
-        const HOME: f32 = 0.01;
-
-        // The swipe, while it is being made and when it is let go.
-        //
-        // A swipe means "go that way": to the nearest window in the direction the fingers went, at
-        // whatever angle they went in. While they are down the view slides that way, part of the
-        // distance, so the gesture is something you can feel doing and can take back by lifting
-        // early. Letting go past the threshold commits it.
-        //
-        // This used to be about the zoom, up to the overview and down to 1:1. Those are the tap's
-        // job now: a swipe is for moving between windows, which is the thing you do most and had
-        // no gesture at all.
-        if pad.swiping {
-            let preview = swipe_preview
-                .get_or_insert_with(|| SwipePreview { from_cx: cam.cx, from_cy: cam.cy });
-            // How far the view goes for how far the fingers went.
-            //
-            // Up to the trigger it is a straight fraction of the travel, so the gesture feels
-            // attached to the hand. Past it the give tails off toward a limit it never reaches:
-            // a hand that keeps pulling and gets nothing back stops feeling connected to anything,
-            // and a wall is what this exists to avoid. The two pieces meet at the trigger with the
-            // same slope, so you cannot feel where the resistance begins, only that it is there.
-            let p = pad.swipe_progress;
-            let base = set.swipe_preview_frac;
-            let travel = if p <= 1.0 {
-                base * p
-            } else {
-                let room = (1.0 + set.swipe_stretch_frac - base).max(0.0001);
-                let give = base / set.swipe_resist;
-                base + room * (1.0 - 1.0 / (1.0 + (p - 1.0) * give / room))
-            };
-            // With the canvas or with the view, see swipe_natural. Applied here and to the search
-            // below from the same value, so what you feel during the gesture and where it takes you
-            // can never disagree.
-            let (dx, dy) = swipe_way(pad.swipe_dir, &set);
-            // In screen pixels, so the slide looks the same at any zoom, and converted here to the
-            // canvas units the camera is in.
-            let slide = travel * set.swipe_nudge_px / cam.zoom.max(0.0001);
-            cam.cx = preview.from_cx + dx * slide;
-            cam.cy = preview.from_cy + dy * slide;
-            // The fingers own the view while they are on the pad, so anything it was still
-            // travelling toward is no longer where it is going.
-            zoom_ease = None;
-        }
-
-        // Let go, having gone far enough: the nearest window that way, or back where you started.
-        //
-        // Searched from where the fingers landed rather than from where the slide has left the
-        // view, or the gesture would be biased by its own preview: nudge far enough toward a window
-        // and it starts to count as being behind you.
-        if pad.swipe_fired {
-            let origin = swipe_preview
-                .as_ref()
-                .map(|pv| (pv.from_cx, pv.from_cy))
-                .unwrap_or((cam.cx, cam.cy));
-            match render::nearest_in_direction(&windows, origin, swipe_way(pad.swipe_dir, &set)) {
-                Some(surf) => {
-                    if let Some((wx, wy)) = render::window_center(&windows, &surf) {
-                        let window = wl::state::window_root(&state, &surf);
-                        focus_window(&mut state, &mut focused, Some(window));
-                        let target = zoom_for_window(&windows, &surf, &set);
-                        zoom_placed = (target != set.zoom_default).then_some(target);
-                        zoom_ease = Some(journey_to(&cam, target, Some((wx, wy)), 0.0, 0.0, true));
-                    }
-                }
-                // Nothing that way. The swipe still happened and still gave way; there was simply
-                // nowhere for it to go, so the view comes back rather than drifting off the end.
-                None => {
-                    zoom_ease = Some(journey_to(&cam, cam.zoom, Some(origin), 0.0, 0.0, true));
-                }
-            }
-            swipe_preview = None;
-        }
-        // And the fingers left without going far enough. Back to where the view was when they
-        // landed, on the same spring as everything else.
-        if !pad.swiping {
-            if let Some(preview) = swipe_preview.take() {
-                let home = (preview.from_cx, preview.from_cy);
-                zoom_ease = Some(journey_to(&cam, cam.zoom, Some(home), 0.0, 0.0, true));
-            }
-        }
-
-        // The detent at 1:1, tested every frame rather than when a pinch ends.
-        //
-        // A scale like 1.0004 costs every window on screen a resample and shows nothing for
-        // it: the pixel grid disengages and text softens for a difference nobody can see. And
-        // a pinch ending is not the only way to arrive at one. The wheel, the keyboard, a
-        // gesture the canvas only half took, an ease that was interrupted: any of them can
-        // leave the zoom beside 1:1 rather than on it. So the question is asked of the zoom
-        // itself, every frame, whatever put it there.
-        //
-        // Not while a pinch is driving: fingers on the pad own the zoom, and the band is
-        // theirs to move through. The moment they stop asking for a scale, the zoom takes the
-        // rest of the step. And not over an ease already running, which has its own target and
-        // its own anchor, and would otherwise be re-anchored to a moving pointer every frame.
-        const PLACED: f32 = 0.001;
-        let sits_where_placed = zoom_placed.map_or(false, |z| (cam.zoom - z).abs() < PLACED);
-        if set.zoom_detent > 0.0
-            && zoom_ease.is_none()
-            && ptr.pinch == 1.0
-            && !pad.swiping
-            && !sits_where_placed
-        {
-            let off = cam.zoom - set.zoom_default;
-            if off != 0.0 && off.abs() <= set.zoom_detent {
-                let (ax, ay) = pointer_xy.unwrap_or((0, 0));
-                zoom_ease = Some(journey_to(&cam, set.zoom_default, None, ax as f32, ay as f32, false));
-            }
-        }
-
-        if let Some(j) = zoom_ease.as_mut() {
-            // Advance the spring. Stiffness and friction from the frequency and damping ratio in
-            // the settings, which is the same spring written in the units you can feel: an
-            // undamped spring at spring_hz would make that many round trips a second, and the
-            // damping says how much of that survives.
-            //
-            // dt is capped, because a frame that took a long time is a stall rather than a slow
-            // moment, and integrating one whole would fling the spring somewhere absurd.
-            let dt = ray::frame_time().min(0.05);
-            let (hz, damping) = if j.swipe {
-                (set.swipe_spring_hz, set.swipe_spring_damping)
-            } else {
-                (set.spring_hz, set.spring_damping)
-            };
-            let w = std::f32::consts::TAU * hz;
-            let k = w * w;
-            let c = 2.0 * damping * w;
-            j.v += (k * (1.0 - j.p) - c * j.v) * dt;
-            j.p += j.v * dt;
-
-            let (ax, ay, target, to, p) = (j.ax, j.ay, j.target, j.to, j.p);
-            // Arrived when the spring is at rest at its destination, not merely passing through
-            // it: an underdamped spring crosses the target several times on the way to stopping,
-            // and cutting it off at the first crossing is what makes a bounce look like a glitch.
-            let landed = (p - 1.0).abs() < 0.001 && j.v.abs() < 0.01;
-            // Where the scale is at this progress. Geometric, so halfway is the geometric mean:
-            // half of a linear ease from 0.1 to 1.0 is 0.55, which is most of the way there to
-            // the eye and a tenth of the way there to the maths.
-            let want = if j.from_zoom > 0.0 && target > 0.0 {
-                (j.from_zoom * (target / j.from_zoom).powf(p)).clamp(set.zoom_min, set.zoom_max)
-            } else {
-                target
-            };
-            let from_off = j.from_off;
-            match to {
-                // Going somewhere: the centre travels with the scale, at the same rate, so the
-                // two arrive together and the window grows into the middle of the view rather
-                // than sliding across it afterwards. No screen point is held, because the
-                // whole idea is that the view is moving.
-                // Going somewhere. The screen offset it started with shrinks by the same
-                // progress, and the centre is whatever puts that offset on screen at the scale
-                // this progress asks for, so the window closes on the middle of the view at a
-                // steady rate rather than sliding into place after the zoom has finished.
-                Some((tx, ty)) => {
-                    cam.zoom = want;
-                    let left = 1.0 - p;
-                    cam.cx = tx - from_off.0 * left / cam.zoom;
-                    cam.cy = ty - from_off.1 * left / cam.zoom;
-                    if landed {
-                        cam.zoom = target;
-                        cam.cx = tx;
-                        cam.cy = ty;
-                        zoom_ease = None;
-                    }
-                }
-                // Staying where it is pointed, turning around a screen point: the swipes and the
-                // 1:1 detent. Applied as this frame's factor so the anchor is held by the same
-                // arithmetic a pinch uses.
-                None => {
-                    let factor = if cam.zoom > 0.0 { want / cam.zoom } else { 1.0 };
-                    camera::zoom_at(
-                        &mut cam,
-                        factor,
-                        ax,
-                        ay,
-                        ray::screen_width() as f32,
-                        ray::screen_height() as f32,
-                        &set,
-                    );
-                    if landed {
-                        let factor = if cam.zoom > 0.0 { target / cam.zoom } else { 1.0 };
-                        camera::zoom_at(
-                            &mut cam,
-                            factor,
-                            ax,
-                            ay,
-                            ray::screen_width() as f32,
-                            ray::screen_height() as f32,
-                            &set,
-                        );
-                        zoom_ease = None;
-                    }
-                }
-            }
-        }
-
         render::prune_dead(&mut windows);
         render::animate(&mut windows, ray::frame_time());
         // The view lands on whole pixels whatever moved it: keys, wheel, middle drag,
@@ -2262,30 +1821,6 @@ fn main() {
         // forget it and none can accumulate it either.
         let cam3d = camera::camera_3d(&cam, ray::screen_width(), ray::screen_height(), &set);
 
-        // A focused window that has left the view lets go of the keyboard.
-        //
-        // Focus is a claim on what you type, and typing into something you cannot see is the way
-        // to put a paragraph somewhere you will not find it. On a canvas that is not a rare
-        // accident: panning away from a window is an ordinary thing to do, and the window has no
-        // idea it happened.
-        //
-        // Gone means gone entirely, not merely mostly: a window one pixel of which is still on
-        // screen is a window you are still working in, and letting go while a corner of it shows
-        // would make focus flicker as you pan along an edge.
-        //
-        // Not while the view is travelling. A journey to a window focuses it as it sets off, when
-        // the window is by definition still off screen, so asking this question mid-flight would
-        // take the focus back before the view had moved a pixel. What you can see is not a settled
-        // fact while the camera is moving, and this rule is about settled facts.
-        if let (Some(surf), None) = (focused.clone(), zoom_ease.as_ref()) {
-            let (sw, sh) = (ray::screen_width() as f32, ray::screen_height() as f32);
-            let (lx, ty, rx, by) = camera::view_rect(&cam, sw, sh);
-            if let Some((x, y, w, h)) = render::window_rect(&windows, &surf) {
-                if x + w < lx || x > rx || y + h < ty || y > by {
-                    focus_window(&mut state, &mut focused, None);
-                }
-            }
-        }
         let cursor_pos = pointer_xy;
 
         // Super+drag: grab the window under the cursor and lift it toward the
@@ -2795,112 +2330,6 @@ fn main() {
             if answered || st.frames >= RESIZE_SETTLE_FRAMES {
                 render::clear_scale(&mut windows, &st.surface);
                 resize_settle = None;
-            }
-        }
-
-        // Super + double click on a window brings it to you: the view travels to its centre
-        // and to 1:1, so the thing you pointed at is the thing in front of you at the scale it
-        // was drawn for. The canvas idiom for "open this", on a desk where opening something
-        // means going to it rather than it coming to the front.
-        //
-        // Ahead of the drag, and it eats the press, so the second click cannot also pick the
-        // window up: a double click wobbles by a pixel or two, and a drag that started on it
-        // would move the window out from under the view on its way there.
-        if pressed && grab_windows && drag.is_none() {
-            if let Some((surf, ..)) = render::window_at(&windows, cam3d, sxp, syp) {
-                let now_ms = start.elapsed().as_millis() as u32;
-                let again = now_ms.saturating_sub(last_left_ms) <= set.double_click_ms
-                    && last_left_window.as_ref() == Some(&surf);
-                if again {
-                    // Consumed, so a third click starts counting again rather than firing.
-                    last_left_ms = 0;
-                    last_left_window = None;
-                    if let Some((wx, wy)) = render::window_center(&windows, &surf) {
-                        render::front(&mut windows, &surf);
-                        // The press that would have focused this is eaten below, so the focus is
-                        // given here instead: being sent to a window is choosing it.
-                        let window = wl::state::window_root(&state, &surf);
-                        focus_window(&mut state, &mut focused, Some(window));
-                        let target = zoom_for_window(&windows, &surf, &set);
-                        zoom_placed = (target != set.zoom_default).then_some(target);
-                        zoom_ease = Some(journey_to(&cam, target, Some((wx, wy)), 0.0, 0.0, false));
-                        pressed = false;
-                    }
-                } else {
-                    last_left_ms = now_ms;
-                    last_left_window = Some(surf);
-                }
-            }
-        }
-
-        // Three fingers tapped twice brings the window under the cursor to you, which is the
-        // journey Super with a double click makes. One hand, no keyboard, and no click: a tap is
-        // fingers landing and leaving without travelling, so it cannot be confused with the
-        // three-finger swipes, which are the same fingers going somewhere.
-        // The tap is the zoom now that the swipes have stopped being about it, and it is one
-        // gesture with three answers rather than three gestures.
-        //
-        // At 1:1 it steps back to the overview, whatever is under the cursor: from up close the
-        // thing you want is almost always to see where everything is, and having to aim at empty
-        // canvas to ask for it would be a rule to remember rather than a gesture.
-        //
-        // From anywhere else it comes in. To the window under the cursor if there is one, at the
-        // scale that window asks for, and otherwise to 1:1 where you are pointing, so tapping over
-        // empty canvas in the overview drops you into that part of it rather than nowhere.
-        if pad.three_finger_double_tap {
-            let (px, py) = pointer_xy.unwrap_or((0, 0));
-            let (ax, ay) = (px as f32, py as f32);
-            let at_home = (cam.zoom - set.zoom_default).abs() < HOME;
-
-            // A window under the cursor that is not the one you are already in. That is the case
-            // where a tap means "this one", and it is the only case where the tap hands over focus
-            // instead of letting go: you pointed at something and asked for it by name.
-            //
-            // Whatever the zoom. Pointing at a window says which window far more clearly than the
-            // scale says anything, so nothing about how close you are should change the answer.
-            let under = render::window_at(&windows, cam3d, sxp, syp).filter(|(surf, ..)| {
-                focused.as_ref() != Some(&wl::state::window_root(&state, surf))
-            });
-
-            match under {
-                Some((surf, ..)) => {
-                    if let Some((wx, wy)) = render::window_center(&windows, &surf) {
-                        // Focused, not raised. Going to a window is choosing where to be, not
-                        // rearranging what is in front of what, and the same rule a click follows:
-                        // the stack changes when you pick a window up, which is a Super+drag.
-                        let window = wl::state::window_root(&state, &surf);
-                        focus_window(&mut state, &mut focused, Some(window));
-                        // The tap lets go of everything by default. Not this time: it was asked for
-                        // a window, and route_input would take back the focus given here.
-                        release_all = false;
-                        let target = zoom_for_window(&windows, &surf, &set);
-                        zoom_placed = (target != set.zoom_default).then_some(target);
-                        zoom_ease =
-                            Some(journey_to(&cam, target, Some((wx, wy)), 0.0, 0.0, false));
-                    }
-                }
-                // Nothing new to go to, so the tap is about the view.
-                //
-                // Working in a window, or pointing at the one you are already in: let go of it and
-                // step back a little, since standing at the same scale afterwards would say nothing
-                // happened and the overview would say more than you asked.
-                //
-                // Otherwise it is the zoom's own toggle: at 1:1 step out to the overview, and from
-                // anywhere else come home to 1:1 where you are pointing.
-                None => {
-                    let stepping_back = focused.is_some() && set.tap_step_out < 1.0;
-                    let target = if stepping_back {
-                        (cam.zoom * set.tap_step_out)
-                            .max(set.overview_zoom)
-                            .clamp(set.zoom_min, set.zoom_max)
-                    } else if at_home {
-                        set.overview_zoom
-                    } else {
-                        set.zoom_default
-                    };
-                    zoom_placed = None;
-                    zoom_ease = Some(journey_to(&cam, target, None, ax, ay, false));
-                }
             }
         }
 

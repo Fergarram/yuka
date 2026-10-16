@@ -26,22 +26,6 @@ use crate::render::{DmabufMode, DIR_DOWN, DIR_LEFT, DIR_NONE, DIR_RIGHT, DIR_UP}
 // Types
 //
 
-// Which new windows are allowed to take the keyboard as they appear.
-#[derive(Clone, Copy, PartialEq)]
-pub enum FocusNew {
-    // None of them. Every window waits to be clicked, which is the only rule that can never
-    // interrupt what you are typing.
-    Never,
-    // Only from the client you were already using, or when nothing had focus. A dialog from the
-    // application in front of you is something you asked for; a window from one you left running in
-    // the background is not, and taking your keystrokes mid-sentence is why compositors stopped
-    // letting clients do this at all.
-    SameClient,
-    // All of them. The honest choice once the view travels to a new window anyway: being carried to
-    // something you cannot type into is a stranger state than being carried to something you can.
-    Always,
-}
-
 #[derive(Clone, Copy)]
 pub struct Settings {
     // Which code drives the trackpad. Applied when the device is opened, so a reload
@@ -204,22 +188,6 @@ pub struct Settings {
     // Nearest free space to the middle of the view, so it still arrives where you are looking, and
     // false goes back to the cascade.
     pub spawn_clear: bool,
-    // Which new windows take the keyboard as they appear. See FocusNew.
-    //
-    // spawn_travel follows this rather than deciding for itself: the view goes to a window exactly
-    // when that window is allowed to have your typing, so the two can never disagree about whether
-    // a window is worth your attention.
-    pub focus_new: FocusNew,
-    // Whether the view travels to a window that has just opened.
-    //
-    // A canvas is larger than the screen, so a new window can land somewhere you are not looking,
-    // and one you launched and cannot see is worse than one that arrived on top of your work.
-    // Going to it answers where it went, using the same journey a double click makes.
-    //
-    // It takes the keyboard when the view arrives, which is not focus stealing so much as the
-    // consequence of arriving: a window that leaves the view drops focus anyway, so travelling
-    // without focusing would leave your typing going nowhere at all.
-    pub spawn_travel: bool,
     // Which directions a new window tries before others when looking for room, in order.
     //
     // Nearest to the middle of the view is the rule, and this bends it: a direction named here is
@@ -280,138 +248,13 @@ pub struct Settings {
     pub dmabuf_mode: DmabufMode,
 
     // Camera.
-    // Breathing room around a window the view is fitted to, in screen pixels per side.
-    //
-    // Only the camera moves: the window is never resized and never told anything.
-    //
-    // Only for a window too big for the screen, where the fit is ours rather than the window's:
-    // nothing about that window says it should touch the edges, and the room is what makes it read
-    // as a window rather than as a wall. A maximized window is fitted exactly, margin or no margin,
-    // because it was given the shape of the screen and one with a gap around it is not maximized.
-    //
-    // 0 fits exactly either way, which is what yuka did before this existed. A margin is worth
-    // having now that we draw the shadow a client puts around itself: an exact fit crops it
-    // against the screen edge.
-    pub fit_padding_px: f32,
     // Zoom limits, and the scale the resets return to.
     pub zoom_min: f32,
     pub zoom_max: f32,
     pub zoom_default: f32,
-    // The other scale, and the boundary between the two ways of working.
-    //
-    // The zoom only ever comes to rest at this or at zoom_default, so which one it rests at
-    // is the mode. Out here the canvas owns everything: no window takes focus, hears the
-    // pointer or receives a key, and two fingers pan and pinch without asking Super. In there
-    // the windows are applications again.
-    //
-    // Where a three-finger swipe up takes the view, and the far end of what Super+Escape
-    // toggles between. Nothing else settles here: a pinch is left wherever it is let go.
-    pub overview_zoom: f32,
     // Perspective field of view in degrees. Larger means more parallax on a lifted
     // window.
     pub fov_deg: f32,
-    // The spring that carries the view when something sends it somewhere: the three-finger swipes,
-    // the 1:1 detent, and being sent to a window by Super with a double click or a three-finger
-    // double tap. A pinch is never followed by a journey, and neither is Super+Escape.
-    //
-    // Stated as a frequency and a damping ratio rather than as a stiffness and a friction, because
-    // those two are what you can feel. spring_hz is how fast it wants to move, roughly how many
-    // round trips a second it would make with no damping at all. spring_damping is how much of
-    // that oscillation survives:
-    //
-    //   1.0   critically damped, the fastest arrival with no overshoot at all
-    //   0.8   a small overshoot and settle, which reads as weight
-    //   0.5   a visible bounce
-    //   1.5   heavy and slow, arriving from one side
-    //
-    // The two together set the duration; there is no separate number for it. A journey is over
-    // when the spring is within a hair of its destination and has stopped moving.
-    pub spring_hz: f32,
-    pub spring_damping: f32,
-    // And the same pair for the three-finger swipes, which want a different character.
-    //
-    // A swipe already had its motion: your fingers made it, and the spring only finishes what
-    // they started or takes it back. Bounce there reads as the view arguing with your hand. Being
-    // sent to a window is the opposite, a motion the view makes on its own, and a little overshoot
-    // is what gives that weight.
-    //
-    // Same units as above. The 1:1 detent stays on the pair above, since it is a correction rather
-    // than either of these.
-    pub swipe_spring_hz: f32,
-    pub swipe_spring_damping: f32,
-    // How much of the way to its destination a three-finger swipe shows you while your fingers
-    // are still moving, as a fraction, and how hard a swipe with nowhere to go pulls before it
-    // comes back.
-    //
-    // A gesture that only happens at the end is a gesture you cannot aim. Showing the travel makes
-    // the threshold visible: you can see how much further it needs, and you can change your mind
-    // and take it back. Under 1 on purpose, so crossing the trigger still has somewhere to spring
-    // to and the commit is something you feel rather than a motion that merely stops.
-    //
-    pub swipe_preview_frac: f32,
-    // And how far the view actually slides at a full swipe, in screen pixels.
-    //
-    // Screen rather than canvas, so the gesture looks the same however far out you are: what it is
-    // saying is "a shove that way", and a shove is a thing you feel on a screen rather than a
-    // distance on a canvas.
-    pub swipe_nudge_px: f32,
-    // Which way a swipe reaches: with the canvas, or with the view.
-    //
-    // True is the canvas following your fingers, the same idea as invert_scroll and the same as
-    // every other gesture here: swipe down and the canvas comes down with your hand, which brings
-    // you to whatever was above. It is the one that matches a hand pushing paper around a desk.
-    //
-    // False sends the view the way your fingers went, so swiping down reaches the window below.
-    // That is the other mental model, a joystick rather than a sheet of paper, and people are
-    // genuinely split on it.
-    pub swipe_natural: bool,
-    // How far a three-finger tap steps back out of the window you are working in, as a fraction of
-    // the scale you are at.
-    //
-    // Relative rather than a destination, because stepping back is a relative act: it means "a bit
-    // further than this", and how far that is depends on how close you were. 0.7 leaves you at
-    // seven tenths of the scale you had.
-    //
-    // It never goes further out than overview_zoom, which is what the tap does from 1:1 anyway when
-    // nothing is focused. 1.0 leaves the scale alone and the tap only lets go.
-    pub tap_step_out: f32,
-    // How far past its destination a swipe can be pulled, as a fraction of the distance to it.
-    //
-    // The end of a rubber band rather than a wall. Up to the threshold the view follows your
-    // fingers at swipe_preview_frac of their travel; past it, every further millimetre buys less
-    // than the one before, approaching this and never reaching it. So a hand that keeps going is
-    // always answered by something, which is what makes it feel attached rather than clamped, and
-    // there is no distance at which the gesture stops responding.
-    pub swipe_stretch_frac: f32,
-    // How hard it fights on the way there, past the goal. 1.0 gives at the same rate it did before
-    // the goal and eases off from there, which is the smooth version and what this did when there
-    // was only one curve. Higher resists sooner:
-    //
-    //   1.0   no change in feel at the goal, only the slow approach to the limit
-    //   2.0   the give halves the moment you pass it, which you can feel
-    //   5.0   a firm step into resistance, close to the old wall but never quite one
-    //
-    // Independent of swipe_stretch_frac on purpose. That says how far it can ever be pulled, this
-    // says how much work the pulling is. Together they are the difference between a long soft
-    // stretch and a short stiff one, and before this you could only ask for the first.
-    //
-    // The change in give at the goal is deliberate rather than a seam to be smoothed away: a
-    // detent you can feel is how a hand knows it has passed something without looking.
-    pub swipe_resist: f32,
-    // How close to zoom_default the zoom may sit and still be taken the rest of the way, as a
-    // difference in scale. A zoom of 0.98 or 1.0004 costs every window on screen a resample
-    // and shows nothing for it: the pixel grid disengages, text softens, and nothing was
-    // aiming there. Inside this band the zoom eases to zoom_default, around wherever the
-    // pointer is, so nothing slides. 0 switches it off and the zoom is left exactly where it
-    // was put, which is what the canvas did before this existed.
-    //
-    // Tested every frame, whatever moved the zoom: a pinch, the wheel, the keyboard, an ease
-    // that was interrupted. Fingers actively pinching are the exception, since the band is
-    // theirs to move through while they are asking.
-    //
-    // This is a detent, not a mode: it only ever pulls to zoom_default and only from within
-    // this band. Everywhere else the zoom is still a place you are.
-    pub zoom_detent: f32,
     // How much of each axis the corner a resize started on keeps, while that resize lasts.
     //
     // A drag can change which corner it holds without letting go, decided by which side of
@@ -473,8 +316,6 @@ pub fn defaults() -> Settings {
         resize_wait_frames: 8,
         draw_shadows: true,
         spawn_clear: true,
-        focus_new: FocusNew::SameClient,
-        spawn_travel: true,
         spawn_order: [DIR_RIGHT, DIR_UP, DIR_LEFT, DIR_DOWN],
         spawn_gap: 24.0,
         cover_opacity: 0.35,
@@ -482,23 +323,10 @@ pub fn defaults() -> Settings {
         dmabuf_blit_below: 0.9,
         dmabuf_mode: DmabufMode::Hold,
 
-        fit_padding_px: 0.0,
         zoom_min: 0.1,
         zoom_max: 8.0,
         zoom_default: 1.0,
-        overview_zoom: 0.57,
         fov_deg: 40.0,
-        spring_hz: 2.5,
-        spring_damping: 0.85,
-        swipe_spring_hz: 4.0,
-        swipe_spring_damping: 1.0,
-        swipe_preview_frac: 0.7,
-        swipe_nudge_px: 140.0,
-        swipe_natural: true,
-        tap_step_out: 0.7,
-        swipe_stretch_frac: 0.35,
-        swipe_resist: 2.0,
-        zoom_detent: 0.05,
         resize_corner_hold: 0.75,
     }
 }
@@ -626,33 +454,10 @@ pub fn apply(set: &mut Settings, key: &str, value: &str, origin: &str) -> bool {
                 return false;
             }
         },
-        "fit_padding_px" => f32_key!(fit_padding_px),
-        // Read by the scripts alone, from yk.config. Known here so they are not reported
-        // as unknown.
-        "hwheel_pan" | "zoom_rate_per_sec" => return true,
         "zoom_min" => f32_key!(zoom_min),
         "zoom_max" => f32_key!(zoom_max),
         "zoom_default" => f32_key!(zoom_default),
-        "overview_zoom" => f32_key!(overview_zoom),
         "fov_deg" => f32_key!(fov_deg),
-        "spring_hz" => f32_key!(spring_hz),
-        "spring_damping" => f32_key!(spring_damping),
-        "swipe_spring_hz" => f32_key!(swipe_spring_hz),
-        "swipe_spring_damping" => f32_key!(swipe_spring_damping),
-        "swipe_preview_frac" => f32_key!(swipe_preview_frac),
-        "swipe_nudge_px" => f32_key!(swipe_nudge_px),
-        "tap_step_out" => f32_key!(tap_step_out),
-        "swipe_natural" => match value {
-            "true" | "1" | "yes" => set.swipe_natural = true,
-            "false" | "0" | "no" => set.swipe_natural = false,
-            _ => {
-                eprintln!("yuka: settings: {origin}: swipe_natural wants true or false");
-                return false;
-            }
-        },
-        "swipe_stretch_frac" => f32_key!(swipe_stretch_frac),
-        "swipe_resist" => f32_key!(swipe_resist),
-        "zoom_detent" => f32_key!(zoom_detent),
         "resize_corner_hold" => f32_key!(resize_corner_hold),
         "spawn_gap" => f32_key!(spawn_gap),
         "spawn_order" => {
@@ -685,25 +490,6 @@ pub fn apply(set: &mut Settings, key: &str, value: &str, origin: &str) -> bool {
             }
             set.spawn_order = order;
         }
-        "focus_new" => match value {
-            "never" | "none" => set.focus_new = FocusNew::Never,
-            "same-client" | "same_client" => set.focus_new = FocusNew::SameClient,
-            "always" => set.focus_new = FocusNew::Always,
-            _ => {
-                eprintln!(
-                    "yuka: settings: {origin}: focus_new wants never, same-client or always"
-                );
-                return false;
-            }
-        },
-        "spawn_travel" => match value {
-            "true" | "1" | "yes" => set.spawn_travel = true,
-            "false" | "0" | "no" => set.spawn_travel = false,
-            _ => {
-                eprintln!("yuka: settings: {origin}: spawn_travel wants true or false");
-                return false;
-            }
-        },
         "spawn_clear" => match value {
             "true" | "1" | "yes" => set.spawn_clear = true,
             "false" | "0" | "no" => set.spawn_clear = false,
@@ -776,11 +562,9 @@ pub fn sanitise(set: &mut Settings) {
     set.spawn_gap = set.spawn_gap.max(0.0);
     set.cover_opacity = set.cover_opacity.clamp(0.0, 1.0);
     set.dmabuf_blit_below = set.dmabuf_blit_below.max(0.0);
-    set.fit_padding_px = set.fit_padding_px.max(0.0);
     set.zoom_min = set.zoom_min.max(0.001);
     set.zoom_max = set.zoom_max.max(set.zoom_min * 1.001);
     set.zoom_default = set.zoom_default.clamp(set.zoom_min, set.zoom_max);
-    set.zoom_detent = set.zoom_detent.max(0.0);
     set.zoom_ref_follow = set.zoom_ref_follow.clamp(0.0, 1.0);
     set.fov_deg = set.fov_deg.clamp(1.0, 170.0);
     set.button_strip = set.button_strip.clamp(0.0, 1.0);
