@@ -5,7 +5,11 @@ GOALS:
 
 [ ] Share this build with others so I can test design.
 [ ] Eventually, test an MCP to give control to assistants.
-[ ] Modability: the part of this system that behaves like a game engine or video game
+    The scripts' command buffer (lua::Cmd) and frame snapshot are the natural surface: an
+    MCP or IPC socket could parse into the same commands and read the same snapshot.
+[x] Modability: the part of this system that behaves like a game engine or video game
+    Rust is the engine and lua/ (LuaJIT, hot reloaded) defines the experience: bindings,
+    gestures, camera, focus, placement, animations, window looks and shaders, overlays.
 
 ---
 
@@ -15,6 +19,10 @@ BUGS:
 [ ] It seems that some new windows or sub-surfaces or whatever from a window parent render as new window using the nearest empty space thing
 [ ] Sometimes moving cursor near edges or corners doesn't really show the resize thing. We should handle that ourselves because it sucks.
 [x] 3-finger double tap, when it focuses a window it should not move it up the z index
+[ ] Un-maximizing puts a window back about 32px off from where it was, with every client
+    (weston, ghostty, ...). The restore rect is taken from the visible top-left, and the
+    client changes its geometry offset (drops its shadow) while maximized, so the origin
+    is restored against the wrong offset. Predates the Lua move.
 
 ---
 

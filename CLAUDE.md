@@ -1,18 +1,30 @@
 <project-context>
 	yuka is a Wayland compositor and window manager: an infinite canvas where
-	windows are quads we can smoothly zoom, pan, and move, drawn through a
-	shader pass that applies to all windows.
+	windows are quads we can smoothly zoom, pan, and move, drawn through
+	shaders the scripts choose per window.
 
 	Language: Rust for the engine, LuaJIT (via mlua, vendored) for behaviour.
 	Renderer: raylib (via FFI / raylib-rs). Wayland protocol frontend: Smithay.
 
-	Rust is the engine: protocol, rendering, gesture recognition, and the
-	mechanics of moving and drawing things. Lua is policy: key bindings,
-	what gestures mean, where scroll and pinch go, and the settings
-	(lua/config.lua). The scripts live in lua/, entry lua/init.lua. yuka
-	does not start without scripts that load. A reload that fails keeps the
-	running scripts and shows the error on screen. Quit and VT switching
-	stay in Rust so a broken script can never lock the machine.
+	The vision: Rust is only the performant part, and Lua defines the user
+	experience. Changing how yuka feels or looks should not need a Rust
+	change.
+
+	Rust is the engine: the Wayland protocol, buffer import and drawing,
+	gesture recognition from raw touches, the mechanics of following the
+	pointer and of the resize handshake, session and input. Lua is
+	everything that decides: key bindings, what gestures mean, where
+	scroll and pinch go and how scroll feels to clients, camera motion,
+	window placement and focus, maximize, every animation, how each window
+	is drawn (opacity, lift, shadow, stretch, shader), the cursor over the
+	canvas, and the debug overlays. The scripts live in lua/, entry
+	lua/init.lua; window shaders live in shaders/. lua/config.lua holds
+	only the settings the engine reads.
+
+	yuka does not start without scripts that load. A reload that fails
+	keeps the running scripts and shows the error on screen. Quit and VT
+	switching stay in Rust so a broken script can never lock the machine,
+	and so does the error banner, since it has to work when Lua is broken.
 
 	The codebase has three zones with different rules:
 
@@ -29,7 +41,9 @@
 	   call returns, so the engine stays the only writer of its state. Scripts
 	   name windows by render::Windows ids, never by surface. To give scripts
 	   a new power, add a Cmd variant (or a snapshot field) and its yk.*
-	   function here, and apply it in the main loop.
+	   function here, and apply it in the main loop. Engine data that is
+	   only needed sometimes (the overlays' yk.surfaces and yk.pad) is
+	   gathered only on frames the scripts ask for it.
 
 	3. Everything else (canvas, camera, window management, input mapping,
 	   shader loading, rendering). This is the code we hand craft. It follows
@@ -178,6 +192,36 @@
 	or dashes for punctuation.
 
 </instructions-for-writing-code>
+
+<instructions-for-writing-lua>
+	The Lua in lua/ follows the same spirit as the Rust: plain functions
+	over data, no classes or metatables used as objects, module tables
+	returned from each file.
+
+	Use the same heading comments, with -- instead of //:
+
+	--
+	-- Tuning
+	--
+
+	Behaviour knobs live in a tune table at the top of the module that
+	uses them, each with a comment saying what it does and what the
+	values feel like. lua/config.lua is only for settings the engine
+	reads.
+
+	Read the frame snapshot, write through yk.* commands. Never hold on
+	to engine state across frames except by window id. A script that
+	needs per window state keeps a table keyed by id and forgets ids
+	that stop appearing in the snapshot.
+
+	yk.frame runs every frame, so avoid allocating tables in it: reuse
+	module level scratch tables and clear them. Allocating is fine in
+	code that runs on an event (a key press, a window opening) or in
+	the debug overlays.
+
+	Order inside yk.frame matters where two modules touch the same
+	state; init.lua says why things run in the order they do.
+</instructions-for-writing-lua>
 
 <instructions-for-answer-format>
 	How to answer in general:

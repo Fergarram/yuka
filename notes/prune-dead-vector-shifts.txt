@@ -1,12 +1,13 @@
-PRUNE_DEAD SHIFTS ELEVEN PARALLEL VECTORS PER REMOVAL
+PRUNE_DEAD SHIFTS EVERY PARALLEL COLUMN PER REMOVAL
 
 src/render.rs. prune_dead removes a dead window with Vec::remove(i) on each of the
-parallel columns. Vec::remove shifts every element after i, so one dead window is
-eleven memmoves, and n dead windows in a frame is O(n * len) on each column.
+parallel columns (38 of them now). Vec::remove shifts every element after i, so one
+dead window is 38 memmoves, and n dead windows in a frame is O(n * len) on each column.
 
 Order in the store is not carried by index. Draw order comes from the order column
-(draw_toplevels sorts by z then order) and placement comes from place_x, so nothing
-observes the slot ordering. swap_remove is correct here and is already what
+(draw_windows sorts by order then z), and everything outside render.rs names a window by
+its id column (the scripts included), never by slot, so nothing observes the slot
+ordering. swap_remove is correct here and is already what
 DmabufCache::evict and release_held_dmabuf use.
 
 The loop has to not advance i after a swap, since the swapped-in element is

@@ -10,6 +10,7 @@ can be threaded in from the caller if the draw pass should stay read-only over t
 store.
 
 Secondary: the sort is a full comparison sort over all windows every frame, but z only
-changes for windows that are lifting or settling and order only changes on front. A
-dirty flag set by animate, front, raise and settle would skip the sort entirely on the
-common frame where nothing moved.
+changes for windows that are lifting or settling and order only changes on front. Both
+are now written in one place each (set_look from the scripts' yk.window_look, and
+front), so a dirty flag set there when the value actually changes would skip the sort
+entirely on the common frame where nothing moved.

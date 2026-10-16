@@ -1,17 +1,18 @@
 # yuka
 
 A Wayland compositor and window manager built as an infinite canvas: windows are
-quads you smoothly zoom, pan, and move, drawn through a single shader pass that
-applies to every window.
+quads you smoothly zoom, pan, and move, drawn through shaders you can replace.
 
-Written in Rust. Rendering goes through raylib (GLES2 on EGL); the Wayland
-protocol frontend is Smithay. On real hardware raylib owns the display and drives
+The engine is Rust. Rendering goes through raylib (GLES2 on EGL); the Wayland
+protocol frontend is Smithay. Everything that defines the experience (bindings,
+gestures, camera motion, focus, animations, how windows look, the debug overlays)
+is LuaJIT scripts in `lua/`, reloaded live. On real hardware raylib owns the display and drives
 KMS directly; for development it can instead run nested as a client of another
 compositor.
 
 See `CLAUDE.md` for the design and coding conventions, `lua/` for the behaviour
-(bindings, gesture routing) and every tunable setting, and `devlog/` for the
-running history.
+and every tunable setting, `shaders/` for the window shaders, and `devlog/` for
+the running history.
 
 ## Requirements
 
@@ -20,12 +21,13 @@ running history.
 - A Rust toolchain. The channel is pinned to `stable` by `rust-toolchain.toml`,
   so `rustup` installs the right one automatically.
 - A C toolchain and CMake: the vendored raylib in `third_party/raylib` is built
-  from source and linked statically.
+  from source and linked statically, and so is LuaJIT (fetched and built by the
+  `mlua` crate, which needs `make`).
 
 ## Dependencies
 
-The build links libdrm, gbm, EGL, GLESv2, libinput, and xkbcommon; raylib is
-compiled in. libseat is loaded at runtime with `dlopen` (through logind/seatd),
+The build links libdrm, gbm, EGL, GLESv2, libinput, and xkbcommon; raylib and
+LuaJIT are compiled in. libseat is loaded at runtime with `dlopen` (through logind/seatd),
 not linked.
 
 On Debian/Ubuntu:
@@ -191,9 +193,14 @@ scripts (LuaJIT) in `lua/`:
   out falls back to them. Tuning for behaviour lives in a `tune` table at the top
   of the module that uses it.
 - `lua/keys.lua` maps key names to evdev codes for chords like `"super+w"`.
+- `shaders/` holds the window shaders. `window.vert` and `window.frag` are the
+  built-in pair (slot 0); `looks.tune.shaders` loads others into numbered slots
+  and `looks.window_shader` picks one per window. `desaturate.frag` is an example,
+  used for unfocused windows when `looks.tune.unfocused_desaturate` is above 0.
+  The uniforms every window shader receives are listed in `src/render.rs`.
 
 The scripts are read at startup and re-read while running: save any file under
-`lua/` and the change lands on the next frame, or press Super+R to reload on
+`lua/` or `shaders/` and the change lands on the next frame, or press Super+R to reload on
 demand. yuka will not start without scripts that load. Once running, a save
 that fails to load leaves the previous scripts running and shows the error
 across the top of the screen. Ctrl+Alt+Backspace (quit) and Ctrl+Alt+Fn
