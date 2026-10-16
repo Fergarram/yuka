@@ -225,19 +225,6 @@ return {
     -- not affect how the corner tracks your cursor, only how fresh the pixels inside are.
     resize_wait_frames = 0,
 
-    -- Whether to draw what a client padded around its window, which is where its shadow
-    -- and its rounded corners live.
-    --
-    -- A toolkit commits a surface larger than the window it declares, and we cannot ask it
-    -- to stop: the ones that do this do not implement server-side decorations. So the only
-    -- choice is whether to show what is already in the buffer. false crops to the window,
-    -- which slices the shadow off square and fills the rounded corners back in. true draws
-    -- the whole surface, so shadows fall across whatever is behind them.
-    --
-    -- Only the drawing changes. Clicks, drags, placement and maximizing all still work on
-    -- the window itself, so the padding can never be clicked.
-    draw_shadows = true,
-
     -- Whether a window being shrunk gets a mip chain, sampled trilinear with anisotropy.
     --
     -- It measurably reduces the shimmer on minified text. It used to be off because only

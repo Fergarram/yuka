@@ -12,6 +12,7 @@
 
 local view = require("view")
 local windows = require("windows")
+local looks = require("looks")
 
 local grab = {}
 
@@ -38,6 +39,30 @@ local tune = grab.tune
 --
 -- Functions
 --
+
+-- Picking up a window that is filling the view takes it out of maximized first.
+--
+-- Only when it is actually filling it. Maximized here is a size, not a mode that owns a screen,
+-- and a window keeps it while you pan, zoom or move it, so one still marked maximized may sit in
+-- the corner of the view at a third of the size, and dragging that one is just dragging it.
+--
+-- It comes back under your hand rather than where it used to be: the remembered size is kept,
+-- with the grabbed point held at the same place in the window it was grabbed at. Grab the
+-- middle of a full-view window and you are still holding the middle of the small one.
+local function unmaximize_under(f, i, sx, sy)
+    if not f.win_max[i] then return end
+    local x, y, w, h = f.win_x[i], f.win_y[i], f.win_w[i], f.win_h[i]
+    local lx, ty, rx, by = view.rect()
+    if x > lx or y > ty or x + w < rx or y + h < by then return end
+    local rw, rh = f.win_rw[i], f.win_rh[i]
+    local gx, gy = view.to_canvas(sx, sy)
+    local fx = w > 0 and (gx - x) / w or 0.5
+    local fy = h > 0 and (gy - y) / h or 0.5
+    local nx, ny = gx - fx * rw, gy - fy * rh
+    yk.unmaximize(f.win_id[i])
+    yk.move_window(f.win_id[i], nx, ny)
+    f.win_x[i], f.win_y[i], f.win_w[i], f.win_h[i], f.win_max[i] = nx, ny, rw, rh, false
+end
 
 -- Which corner of a window a canvas point pulls on, per axis: 1 for the far edge (right,
 -- bottom), -1 for the near one. split_x and split_y are where each axis divides, as a fraction
@@ -72,12 +97,26 @@ function grab.frame(f, eaten)
             yk.begin_resize(f.under, ex, ey)
         end
 
-        -- In the overview, picking a window up lifts it toward the camera, which is the canvas
+        -- In the overview, picking a window up lifts it toward the camera (looks.lua), which is the canvas
         -- idiom for having it in your hand. At 1:1 it only comes to the front: a lift there is
         -- perspective applied to something already filling the screen, so it swims rather than
         -- rises, and it takes the window off the pixel grid while you are close enough to see.
         if i and f.pressed and not eaten and not f.dragging then
-            yk.begin_move(f.under, f.zoom < f.zoom_default)
+            unmaximize_under(f, i, f.x, f.y)
+            yk.begin_move(f.under)
+            if f.zoom < f.zoom_default then looks.pick_up(f.under) end
+        end
+    end
+
+    -- A client asking to be moved by its titlebar. Neither lifted nor raised: the client asked
+    -- to be moved, not picked up, and a drag from inside a window is the same kind of act as a
+    -- click in one. It says where the window goes, not what is in front of what.
+    for k = 1, f.move_count do
+        local id = f.move_id[k]
+        local i = windows.index(f, id)
+        if i and not f.dragging then
+            unmaximize_under(f, i, f.move_x[k], f.move_y[k])
+            yk.accept_move(id, f.move_x[k], f.move_y[k])
         end
     end
 

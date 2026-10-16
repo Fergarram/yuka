@@ -15,7 +15,6 @@
 //
 
 use crate::camera;
-use crate::touch;
 use crate::egl::{self, Egl, EglImage};
 use crate::ray::{self, Shader, Vector3};
 use crate::wl::state::{self, Keep, State};
@@ -38,9 +37,6 @@ use smithay::reexports::wayland_server::Resource;
 // Constants
 //
 
-// How high (canvas units) a window rises while lifted, and how fast z animates.
-const LIFT_HEIGHT: f32 = 125.0;
-const LIFT_RATE: f32 = 14.0;
 // How far in front of its parent a child surface sits: enough to win the painter's
 // sort, small enough to read as the same plane. Negative z is toward the camera.
 const CHILD_LIFT: f32 = 0.05;
@@ -80,7 +76,6 @@ pub struct Windows {
     // Visual lift height (current + target, animated) and stack order for
     // draw-order ties among windows at the same z.
     pub z: Vec<f32>,
-    pub target_z: Vec<f32>,
     pub order: Vec<u32>,
     // The window geometry rectangle inside the surface: offset and size. This, not
     // the whole surface, is what we draw and what we hit test, so a client's drop
@@ -116,7 +111,9 @@ pub struct Windows {
     // focused one fades, and eases rather than snapping: the arrangement changes as you click
     // around and as windows move, and a hard cut on every change reads as flicker.
     pub alpha: Vec<f32>,
-    pub alpha_to: Vec<f32>,
+    // Whether to draw what the client padded around its window, which is where its shadow and
+    // its rounded corners live. See draw_windows.
+    pub shadow: Vec<bool>,
     pub maximized: Vec<bool>,
     // And the canvas point its visible top-left is pinned to while it is. Held every frame
     // rather than set once, because the offset between a surface and its visible top-left is
@@ -191,7 +188,6 @@ pub fn windows_new() -> Windows {
         draw_x: Vec::new(),
         draw_y: Vec::new(),
         z: Vec::new(),
-        target_z: Vec::new(),
         order: Vec::new(),
         geo_x: Vec::new(),
         geo_y: Vec::new(),
@@ -202,7 +198,7 @@ pub fn windows_new() -> Windows {
         scale_y: Vec::new(),
         filter: Vec::new(),
         alpha: Vec::new(),
-        alpha_to: Vec::new(),
+        shadow: Vec::new(),
         maximized: Vec::new(),
         max_x: Vec::new(),
         max_y: Vec::new(),
@@ -267,6 +263,76 @@ pub fn visible(windows: &Windows, i: usize) -> (f32, f32, f32, f32) {
     )
 }
 
+// Everything the window labels overlay shows about one drawable surface, children included.
+// Filled only on frames the scripts ask for it (yk.want_inspect).
+pub struct Inspect {
+    pub kind: &'static str,
+    pub source: &'static str,
+    pub tex_id: u32,
+    pub tex_w: i32,
+    pub tex_h: i32,
+    pub sampling: String,
+    pub canvas_x: f32,
+    pub canvas_y: f32,
+    pub geo_x: f32,
+    pub geo_y: f32,
+    pub geo_w: f32,
+    pub geo_h: f32,
+    pub z: f32,
+    // The drawn rectangle, as the hit test sees it.
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+pub fn inspect(windows: &Windows, anisotropy: f32, out: &mut Vec<Inspect>) {
+    out.clear();
+    for i in 0..windows.surface.len() {
+        if !drawable(windows, i) {
+            continue;
+        }
+        let kind = if windows.popup[i] {
+            "popup"
+        } else if windows.sub[i] {
+            "sub"
+        } else {
+            "window"
+        };
+        // What the sampler is actually set to, read from the column prepare_textures wrote,
+        // with the reason when it is not the best available.
+        let sampling = match windows.filter[i] {
+            FILTER_NEAREST => "nearest".to_string(),
+            FILTER_TRILINEAR => format!("trilinear+{anisotropy:.0}x aniso"),
+            _ if windows.mip[i] == MIP_REFUSED && !windows.owns[i] => {
+                "bilinear (no mips on dmabuf)".to_string()
+            }
+            _ if windows.mip[i] == MIP_REFUSED => "bilinear (driver refused mips)".to_string(),
+            _ => "bilinear".to_string(),
+        };
+        let (x, y, w, h) = visible(windows, i);
+        out.push(Inspect {
+            kind,
+            source: if windows.owns[i] { "shm" } else { "dmabuf" },
+            tex_id: windows.tex_id[i],
+            tex_w: windows.tex_w[i],
+            tex_h: windows.tex_h[i],
+            sampling,
+            canvas_x: windows.canvas_x[i],
+            canvas_y: windows.canvas_y[i],
+            geo_x: windows.geo_x[i],
+            geo_y: windows.geo_y[i],
+            geo_w: windows.geo_w[i],
+            geo_h: windows.geo_h[i],
+            z: windows.z[i],
+            x,
+            y,
+            w,
+            h,
+        });
+    }
+}
+
 // The windows a script can see this frame: every drawable toplevel, by handle, with its drawn
 // rectangle. Children are left out, since they are placed off their parents and are not
 // anything a script would go to. Reused across frames, cleared and refilled by list_windows.
@@ -279,6 +345,11 @@ pub struct WinList {
     pub maximized: Vec<bool>,
     // Stack order: higher is in front.
     pub order: Vec<u32>,
+    // How far the window is lifted toward the camera, as last set.
+    pub z: Vec<f32>,
+    // The size a maximized window goes back to, and 0 for one that is not maximized.
+    pub restore_w: Vec<f32>,
+    pub restore_h: Vec<f32>,
 }
 
 pub fn win_list_new() -> WinList {
@@ -290,6 +361,9 @@ pub fn win_list_new() -> WinList {
         h: Vec::with_capacity(32),
         maximized: Vec::with_capacity(32),
         order: Vec::with_capacity(32),
+        z: Vec::with_capacity(32),
+        restore_w: Vec::with_capacity(32),
+        restore_h: Vec::with_capacity(32),
     }
 }
 
@@ -301,6 +375,9 @@ pub fn list_windows(windows: &Windows, out: &mut WinList) {
     out.h.clear();
     out.maximized.clear();
     out.order.clear();
+    out.z.clear();
+    out.restore_w.clear();
+    out.restore_h.clear();
     for i in 0..windows.surface.len() {
         if child(windows, i) || !drawable(windows, i) {
             continue;
@@ -313,6 +390,10 @@ pub fn list_windows(windows: &Windows, out: &mut WinList) {
         out.h.push(h);
         out.maximized.push(windows.maximized[i]);
         out.order.push(windows.order[i]);
+        out.z.push(windows.z[i]);
+        let max = windows.maximized[i];
+        out.restore_w.push(if max { windows.restore_w[i] } else { 0.0 });
+        out.restore_h.push(if max { windows.restore_h[i] } else { 0.0 });
     }
 }
 
@@ -424,7 +505,6 @@ pub fn prune_dead(windows: &mut Windows) {
         windows.draw_x.remove(i);
         windows.draw_y.remove(i);
         windows.z.remove(i);
-        windows.target_z.remove(i);
         windows.order.remove(i);
         windows.geo_x.remove(i);
         windows.geo_y.remove(i);
@@ -435,7 +515,7 @@ pub fn prune_dead(windows: &mut Windows) {
         windows.scale_y.remove(i);
         windows.filter.remove(i);
         windows.alpha.remove(i);
-        windows.alpha_to.remove(i);
+        windows.shadow.remove(i);
         windows.maximized.remove(i);
         windows.max_x.remove(i);
         windows.max_y.remove(i);
@@ -518,33 +598,6 @@ pub fn window_at(
 // it moves.
 pub fn surface_origin(windows: &Windows, surface: &WlSurface) -> Option<(f32, f32)> {
     index_of(windows, surface).map(|i| (windows.canvas_x[i], windows.canvas_y[i]))
-}
-
-// Current lifted z of a specific surface, if present.
-pub fn window_z(windows: &Windows, surface: &WlSurface) -> Option<f32> {
-    index_of(windows, surface).map(|i| windows.z[i])
-}
-
-// Canvas position of a window's center (origin + half its texture size).
-// The true centre, not the drawn one: this pairs with set_window_center, which writes the
-// true position, and reading the rounded one would feed the alignment back into the position
-// every time a window is dropped.
-pub fn window_center(windows: &Windows, surface: &WlSurface) -> Option<(f32, f32)> {
-    index_of(windows, surface).map(|i| {
-        (
-            windows.canvas_x[i] + windows.geo_x[i] + windows.geo_w[i] * windows.scale_x[i] * 0.5,
-            windows.canvas_y[i] + windows.geo_y[i] + windows.geo_h[i] * windows.scale_y[i] * 0.5,
-        )
-    })
-}
-
-// Place a window so its center sits at the given canvas position.
-pub fn set_window_center(windows: &mut Windows, surface: &WlSurface, cx: f32, cy: f32) {
-    if let Some(i) = index_of(windows, surface) {
-        windows.canvas_x[i] = cx - windows.geo_w[i] * 0.5 - windows.geo_x[i];
-        windows.canvas_y[i] = cy - windows.geo_h[i] * 0.5 - windows.geo_y[i];
-        repin(windows, i);
-    }
 }
 
 // Move a maximized window's pin to wherever the window now is.
@@ -640,26 +693,6 @@ pub fn unmaximize(windows: &mut Windows, surface: &WlSurface) -> Option<(f32, f3
     Some((windows.restore_x[i], windows.restore_y[i], windows.restore_w[i], windows.restore_h[i]))
 }
 
-pub fn is_maximized(windows: &Windows, surface: &WlSurface) -> bool {
-    index_of(windows, surface).map(|i| windows.maximized[i]).unwrap_or(false)
-}
-
-// Whether a window's visible rectangle covers a canvas rectangle whole, which is the question
-// "is this window filling the view right now" once the view is expressed in canvas units.
-//
-// A window's size and the view's are both changed by things the other does not know about: the
-// window was sized in whole canvas units, the view rectangle is rarely whole, and the zoom has
-// moved since. So a pixel of slack, or a window filling the screen as well as it can would be
-// told that it is not.
-pub fn covers(windows: &Windows, surface: &WlSurface, x: f32, y: f32, w: f32, h: f32) -> bool {
-    let Some(i) = index_of(windows, surface) else {
-        return false;
-    };
-    const SLACK: f32 = 1.0;
-    let (wx, wy, ww, wh) = visible(windows, i);
-    wx <= x + SLACK && wy <= y + SLACK && wx + ww >= x + w - SLACK && wy + wh >= y + h - SLACK
-}
-
 // Hold every maximized window's visible top-left where it was pinned.
 //
 // Run every frame, before children are placed and before positions are aligned, so a client
@@ -676,33 +709,20 @@ pub fn hold_maximized(windows: &mut Windows) {
     }
 }
 
-// How opaque each window is drawn is the scripts' to decide (yk.window_alpha): every target
-// goes back to opaque at the start of a frame, the scripts set the ones that should not be,
-// and the drawn value eases toward its target. Easing rather than switching, because the
-// answer changes whenever you click, drag or pan, and a hard cut on every change reads as
-// flicker.
-pub fn clear_alpha_targets(windows: &mut Windows) {
-    for i in 0..windows.alpha_to.len() {
-        windows.alpha_to[i] = 1.0;
-    }
+// How a window looks this frame, as the scripts say (yk.window_look): how opaque, how far it
+// is lifted toward the camera (negative z is nearer), and whether its shadow padding is drawn.
+// Any animation of these is the scripts' too; this only stores what they arrived at. Popups and
+// subsurfaces take their parent's look when they are placed (sync_children).
+// How far a window is lifted, 0 for one we do not hold.
+pub fn window_lift(windows: &Windows, surface: &WlSurface) -> f32 {
+    index_of(windows, surface).map(|i| windows.z[i]).unwrap_or(0.0)
 }
 
-pub fn set_alpha_target(windows: &mut Windows, surface: &WlSurface, alpha: f32) {
+pub fn set_look(windows: &mut Windows, surface: &WlSurface, alpha: f32, z: f32, shadow: bool) {
     if let Some(i) = index_of(windows, surface) {
-        windows.alpha_to[i] = alpha.clamp(0.0, 1.0);
-    }
-}
-
-pub fn ease_alpha(windows: &mut Windows, dt: f32) {
-    // How fast a window fades to where it is going, as a fraction of the gap per second. Fast
-    // enough to feel immediate, slow enough that a click does not blink.
-    const RATE: f32 = 14.0;
-    let t = (RATE * dt).min(1.0);
-    for i in 0..windows.surface.len() {
-        windows.alpha[i] += (windows.alpha_to[i] - windows.alpha[i]) * t;
-        if (windows.alpha_to[i] - windows.alpha[i]).abs() < 0.002 {
-            windows.alpha[i] = windows.alpha_to[i];
-        }
+        windows.alpha[i] = alpha.clamp(0.0, 1.0);
+        windows.z[i] = z;
+        windows.shadow[i] = shadow;
     }
 }
 
@@ -856,90 +876,6 @@ pub fn prepare_textures(windows: &mut Windows, zoom: f32, anisotropy: f32, mips:
     }
 }
 
-// A label under every window, in the canvas rather than in a corner of the screen:
-// what it is made of, how it is being sampled and at what scale. Reading it off the
-// same columns the draw pass reads means it cannot drift from what is actually
-// happening, which is the whole point of having it.
-//
-// Drawn in 2D at the projected canvas point, so it pans and scales with the view and
-// rides along when a window is lifted. The size follows the zoom with a floor, since a
-// label that scales all the way down is unreadable exactly when you are zoomed out
-// looking for why something shimmers.
-pub fn draw_debug_labels(windows: &Windows, cam3d: ray::Camera3D, zoom: f32, anisotropy: f32) {
-    const BASE_SIZE: f32 = 13.0;
-    const MIN_SIZE: i32 = 10;
-    const PAD: i32 = 3;
-    let fg = ray::Color { r: 240, g: 230, b: 120, a: 255 };
-    let bg = ray::Color { r: 0, g: 0, b: 0, a: 170 };
-
-    let size = ((BASE_SIZE * zoom) as i32).max(MIN_SIZE);
-    for i in 0..windows.surface.len() {
-        if !drawable(windows, i) {
-            continue;
-        }
-        let (x, y, w, h) = visible(windows, i);
-        // Bottom-left of the window, at its own lifted z so the label travels with it.
-        let anchor = ray::world_to_screen(
-            Vector3 { x, y: y + h, z: windows.z[i] },
-            cam3d,
-        );
-
-        let kind = if windows.popup[i] {
-            "popup"
-        } else if windows.sub[i] {
-            "sub"
-        } else {
-            "window"
-        };
-        let source = if windows.owns[i] { "shm" } else { "dmabuf" };
-        // What the sampler is actually set to, read from the column prepare_textures
-        // wrote, with the reason when it is not the best available.
-        let sampling = match windows.filter[i] {
-            FILTER_NEAREST => "nearest".to_string(),
-            FILTER_TRILINEAR => format!("trilinear+{anisotropy:.0}x aniso"),
-            _ if windows.mip[i] == MIP_REFUSED && !windows.owns[i] => {
-                "bilinear (no mips on dmabuf)".to_string()
-            }
-            _ if windows.mip[i] == MIP_REFUSED => "bilinear (driver refused mips)".to_string(),
-            _ => "bilinear".to_string(),
-        };
-        // Screen pixels per texel: the zoom, times what perspective adds for a lifted
-        // window. Measured off the quad itself rather than assumed, so a lifted window
-        // reports the scale it is really being drawn at.
-        let right = ray::world_to_screen(
-            Vector3 { x: x + w, y: y + h, z: windows.z[i] },
-            cam3d,
-        );
-        let scale = if w > 0.0 { (right.x - anchor.x) / w } else { zoom };
-
-        let lines = [
-            format!("{kind} {source} tex{} {}x{}", windows.tex_id[i], windows.tex_w[i], windows.tex_h[i]),
-            format!("{sampling}  scale {scale:.2}x"),
-            format!(
-                "canvas {:.1},{:.1}  geo {:.0},{:.0} {:.0}x{:.0}  z {:.2}",
-                windows.canvas_x[i], windows.canvas_y[i],
-                windows.geo_x[i], windows.geo_y[i], windows.geo_w[i], windows.geo_h[i],
-                windows.z[i],
-            ),
-        ];
-
-        let widest = lines.iter().map(|l| ray::measure_text(l, size)).max().unwrap_or(0);
-        let line_h = size + PAD;
-        let top = anchor.y as i32 + PAD;
-        ray::draw_rectangle(
-            anchor.x as i32 - PAD,
-            top - PAD,
-            widest + PAD * 2,
-            line_h * lines.len() as i32 + PAD,
-            bg,
-        );
-        for (n, line) in lines.iter().enumerate() {
-            ray::draw_text(line, anchor.x as i32, top + line_h * n as i32, size, fg);
-        }
-    }
-}
-
-
 // Why the scripts are not running, across the top of the screen. A few lines at most: the
 // first is where it went wrong, and a traceback past that belongs in the log.
 pub fn draw_script_error(text: &str, screen_w: i32) {
@@ -953,143 +889,6 @@ pub fn draw_script_error(text: &str, screen_w: i32) {
     ray::draw_rectangle(0, 0, screen_w, count * LINE + PAD * 2, bg);
     for (i, line) in text.lines().take(MAX_LINES).enumerate() {
         ray::draw_text(line, PAD, PAD + i as i32 * LINE, TEXT, fg);
-    }
-}
-
-// The trackpad, drawn in the bottom right corner: the surface at its real aspect ratio,
-// the button regions marked, a dot per finger, and what the gesture code currently
-// thinks is happening. Screen space, not canvas: it is an instrument, not content.
-//
-// Everything here comes from touch::view, so it shows what the gesture code decided
-// rather than a second interpretation of the same events.
-pub fn draw_pad_debug(pad: &touch::PadView, screen_w: i32, screen_h: i32) {
-    const WIDTH: i32 = 260;
-    const MARGIN: i32 = 16;
-    const TEXT: i32 = 12;
-    const LINE: i32 = 15;
-
-    let bg = ray::Color { r: 12, g: 12, b: 16, a: 210 };
-    let frame = ray::Color { r: 90, g: 95, b: 110, a: 255 };
-    let region = ray::Color { r: 60, g: 65, b: 80, a: 255 };
-    let live = ray::Color { r: 240, g: 230, b: 120, a: 255 };
-    let hot = ray::Color { r: 250, g: 120, b: 90, a: 255 };
-    let dim = ray::Color { r: 150, g: 155, b: 170, a: 255 };
-
-    // The pad, at its own aspect ratio so the regions look like they feel.
-    let pad_w = WIDTH;
-    let pad_h = if pad.aspect > 0.1 { (WIDTH as f32 / pad.aspect) as i32 } else { WIDTH / 2 };
-    let lines = 5;
-    let panel_h = pad_h + LINE * lines + MARGIN;
-    let x0 = screen_w - WIDTH - MARGIN;
-    let y0 = screen_h - panel_h - MARGIN;
-
-    ray::draw_rectangle(x0 - 8, y0 - 8, WIDTH + 16, panel_h + 16, bg);
-
-    let px = x0;
-    let py = y0 + LINE * lines;
-    ray::draw_rectangle_lines(px, py, pad_w, pad_h, frame);
-
-    // The resting zone: below this line a still finger is treated as parked.
-    if pad.rest_zone > 0.0 {
-        let rest_y = py + (pad_h as f32 * (1.0 - pad.rest_zone)) as i32;
-        ray::draw_line(px, rest_y, px + pad_w, rest_y, ray::Color { r: 45, g: 50, b: 62, a: 255 });
-    }
-
-    // Button regions: the strip along the bottom, split in two.
-    if pad.software_buttons {
-        let strip_y = py + (pad_h as f32 * (1.0 - pad.strip)) as i32;
-        let split_x = px + (pad_w as f32 * pad.split) as i32;
-        ray::draw_line(px, strip_y, px + pad_w, strip_y, region);
-        ray::draw_line(split_x, strip_y, split_x, py + pad_h, region);
-        let label_y = py + pad_h - TEXT - 4;
-        ray::draw_text("L", px + 6, label_y, TEXT, if pad.left { live } else { region });
-        ray::draw_text("R", split_x + 6, label_y, TEXT, if pad.right { live } else { region });
-    }
-
-    // Fingers. Parked ones are drawn dim and small, since nothing reads them; of the
-    // rest, the lowest is the one that would decide a click, so mark that one.
-    let mut lowest: Option<usize> = None;
-    for i in 0..pad.count {
-        if pad.resting[i] || pad.faint[i] {
-            continue;
-        }
-        if lowest.map_or(true, |b| pad.fingers[i].1 > pad.fingers[b].1) {
-            lowest = Some(i);
-        }
-    }
-    for i in 0..pad.count {
-        let (fx, fy) = pad.fingers[i];
-        let cx = px + (fx * pad_w as f32) as i32;
-        let cy = py + (fy * pad_h as f32) as i32;
-        let deciding = pad.software_buttons && lowest == Some(i);
-        let colour = if pad.faint[i] {
-            // Below the size threshold: drawn, because you need to see that it is there
-            // and being ignored, but in the frame colour to say nothing reads it.
-            frame
-        } else if pad.resting[i] {
-            dim
-        } else if deciding {
-            hot
-        } else {
-            live
-        };
-        // The contact ellipse, at the scale the pad is drawn: how much of the finger is
-        // actually touching. This hardware reports no per-finger pressure, so the
-        // footprint is the only force-like signal there is, and a resting thumb is
-        // visibly fatter than a pointing fingertip.
-        if pad.has_size {
-            let (major, minor) = pad.size[i];
-            // major and minor are diameters, so halve them. Floored at a couple of
-            // pixels: a fingertip's contact is only a few millimetres, which is smaller
-            // than the dot at this panel size, and an invisible footprint teaches
-            // nothing.
-            let ry = (major * 0.5 * pad_h as f32).max(2.5);
-            let rx = (minor * 0.5 * pad_h as f32).max(2.0);
-            ray::draw_ellipse_lines(cx, cy, rx, ry, colour);
-        }
-        // And the tracked point itself, which is what every decision reads.
-        ray::draw_circle(cx, cy, 1.5, colour);
-    }
-
-    // What it thinks is going on.
-    let armed = |on: bool| if on { "armed" } else { "idle" };
-    let text = [
-        format!(
-            "trackpad  {} finger{}  {} counted  max {}",
-            pad.count,
-            if pad.count == 1 { "" } else { "s" },
-            pad.active,
-            pad.contact_max
-        ),
-        format!(
-            "gesture {}  pan {}  zoom {}",
-            pad.mode,
-            armed(pad.pan_armed),
-            armed(pad.zoom_armed)
-        ),
-        format!(
-            "pan {:+.1},{:+.1}  zoom {:.3}  cursor {}",
-            pad.pan.0, pad.pan.1, pad.zoom, armed(pad.ptr_armed)
-        ),
-        format!(
-            "size{}{}{}{}  load {}/{}",
-            if pad.count > 0 { " " } else { " -" },
-            if pad.count > 0 { format!("{}", pad.major[0]) } else { String::new() },
-            if pad.count > 1 { format!(" {}", pad.major[1]) } else { String::new() },
-            if pad.count > 2 { format!(" {}", pad.major[2]) } else { String::new() },
-            pad.load,
-            pad.load_max
-        ),
-        format!(
-            "buttons {}{}{}",
-            if pad.software_buttons { "regions" } else { "physical" },
-            if pad.left { "  LEFT" } else { "" },
-            if pad.right { "  RIGHT" } else { "" }
-        ),
-    ];
-    for (n, line) in text.iter().enumerate() {
-        let colour = if n == 4 && (pad.left || pad.right) { live } else { dim };
-        ray::draw_text(line, x0, y0 + LINE * n as i32, TEXT, colour);
     }
 }
 
@@ -1138,7 +937,7 @@ pub fn sync_children(windows: &mut Windows) {
     for i in 0..windows.surface.len() {
         windows.placed[i] = false;
     }
-    let mut moves: Vec<(usize, f32, f32, f32, u32)> = Vec::new();
+    let mut moves: Vec<(usize, f32, f32, f32, usize)> = Vec::new();
     for i in 0..windows.surface.len() {
         if windows.popup[i] {
             continue;
@@ -1150,24 +949,25 @@ pub fn sync_children(windows: &mut Windows) {
                     windows.canvas_x[i] + ox,
                     windows.canvas_y[i] + oy,
                     windows.z[i] - CHILD_LIFT,
-                    windows.order[i],
+                    i,
                 ));
             }
         }
     }
-    for (j, x, y, z, order) in moves {
+    for (j, x, y, z, parent) in moves {
         windows.canvas_x[j] = x;
         windows.canvas_y[j] = y;
         windows.z[j] = z;
-        windows.target_z[j] = z;
-        windows.order[j] = order;
+        windows.order[j] = windows.order[parent];
+        windows.alpha[j] = windows.alpha[parent];
+        windows.shadow[j] = windows.shadow[parent];
         windows.placed[j] = true;
     }
 
     // Then every subsurface tree, from each root that is not itself a subsurface, so
     // a popup's children are placed off the popup we just moved. The tree comes back in the
     // client's stacking order with the root at its own slot.
-    let mut subs: Vec<(usize, f32, f32, f32, u32)> = Vec::new();
+    let mut subs: Vec<(usize, f32, f32, f32, usize)> = Vec::new();
     for i in 0..windows.surface.len() {
         if windows.sub[i] {
             continue;
@@ -1215,16 +1015,17 @@ pub fn sync_children(windows: &mut Windows) {
                 windows.canvas_x[i] + ox,
                 windows.canvas_y[i] + oy,
                 windows.z[i] + CHILD_LIFT * steps,
-                windows.order[i],
+                i,
             ));
         }
     }
-    for (j, x, y, z, order) in subs {
+    for (j, x, y, z, parent) in subs {
         windows.canvas_x[j] = x;
         windows.canvas_y[j] = y;
         windows.z[j] = z;
-        windows.target_z[j] = z;
-        windows.order[j] = order;
+        windows.order[j] = windows.order[parent];
+        windows.alpha[j] = windows.alpha[parent];
+        windows.shadow[j] = windows.shadow[parent];
         windows.placed[j] = true;
     }
 }
@@ -1234,39 +1035,6 @@ pub fn front(windows: &mut Windows, surface: &WlSurface) {
     if let Some(i) = index_of(windows, surface) {
         windows.order[i] = windows.next_order;
         windows.next_order += 1;
-    }
-}
-
-// Front + lift toward the camera (grab). The camera views from -z, so lifting
-// toward the viewer means moving to negative z.
-pub fn raise(windows: &mut Windows, surface: &WlSurface) {
-    front(windows, surface);
-    if let Some(i) = index_of(windows, surface) {
-        windows.target_z[i] = -LIFT_HEIGHT;
-    }
-}
-
-// Settle a window back onto the plane, keeping its stack order (drop).
-pub fn settle(windows: &mut Windows, surface: &WlSurface) {
-    if let Some(i) = index_of(windows, surface) {
-        windows.target_z[i] = 0.0;
-    }
-}
-
-// Animate every window's lift toward its target.
-pub fn animate(windows: &mut Windows, dt: f32) {
-    // Snapped once it is within a hair of the target, because an asymptote never arrives.
-    // A window that had been lifted once used to keep a sliver of negative z forever,
-    // which is a sliver of "nearer the camera" that no amount of raising could undo.
-    const SETTLED: f32 = 0.01;
-    let t = (LIFT_RATE * dt).min(1.0);
-    for i in 0..windows.z.len() {
-        let target = windows.target_z[i];
-        if (target - windows.z[i]).abs() < SETTLED {
-            windows.z[i] = target;
-            continue;
-        }
-        windows.z[i] += (target - windows.z[i]) * t;
     }
 }
 
@@ -1330,7 +1098,6 @@ fn store_entry(
             windows.draw_x.push(cx);
             windows.draw_y.push(cy);
             windows.z.push(0.0);
-            windows.target_z.push(0.0);
             windows.order.push(order);
             windows.geo_x.push(0.0);
             windows.geo_y.push(0.0);
@@ -1341,7 +1108,7 @@ fn store_entry(
             windows.scale_y.push(1.0);
             windows.filter.push(FILTER_UNSET);
             windows.alpha.push(1.0);
-            windows.alpha_to.push(1.0);
+            windows.shadow.push(true);
             windows.maximized.push(false);
             windows.max_x.push(0.0);
             windows.max_y.push(0.0);
@@ -1630,7 +1397,6 @@ pub fn destroy_owned(windows: &mut Windows) {
     windows.draw_y.clear();
     windows.mapped.clear();
     windows.z.clear();
-    windows.target_z.clear();
     windows.order.clear();
     windows.geo_x.clear();
     windows.geo_y.clear();
@@ -1641,7 +1407,7 @@ pub fn destroy_owned(windows: &mut Windows) {
     windows.scale_y.clear();
     windows.filter.clear();
     windows.alpha.clear();
-    windows.alpha_to.clear();
+    windows.shadow.clear();
     windows.maximized.clear();
     windows.max_x.clear();
     windows.max_y.clear();
@@ -1667,9 +1433,6 @@ pub fn draw_windows(
     alpha_loc: i32,
     swizzle_loc: i32,
     fade_loc: i32,
-    // Whether to draw what the client padded around its window, which is where its shadow and
-    // its rounded corners live. See the quad below.
-    shadows: bool,
 ) {
     // Painter's order: stack order first, then z within a stack entry. Depth test is off,
     // so what is drawn last wins.
@@ -1717,7 +1480,7 @@ pub fn draw_windows(
         //
         // The stretch of a resize drag is anchored at the geometry's top-left, so the padding
         // is scaled about that same point rather than about itself.
-        let (x, y, w, h, u0, v0, u1, v1) = if shadows {
+        let (x, y, w, h, u0, v0, u1, v1) = if windows.shadow[i] {
             let (sx, sy) = (windows.scale_x[i], windows.scale_y[i]);
             (
                 x - windows.geo_x[i] * sx,

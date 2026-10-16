@@ -181,8 +181,11 @@ scripts (LuaJIT) in `lua/`:
 - `lua/windows.lua` decides where new windows go, focus (click to focus, new
   windows, activation requests, a focused window leaving the view), what maximize
   means, and the programs started with yuka.
-- `lua/looks.lua` sets the background, fades windows that cover the focused one,
-  and draws over the canvas through `yk.draw` (the fps counter lives here).
+- `lua/looks.lua` decides how every window is drawn each frame (opacity, lift,
+  shadow padding) and animates it: the cover fade, the lift of a picked up
+  window, and setting it down again. Also the background colour.
+- `lua/overlays.lua` draws the debug instruments through `yk.draw`: the frame
+  counter (Super+F), window labels (Super+I) and the trackpad (Super+P).
 - `lua/config.lua` holds the settings the engine itself reads (trackpad, rendering,
   zoom limits), documented inline. Defaults live in `src/settings.rs`; a key left
   out falls back to them. Tuning for behaviour lives in a `tune` table at the top

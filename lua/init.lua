@@ -13,7 +13,6 @@
 -- Engine functions:
 --
 --   yk.reload()                   re-read the scripts, as a save would
---   yk.toggle_debug(name)         engine instruments: "labels" or "pad"
 --   yk.close(id)                  ask a window to close
 --   yk.screenshot()               save the frame to shot-<n>.png
 --   yk.set_camera(cx, cy, zoom)   put the view here (view.lua does this for you)
@@ -21,11 +20,16 @@
 --   yk.front(id)                  bring a window to the top of the stack
 --   yk.eat_press()                this frame's left press goes no further
 --   yk.release_all()              let go of every window
---   yk.begin_move(id, lift)       pick a window up at the pointer, consuming the press
+--   yk.begin_move(id)             pick a window up at the pointer, consuming the press
+--   yk.accept_move(id, x, y)      answer a titlebar move request, held at that screen point
 --   yk.begin_resize(id, ex, ey)   resize from the pointer holding a corner, 1 or -1 per axis
 --   yk.resize_corner(ex, ey)      change the corner the resize in progress holds
 --   yk.spawn(cmd)                 start a program as a client
---   yk.window_alpha(id, a)        how opaque a window is drawn this frame (default 1)
+--   yk.window_look(id, alpha, z, shadow)
+--                                 how a window is drawn: opacity, lift (negative is nearer),
+--                                 shadow padding; kept until changed, children follow
+--   yk.want_inspect(), yk.want_pad()
+--                                 gather engine data for yk.surfaces() / yk.pad() this frame
 --   yk.set_background(rgba)       the colour behind the canvas, 0xRRGGBBAA
 --
 -- Drawing, only inside yk.draw (screen pixels, colours 0xRRGGBBAA):
@@ -33,6 +37,10 @@
 --   yk.draw_rect(x, y, w, h, c)   yk.draw_rect_lines(x, y, w, h, c)
 --   yk.draw_line(x1, y1, x2, y2, c)   yk.draw_circle(x, y, r, c)
 --   yk.draw_text(text, x, y, size, c)   yk.measure_text(text, size)
+--   yk.draw_ellipse_lines(x, y, rx, ry, c)
+--   yk.to_screen(x, y, z)         a canvas point at lift z, on screen
+--   yk.surfaces()                 every drawable surface, for the labels overlay
+--   yk.pad()                      the trackpad as the gesture code sees it, or nil
 --   yk.route_scroll(wheel, fingers, pinch)
 --                                 whether each goes to the client under the pointer
 --   yk.route_input(pointer, keys) whether clients get the pointer and key presses
@@ -59,13 +67,16 @@
 --   swipe_dx, swipe_dy, swipe_fired        their direction, and the lift that commits
 --   tap3                                   three fingers tapped twice
 --   focused, hovered, under                window ids, or nil
---   dragging, right_pressed                a window is being moved, the right button went down
+--   dragging, right_pressed                the window being moved, the right button went down
 --   resizing, resize_ex, resize_ey         our resize in progress and the corner it holds
 --   zoom, cx, cy, sw, sh                   the view and the screen
 --   dt, time_ms, frame                     the clock
 --   zoom_min, zoom_max, zoom_default       the engine's zoom limits
 --   double_click_ms                        the double click gap
---   win_count, win_id[i], win_x[i], win_y[i], win_w[i], win_h[i], win_max[i], win_order[i]
+--   cam_dist                               camera to canvas distance: lift z shows at
+--                                          zoom * cam_dist / (cam_dist + z)
+--   win_count, win_id[i], win_x[i], win_y[i], win_w[i], win_h[i], win_max[i], win_order[i],
+--   win_z[i], win_rw[i], win_rh[i]         ... lift, and the size a maximized window goes back to
 --                                          every toplevel, drawn rectangle in canvas units
 --   mapped_count, mapped[i], mapped_welcome[i]
 --                                          windows that drew their first frame, and whether
@@ -73,6 +84,8 @@
 --   activated_count, activated[i]          windows another client asked to activate
 --   max_count, max_id[i], max_on[i]        windows asking to be maximized (on) or let go;
 --                                          unanswered ones are refused, or given their size back
+--   move_count, move_id[i], move_x[i], move_y[i]
+--                                          titlebar move requests and the press they quote
 --
 -- Ctrl+Alt+Backspace (quit) and Ctrl+Alt+Fn (switch VT) are the engine's and cannot
 -- be rebound: they are how you get out when a script is wrong.
@@ -84,6 +97,7 @@ local windows = require("windows")
 local gestures = require("gestures")
 local grab = require("grab")
 local looks = require("looks")
+local overlays = require("overlays")
 
 yk.config = require("config")
 
@@ -157,9 +171,9 @@ end
 bind("super+r", function() yk.reload() end)
 
 -- Debug overlays: labels under every window, the frame counter, the trackpad instrument.
-bind("super+i", function() yk.toggle_debug("labels") end)
-bind("super+f", function() looks.fps = not looks.fps end)
-bind("super+p", function() yk.toggle_debug("pad") end)
+bind("super+i", function() overlays.labels = not overlays.labels end)
+bind("super+f", function() overlays.fps = not overlays.fps end)
+bind("super+p", function() overlays.pad = not overlays.pad end)
 
 bind("super+s", function() yk.screenshot() end)
 
@@ -285,9 +299,10 @@ function yk.frame(f)
     view.step(f, f.pinch ~= 1, f.swiping)
     windows.drop_unseen_focus(f)
     looks.frame(f)
+    overlays.frame(f)
     view.finish()
 end
 
 function yk.draw()
-    looks.draw()
+    overlays.draw()
 end

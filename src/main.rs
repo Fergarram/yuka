@@ -870,7 +870,6 @@ fn forward_keys(
 fn maximize_window(
     windows: &mut Windows,
     state: &State,
-    settling: &mut Vec<(WlSurface, f32, f32, f32)>,
     resize_settle: &mut Option<ResizeSettle>,
     surf: &WlSurface,
     x: f32,
@@ -884,14 +883,12 @@ fn maximize_window(
     {
         render::maximize(windows, surf, x, y, ox, oy, ow, oh);
     }
-    // Same housekeeping as a client's own move: an animation still running would drag the
-    // window back off the shape we are about to give it.
-    settling.retain(|(s, ..)| s != surf);
+    // A stretch still showing from a resize would pull the window off the shape we are about to
+    // give it.
     if resize_settle.as_ref().map(|st| &st.surface) == Some(surf) {
         *resize_settle = None;
     }
     render::clear_scale(windows, surf);
-    render::settle(windows, surf);
     render::front(windows, surf);
     render::set_window_origin(windows, surf, x, y);
     wl::state::maximize_toplevel(state, surf, w.round() as i32, h.round() as i32, true);
@@ -910,60 +907,6 @@ fn unmaximize_window(windows: &mut Windows, state: &State, surf: &WlSurface) {
         .or_else(|| render::geo_size(windows, surf))
         .unwrap_or((0.0, 0.0));
     wl::state::maximize_toplevel(state, surf, w.round() as i32, h.round() as i32, false);
-}
-
-// Dragging a window that is filling the view takes it out of maximized first.
-//
-// Only when it is actually filling it. Maximized here is a size, not a mode that owns a screen,
-// and the window keeps it while you pan, zoom or move it, so a window that is still marked
-// maximized may be sitting in the corner of the view at a third of the size. Dragging that one
-// is just dragging it. The one worth taking apart is the one where a drag would otherwise be
-// meaningless, because there is nowhere for it to go that looks any different.
-//
-// It comes back under your cursor rather than where it used to be: the remembered position is
-// dropped and the remembered size is kept, with the grabbed point held at the same place in the
-// window it was grabbed at. Grab the middle of a full-view window and you are still holding the
-// middle of the small one, which is the mapping that keeps the window under your hand while it
-// changes size.
-fn unmaximize_for_drag(
-    windows: &mut render::Windows,
-    state: &State,
-    surface: &WlSurface,
-    cam3d: ray::Camera3D,
-    // Where the pointer grabbed, in canvas units.
-    gx: f32,
-    gy: f32,
-) -> bool {
-    if !render::is_maximized(windows, surface) {
-        return false;
-    }
-    let sw = ray::screen_width() as f32;
-    let sh = ray::screen_height() as f32;
-    let corners = (
-        camera::screen_to_plane(cam3d, 0.0, 0.0, 0.0),
-        camera::screen_to_plane(cam3d, sw, sh, 0.0),
-    );
-    let (Some((lx, ty)), Some((rx, by))) = corners else {
-        return false;
-    };
-    if !render::covers(windows, surface, lx, ty, rx - lx, by - ty) {
-        return false;
-    }
-    let (Some((x, y)), Some((w, h))) =
-        (render::window_origin(windows, surface), render::geo_size(windows, surface))
-    else {
-        return false;
-    };
-    let Some((_, _, rw, rh)) = render::unmaximize(windows, surface) else {
-        return false;
-    };
-    // Where in the window the grab was, as a fraction of it, so the same point is under the
-    // cursor once it is small again.
-    let fx = if w > 0.0 { (gx - x) / w } else { 0.5 };
-    let fy = if h > 0.0 { (gy - y) / h } else { 0.5 };
-    render::set_window_origin(windows, surface, gx - fx * rw, gy - fy * rh);
-    wl::state::maximize_toplevel(state, surface, rw.round() as i32, rh.round() as i32, false);
-    true
 }
 
 //
@@ -1123,12 +1066,6 @@ fn main() {
         ray::egl_current_context(),
     );
 
-    // A label under every window saying what it is made of and how it is sampled.
-    // YUKA_DEBUG_LABELS=1, or Super+I at any time.
-    let mut debug_labels = std::env::var("YUKA_DEBUG_LABELS").is_ok();
-    // The trackpad instrument in the corner: fingers, button regions, live gesture
-    // state. YUKA_DEBUG_PAD=1, or Super+P at any time.
-    let mut debug_pad = std::env::var("YUKA_DEBUG_PAD").is_ok();
 
     let egl = egl::init().expect("egl init");
     // How much anisotropic filtering the driver offers, asked once. It only matters
@@ -1217,10 +1154,6 @@ fn main() {
     // Active Super+right-drag resize, if any, and one released and waiting to be answered.
     let mut resize: Option<Resize> = None;
     let mut resize_settle: Option<ResizeSettle> = None;
-    // Windows easing back down after a drop. Each entry is the surface plus its
-    // world center and z at release; we hold the visual (screen) center fixed as
-    // z returns to 0 so perspective does not slide it toward the screen center.
-    let mut settling: Vec<(WlSurface, f32, f32, f32)> = Vec::new();
 
     // Programs the scripts started, killed on the way out.
     let mut children: Vec<Child> = Vec::new();
@@ -1230,6 +1163,9 @@ fn main() {
     let mut mapped_ids: Vec<(u64, bool)> = Vec::with_capacity(8);
     let mut activated_ids: Vec<u64> = Vec::with_capacity(8);
     let mut max_requests: Vec<(u64, bool)> = Vec::with_capacity(4);
+    let mut move_requests: Vec<(u64, f32, f32)> = Vec::with_capacity(2);
+    // What the labels overlay is shown, on the frames it is on.
+    let mut inspect_list: Vec<render::Inspect> = Vec::new();
     // Which of this frame's maximize requests the scripts answered.
     let mut max_answered: Vec<u64> = Vec::with_capacity(4);
 
@@ -1679,6 +1615,34 @@ fn main() {
         pressed |= ptr.left_pressed;
         released |= ptr.left_released;
 
+        // Clients asking to be moved by their titlebar, for the scripts to accept (or not). Each
+        // comes with the press the client is quoting: between that press and this request sits
+        // the client's own latency, and a pointer that kept moving through it, so anchoring to
+        // where the pointer is now would drag the window from a point you never grabbed. Falls
+        // back to now if the serial is stale.
+        move_requests.clear();
+        {
+            let (nx, ny) = pointer_xy.map(|(x, y)| (x as f32, y as f32)).unwrap_or((0.0, 0.0));
+            for (surf, serial) in state.move_requests.drain(..).collect::<Vec<_>>() {
+                let (ax, ay, af) = press_at(&press_log, serial, nx, ny, frame);
+                if debug_input {
+                    let (w, h) = render::geo_size(&windows, &surf).unwrap_or((0.0, 0.0));
+                    println!(
+                        "yuka: move request {}x{} {} took {} frames (press frame {af}, now {frame}), pointer travelled {:.0},{:.0} since",
+                        w as i32,
+                        h as i32,
+                        render::source(&windows, &surf),
+                        frame.saturating_sub(af),
+                        nx - ax,
+                        ny - ay
+                    );
+                }
+                if let Some(id) = render::window_id(&windows, &surf) {
+                    move_requests.push((id, ax, ay));
+                }
+            }
+        }
+
         // The scripts' turn. They see the frame and say what should happen: bindings, gestures,
         // where the wheel, the fingers and a pinch go, how the view moves, which window has the
         // keyboard. Applied here, in the order asked, before anything below reads the camera.
@@ -1727,7 +1691,7 @@ fn main() {
                     .map(|s| wl::state::window_root(&state, s))
                     .and_then(|s| render::window_id(&windows, &s)),
                 under,
-                dragging: drag.is_some(),
+                dragging: drag.as_ref().and_then(|d| render::window_id(&windows, &d.surface)),
                 right_pressed: ptr.right_pressed,
                 // Only our own resize: a client dragging its own edge named the edge.
                 resizing: resize
@@ -1746,31 +1710,27 @@ fn main() {
                 zoom_max: set.zoom_max,
                 zoom_default: set.zoom_default,
                 double_click_ms: set.double_click_ms,
+                cam_dist: {
+                    let half = (set.fov_deg * 0.5).to_radians();
+                    sh / (2.0 * cam.zoom * half.tan())
+                },
                 windows: &win_list,
                 mapped: &mapped_ids,
                 activated: &activated_ids,
                 max_requests: &max_requests,
+                move_requests: &move_requests,
             };
             lua::frame(&mut script, &f, &mut cmds)
         };
         let mut reload_now = false;
         // Grabs the scripts started this frame, picked up by the move and resize blocks below.
-        let mut begin_move: Option<(u64, bool)> = None;
+        let mut begin_move: Option<(u64, Option<(f32, f32)>, bool)> = None;
         let mut begin_resize: Option<(u64, f32, f32)> = None;
         let mut resize_corner: Option<(f32, f32)> = None;
-        render::clear_alpha_targets(&mut windows);
         max_answered.clear();
         for cmd in cmds.drain(..) {
             match cmd {
                 lua::Cmd::Reload => reload_now = true,
-                lua::Cmd::ToggleDebug(which) => {
-                    let (flag, name) = match which {
-                        lua::Debug::Labels => (&mut debug_labels, "debug labels"),
-                        lua::Debug::Pad => (&mut debug_pad, "trackpad overlay"),
-                    };
-                    *flag = !*flag;
-                    println!("yuka: {name} {}", if *flag { "on" } else { "off" });
-                }
                 // Asks. xdg_toplevel.close is a request, and a client may answer it with a dialog
                 // about unsaved work or ignore it entirely. Killing the process instead would be
                 // deciding on its behalf that whatever it was holding does not matter.
@@ -1801,12 +1761,14 @@ fn main() {
                     }
                 }
                 lua::Cmd::EatPress => pressed = false,
-                lua::Cmd::BeginMove(id, lift) => begin_move = Some((id, lift)),
+                lua::Cmd::BeginMove { id, anchor, from_client } => {
+                    begin_move = Some((id, anchor, from_client));
+                }
                 lua::Cmd::BeginResize(id, ex, ey) => begin_resize = Some((id, ex, ey)),
                 lua::Cmd::ResizeCorner(ex, ey) => resize_corner = Some((ex, ey)),
-                lua::Cmd::WindowAlpha(id, alpha) => {
+                lua::Cmd::WindowLook(id, alpha, z, shadow) => {
                     if let Some(surf) = render::surface_by_id(&windows, id) {
-                        render::set_alpha_target(&mut windows, &surf, alpha);
+                        render::set_look(&mut windows, &surf, alpha, z, shadow);
                     }
                 }
                 lua::Cmd::Maximize(id, x, y, w, h) => {
@@ -1814,7 +1776,6 @@ fn main() {
                         maximize_window(
                             &mut windows,
                             &state,
-                            &mut settling,
                             &mut resize_settle,
                             &surf,
                             x,
@@ -1877,7 +1838,6 @@ fn main() {
         let scroll_to_client = route.fingers;
 
         render::prune_dead(&mut windows);
-        render::animate(&mut windows, ray::frame_time());
         // The view lands on whole pixels whatever moved it: keys, wheel, middle drag,
         // trackpad, or a zoom reset that changed the scale without touching the pan. Applied
         // as the 3D camera is built rather than written back into cam, so no code path can
@@ -1906,63 +1866,14 @@ fn main() {
         // which is what already happens to anything that lands late.
         wl::state::accept_and_dispatch(&mut server, &mut state);
 
-        // What clients asked for themselves: a titlebar drag is a move request, an edge
-        // drag is a resize request.
+        // What clients asked for themselves: an edge drag is a resize request. (A titlebar drag
+        // is a move request, which the scripts answer; see move_requests.)
         //
-        // Drained here, ahead of the two blocks that act on it, because a request that
-        // arrives at the top of this frame and is only picked up below them does not reach
-        // the quad until the next frame. That was a whole frame of the gap between grabbing
-        // a titlebar and the window starting to follow, on top of the round trip we cannot
-        // avoid: the press has to reach the client and its request has to come back.
-        let asked_move: Vec<(WlSurface, u32)> = state.move_requests.drain(..).collect();
+        // Drained here, ahead of the block that acts on it, because a request that arrives at
+        // the top of this frame and is only picked up below it does not reach the quad until
+        // the next frame.
         let asked_resize: Vec<(WlSurface, i32, i32, u32)> = state.resize_requests.drain(..).collect();
         {
-            if let Some((surf, serial)) = asked_move.into_iter().last() {
-                // Anchor to the press the client is quoting. Between that press and this
-                // request sits the client's own latency, and a pointer that kept moving
-                // through it: anchoring to where the pointer is now would drag the window
-                // from a point you never grabbed. Falls back to now if the serial is stale.
-                let (ax, ay, af) = press_at(&press_log, serial, sxp, syp, frame);
-                if debug_input {
-                    let (w, h) = render::geo_size(&windows, &surf).unwrap_or((0.0, 0.0));
-                    println!(
-                        "yuka: move request {}x{} {} took {} frames (press frame {af}, now {frame}), pointer travelled {:.0},{:.0} since",
-                        w as i32,
-                        h as i32,
-                        render::source(&windows, &surf),
-                        frame.saturating_sub(af),
-                        sxp - ax,
-                        syp - ay
-                    );
-                }
-                if let Some((gx, gy)) = camera::screen_to_plane(cam3d, ax, ay, 0.0) {
-                    // The surface position, not the visible top-left: the drag applies its
-                    // offset with set_window_pos, which is in surface coordinates, and a
-                    // client's geometry offset sits between the two. Mixing them moved the
-                    // window by the client's shadow padding on the first frame.
-                    unmaximize_for_drag(&mut windows, &state, &surf, cam3d, gx, gy);
-                    if let Some((ox, oy)) = render::surface_origin(&windows, &surf) {
-                        settling.retain(|(s, ..)| s != &surf);
-                        if resize_settle.as_ref().map(|st| &st.surface) == Some(&surf) {
-                            resize_settle = None;
-                        }
-                        render::clear_scale(&mut windows, &surf);
-                        // Neither lifted nor raised. The client asked to be moved, not picked up,
-                        // and a drag from inside a window is the same kind of act as a click in
-                        // one: it says where the window goes, not what is in front of what. The
-                        // lift belongs to a Super+drag, where you did take hold of it, and the
-                        // stack should follow the same rule as the animation rather than one each.
-                        drag = Some(Drag {
-                            surface: surf,
-                            off_x: ox - gx,
-                            off_y: oy - gy,
-                            from_client: true,
-                            start_cursor: (sxp, syp),
-                            start_pos: (ox, oy),
-                        });
-                    }
-                }
-            }
             if let Some((surf, ex, ey, serial)) = asked_resize.into_iter().last() {
                 let (ax, ay, af) = press_at(&press_log, serial, sxp, syp, frame);
                 if debug_input {
@@ -2281,38 +2192,42 @@ fn main() {
             }
         }
 
-        // Super+drag picks a window up. Whether, which, and whether it lifts toward the camera
-        // are the scripts' (yk.begin_move); the press that started it is consumed, so it is not
-        // also focused or forwarded.
+        // A window picked up: by Super+drag, or by its own titlebar. Whether, which, and how it
+        // looks while held are the scripts' (yk.begin_move, yk.accept_move, yk.window_look);
+        // following the pointer is the engine's.
         let grab = begin_move.take().filter(|_| drag.is_none());
-        if let Some((id, lift)) = grab {
+        if let Some((id, anchor, from_client)) = grab {
             let surf = render::surface_by_id(&windows, id);
             let origin = surf.as_ref().and_then(|s| render::surface_origin(&windows, s));
             if let (Some(surf), Some((ox, oy))) = (surf, origin) {
-                // Re-grabbing a still-settling window: cancel its settle.
-                settling.retain(|(s, ..)| s != &surf);
-                // Offset from the window origin to the grabbed point, captured
-                // on the z=0 plane (constant in world units, independent of z).
-                let (gx, gy) = camera::screen_to_plane(cam3d, sxp, syp, 0.0)
-                    .unwrap_or((ox, oy));
-                // Before the offsets are taken, since this can change both the window's size
-                // and where it is.
-                unmaximize_for_drag(&mut windows, &state, &surf, cam3d, gx, gy);
-                let (ox, oy) = render::surface_origin(&windows, &surf).unwrap_or((ox, oy));
-                if lift {
-                    render::raise(&mut windows, &surf);
-                } else {
+                // Offset from the window origin to the grabbed point, captured on the z=0 plane
+                // (constant in world units, independent of z). The surface position, not the
+                // visible top-left: the drag applies its offset with set_window_pos, which is in
+                // surface coordinates, and a client's geometry offset sits between the two.
+                let (ax, ay) = anchor.unwrap_or((sxp, syp));
+                let (gx, gy) = camera::screen_to_plane(cam3d, ax, ay, 0.0).unwrap_or((ox, oy));
+                // A window still settling from a resize is carrying a stretch, and measuring a
+                // drag against a stretched window makes it jump.
+                if resize_settle.as_ref().map(|st| &st.surface) == Some(&surf) {
+                    resize_settle = None;
+                }
+                render::clear_scale(&mut windows, &surf);
+                // Ours comes to the front, since picking a window up is the moment you did ask
+                // for it to be on top, and consumes the press so it is not also a click. A
+                // client's own titlebar drag is the same kind of act as a click in it: neither
+                // raised nor consumed, and it waits for the release to end its own drag.
+                if !from_client {
                     render::front(&mut windows, &surf);
+                    pressed = false;
                 }
                 drag = Some(Drag {
                     surface: surf,
                     off_x: ox - gx,
                     off_y: oy - gy,
-                    from_client: false,
-                    start_cursor: (sxp, syp),
+                    from_client,
+                    start_cursor: (ax, ay),
                     start_pos: (ox, oy),
                 });
-                pressed = false;
             }
         }
         if let Some(d) = drag.as_ref() {
@@ -2329,24 +2244,15 @@ fn main() {
                     drag_geo = geo;
                 }
             }
-            let z = render::window_z(&windows, &surf).unwrap_or(0.0);
+            // Projected onto the plane at the window's own lift, so the grabbed point stays under
+            // the cursor at any zoom: projecting onto z=0 while drawing lifted makes it out-run
+            // the cursor through perspective parallax.
+            let z = render::window_lift(&windows, &surf);
             if let Some((px, py)) = camera::screen_to_plane(cam3d, sxp, syp, z) {
                 render::set_window_pos(&mut windows, &surf, px + offx, py + offy);
             }
+            // Setting it down again, lift and all, is the scripts': they see the drag end.
             if released || !surf.is_alive() {
-                // Snapshot the visual center so it stays put while lowering.
-                if surf.is_alive() {
-                    if let (Some((cx, cy)), Some(z)) = (
-                        render::window_center(&windows, &surf),
-                        render::window_z(&windows, &surf),
-                    ) {
-                        // Only a lifted window has anything to come down from.
-                        if z.abs() > 0.5 {
-                            settling.push((surf.clone(), cx, cy, z));
-                        }
-                    }
-                }
-                render::settle(&mut windows, &surf);
                 if debug_input {
                     // Did the window travel as far as the cursor? On screen it should, at
                     // any zoom: the cursor delta in canvas units is the screen delta over
@@ -2371,31 +2277,6 @@ fn main() {
                     released = false;
                 }
             }
-        }
-
-        // Ease dropped windows straight down: reproject the release-time screen
-        // center onto the plane at each window's current z, so it lowers in
-        // place instead of sliding toward the screen center. dist and the camera
-        // center come straight from the perspective camera.
-        {
-            let px = cam3d.position.x;
-            let py = cam3d.position.y;
-            let dist = -cam3d.position.z;
-            settling.retain(|(surf, cx0, cy0, z0)| {
-                if !surf.is_alive() {
-                    return false;
-                }
-                let Some(z) = render::window_z(&windows, surf) else {
-                    return false;
-                };
-                let keep = z.abs() > 0.5;
-                let zz = if keep { z } else { 0.0 };
-                let k = (zz + dist) / (*z0 + dist);
-                let cx = px + (*cx0 - px) * k;
-                let cy = py + (*cy0 - py) * k;
-                render::set_window_center(&mut windows, surf, cx, cy);
-                keep
-            });
         }
 
         // The cursor image belongs to whatever is under the pointer: a text field wants an
@@ -2526,8 +2407,6 @@ fn main() {
         // visible on Chromium as part of the window trailing the rest of it while dragging.
         // Maximized windows keep their pinned top-left first, so children placed below and
         // the pixel alignment after both see the corrected position.
-        // Each window's opacity toward what the scripts asked for this frame.
-        render::ease_alpha(&mut windows, ray::frame_time().min(0.05));
         render::hold_maximized(&mut windows);
         render::sync_children(&mut windows);
 
@@ -2636,22 +2515,17 @@ fn main() {
             alpha_loc,
             swizzle_loc,
             fade_loc,
-            set.draw_shadows,
         );
-        if debug_labels {
-            render::draw_debug_labels(&windows, cam3d, cam.zoom, anisotropy);
+        // The scripts' own drawing over the windows, overlays included. What the engine knows
+        // that they want drawn is gathered only on the frames they ask for it.
+        let (want_inspect, want_pad) = lua::wants(&script);
+        if want_inspect {
+            render::inspect(&windows, anisotropy, &mut inspect_list);
+        } else {
+            inspect_list.clear();
         }
-        if debug_pad {
-            if let Some(tp) = touchpad.as_ref() {
-                render::draw_pad_debug(
-                    &touch::view(tp, &set),
-                    ray::screen_width(),
-                    ray::screen_height(),
-                );
-            }
-        }
-        // The scripts' own drawing, over the windows and the instruments.
-        lua::draw(&mut script);
+        let pad_view = if want_pad { touchpad.as_ref().map(|tp| touch::view(tp, &set)) } else { None };
+        lua::draw(&mut script, cam3d, &mut inspect_list, pad_view);
         // Scripts that would not load or run say so on screen, since the log may be on a tty
         // nobody is looking at.
         if let Some(err) = script.error.as_ref() {

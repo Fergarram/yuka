@@ -28,7 +28,8 @@ use std::time::SystemTime;
 use mlua::{Function, IntoLua, Lua, Table, Value};
 
 use crate::ray;
-use crate::render::WinList;
+use crate::render::{Inspect, WinList};
+use crate::touch::PadView;
 use crate::settings::{self, Settings};
 
 //
@@ -49,19 +50,11 @@ const KEY_CODES: usize = crate::input::KEY_CODES;
 // Types
 //
 
-// Debug overlays a script can switch.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Debug {
-    Labels,
-    Pad,
-}
-
 // What a script can ask the engine to do. Drained in order after each call.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Cmd {
     // Re-read the scripts, as a save would.
     Reload,
-    ToggleDebug(Debug),
     // Ask a window to close. Handles are render::Windows ids.
     Close(u64),
     Screenshot,
@@ -76,16 +69,20 @@ pub enum Cmd {
     EatPress,
     // Let go of every window: keyboard, pointer and implicit grab.
     ReleaseAll,
-    // Pick a window up at the pointer, and whether it lifts toward the camera. Consumes the
-    // press. Follows the pointer until the left button comes up.
-    BeginMove(u64, bool),
+    // Pick a window up and have it follow the pointer until the left button comes up. Held at
+    // the screen point given, or at the pointer. from_client is a move the client asked for
+    // (its titlebar): the client then keeps its press and gets its release, and the stack is
+    // left alone. Ours consumes the press and brings the window to the front.
+    BeginMove { id: u64, anchor: Option<(f32, f32)>, from_client: bool },
     // Resize a window from the pointer, holding a corner: per axis, 1 for the far edge (right,
     // bottom) and -1 for the near one. Follows until the right button comes up.
     BeginResize(u64, f32, f32),
     // Change which corner the resize in progress holds.
     ResizeCorner(f32, f32),
-    // How opaque a window should be this frame, eased toward. Every window not named is opaque.
-    WindowAlpha(u64, f32),
+    // How a window looks: opacity, lift toward the camera (negative z is nearer), and whether
+    // its shadow padding is drawn. Kept until changed; popups and subsurfaces follow their
+    // parent.
+    WindowLook(u64, f32, f32, bool),
     // The colour behind the canvas, as 0xRRGGBBAA.
     Background(u32),
     // Put a window's visible top-left at a canvas point.
@@ -159,9 +156,9 @@ pub struct FrameIn<'a> {
     pub focused: Option<u64>,
     pub hovered: Option<u64>,
     pub under: Option<u64>,
-    // A window is being moved by a drag, the right button went down, and the resize in
+    // The window being moved by a drag, the right button went down, and the resize in
     // progress, ours rather than a client's: window and the corner it holds.
-    pub dragging: bool,
+    pub dragging: Option<u64>,
     pub right_pressed: bool,
     pub resizing: Option<(u64, f32, f32)>,
     // The view, the screen, and the clock.
@@ -178,6 +175,9 @@ pub struct FrameIn<'a> {
     pub zoom_max: f32,
     pub zoom_default: f32,
     pub double_click_ms: u32,
+    // How far the camera sits from the canvas plane, in canvas units, for projecting a lifted
+    // window: a point at height z shows at zoom * dist / (dist + z).
+    pub cam_dist: f32,
     // Every toplevel on the canvas.
     pub windows: &'a WinList,
     // Windows that drew their first frame, with whether each came from the client that has
@@ -188,6 +188,9 @@ pub struct FrameIn<'a> {
     // does not answer with yk.maximize or yk.unmaximize is answered for it: refused, or the
     // window's own size back.
     pub max_requests: &'a [(u64, bool)],
+    // Clients asking to be moved by their titlebar, with the screen point the press landed on.
+    // A request the script does not accept with yk.accept_move is ignored.
+    pub move_requests: &'a [(u64, f32, f32)],
 }
 
 // What the functions a script calls write into. Lives in the VM's app data, so the
@@ -199,6 +202,13 @@ struct Io {
     // Inside yk.draw, which is the only time the drawing functions may touch raylib: outside
     // the draw pass a draw call would land in the middle of the engine's own GL state.
     drawing: bool,
+    // Engine data the scripts asked to draw this frame (yk.want_inspect, yk.want_pad), and the
+    // data itself while yk.draw runs.
+    want_inspect: bool,
+    want_pad: bool,
+    inspect: Vec<Inspect>,
+    pad: Option<PadView>,
+    cam3d: Option<ray::Camera3D>,
 }
 
 // The list tables inside the snapshot, kept so a frame refills them rather than making new
@@ -213,6 +223,12 @@ struct Lists {
     win_h: Table,
     win_max: Table,
     win_order: Table,
+    win_z: Table,
+    win_rw: Table,
+    win_rh: Table,
+    move_id: Table,
+    move_x: Table,
+    move_y: Table,
     mapped: Table,
     mapped_welcome: Table,
     activated: Table,
@@ -295,6 +311,11 @@ fn load_vm(dir: &str) -> mlua::Result<(Vm, Vec<(String, String)>)> {
         route: Route::default(),
         held: vec![false; KEY_CODES],
         drawing: false,
+        want_inspect: false,
+        want_pad: false,
+        inspect: Vec::new(),
+        pad: None,
+        cam3d: None,
     });
 
     // require() finds the other scripts next to the entry.
@@ -340,6 +361,12 @@ fn load_vm(dir: &str) -> mlua::Result<(Vm, Vec<(String, String)>)> {
         win_h: list("win_h")?,
         win_max: list("win_max")?,
         win_order: list("win_order")?,
+        win_z: list("win_z")?,
+        win_rw: list("win_rw")?,
+        win_rh: list("win_rh")?,
+        move_id: list("move_id")?,
+        move_x: list("move_x")?,
+        move_y: list("move_y")?,
         mapped: list("mapped")?,
         mapped_welcome: list("mapped_welcome")?,
         activated: list("activated")?,
@@ -405,23 +432,9 @@ fn edge(v: f32) -> f32 {
     if v < 0.0 { -1.0 } else { 1.0 }
 }
 
-fn debug_named(name: &str) -> mlua::Result<Debug> {
-    match name {
-        "labels" => Ok(Debug::Labels),
-        "pad" => Ok(Debug::Pad),
-        _ => Err(mlua::Error::RuntimeError(format!(
-            "no debug overlay called '{name}' (labels, pad)"
-        ))),
-    }
-}
-
 fn register(lua: &Lua, yk: &Table) -> mlua::Result<()> {
     yk.set("reload", lua.create_function(|lua, ()| {
         push(lua, Cmd::Reload);
-        Ok(())
-    })?)?;
-    yk.set("toggle_debug", lua.create_function(|lua, name: String| {
-        push(lua, Cmd::ToggleDebug(debug_named(&name)?));
         Ok(())
     })?)?;
     yk.set("close", lua.create_function(|lua, id: Option<u64>| {
@@ -456,8 +469,12 @@ fn register(lua: &Lua, yk: &Table) -> mlua::Result<()> {
         push(lua, Cmd::ReleaseAll);
         Ok(())
     })?)?;
-    yk.set("begin_move", lua.create_function(|lua, (id, lift): (u64, bool)| {
-        push(lua, Cmd::BeginMove(id, lift));
+    yk.set("begin_move", lua.create_function(|lua, id: u64| {
+        push(lua, Cmd::BeginMove { id, anchor: None, from_client: false });
+        Ok(())
+    })?)?;
+    yk.set("accept_move", lua.create_function(|lua, (id, x, y): (u64, f32, f32)| {
+        push(lua, Cmd::BeginMove { id, anchor: Some((x, y)), from_client: true });
         Ok(())
     })?)?;
     yk.set("begin_resize", lua.create_function(|lua, (id, ex, ey): (u64, f32, f32)| {
@@ -468,8 +485,20 @@ fn register(lua: &Lua, yk: &Table) -> mlua::Result<()> {
         push(lua, Cmd::ResizeCorner(edge(ex), edge(ey)));
         Ok(())
     })?)?;
-    yk.set("window_alpha", lua.create_function(|lua, (id, alpha): (u64, f32)| {
-        push(lua, Cmd::WindowAlpha(id, alpha));
+    yk.set("window_look", lua.create_function(|lua, (id, alpha, z, shadow): (u64, f32, f32, bool)| {
+        push(lua, Cmd::WindowLook(id, alpha, z, shadow));
+        Ok(())
+    })?)?;
+    yk.set("want_inspect", lua.create_function(|lua, ()| {
+        if let Some(mut io) = lua.app_data_mut::<Io>() {
+            io.want_inspect = true;
+        }
+        Ok(())
+    })?)?;
+    yk.set("want_pad", lua.create_function(|lua, ()| {
+        if let Some(mut io) = lua.app_data_mut::<Io>() {
+            io.want_pad = true;
+        }
         Ok(())
     })?)?;
     yk.set("set_background", lua.create_function(|lua, rgba: u32| {
@@ -561,6 +590,20 @@ fn register_draw(lua: &Lua, yk: &Table) -> mlua::Result<()> {
         ray::draw_circle(x as i32, y as i32, r, color(c));
         Ok(())
     })?)?;
+    yk.set("draw_ellipse_lines", lua.create_function(|lua, (x, y, rx, ry, c): (f32, f32, f32, f32, u32)| {
+        check_drawing(lua)?;
+        ray::draw_ellipse_lines(x as i32, y as i32, rx, ry, color(c));
+        Ok(())
+    })?)?;
+    // Where a canvas point at a lift z lands on screen, through the camera the windows were
+    // just drawn with. Only inside yk.draw.
+    yk.set("to_screen", lua.create_function(|lua, (x, y, z): (f32, f32, f32)| {
+        check_drawing(lua)?;
+        let cam = lua.app_data_ref::<Io>().and_then(|io| io.cam3d);
+        let Some(cam) = cam else { return Ok((0.0, 0.0)) };
+        let v = ray::world_to_screen(ray::Vector3 { x, y, z }, cam);
+        Ok((v.x, v.y))
+    })?)?;
     yk.set("draw_text", lua.create_function(|lua, (text, x, y, size, c): (String, f32, f32, i32, u32)| {
         check_drawing(lua)?;
         ray::draw_text(&text, x as i32, y as i32, size, color(c));
@@ -569,20 +612,102 @@ fn register_draw(lua: &Lua, yk: &Table) -> mlua::Result<()> {
     yk.set("measure_text", lua.create_function(|_, (text, size): (String, i32)| {
         Ok(ray::measure_text(&text, size))
     })?)?;
+    // Every drawable surface, children included, for the labels overlay. Only inside yk.draw on
+    // a frame that called yk.want_inspect; empty otherwise. Builds tables, so it is for
+    // instruments rather than for every frame.
+    yk.set("surfaces", lua.create_function(|lua, ()| {
+        check_drawing(lua)?;
+        let list = lua.create_table()?;
+        let Some(io) = lua.app_data_ref::<Io>() else { return Ok(list) };
+        for (n, w) in io.inspect.iter().enumerate() {
+            let t = lua.create_table_with_capacity(0, 17)?;
+            t.raw_set("kind", w.kind)?;
+            t.raw_set("source", w.source)?;
+            t.raw_set("tex_id", w.tex_id)?;
+            t.raw_set("tex_w", w.tex_w)?;
+            t.raw_set("tex_h", w.tex_h)?;
+            t.raw_set("sampling", w.sampling.as_str())?;
+            t.raw_set("canvas_x", w.canvas_x)?;
+            t.raw_set("canvas_y", w.canvas_y)?;
+            t.raw_set("geo_x", w.geo_x)?;
+            t.raw_set("geo_y", w.geo_y)?;
+            t.raw_set("geo_w", w.geo_w)?;
+            t.raw_set("geo_h", w.geo_h)?;
+            t.raw_set("z", w.z)?;
+            t.raw_set("x", w.x)?;
+            t.raw_set("y", w.y)?;
+            t.raw_set("w", w.w)?;
+            t.raw_set("h", w.h)?;
+            list.raw_set(n + 1, t)?;
+        }
+        Ok(list)
+    })?)?;
+    // The trackpad as the gesture code sees it, for the pad overlay. Only inside yk.draw on a
+    // frame that called yk.want_pad, and nil when there is no pad.
+    yk.set("pad", lua.create_function(|lua, ()| {
+        check_drawing(lua)?;
+        let Some(io) = lua.app_data_ref::<Io>() else { return Ok(Value::Nil) };
+        let Some(p) = io.pad.as_ref() else { return Ok(Value::Nil) };
+        let t = lua.create_table_with_capacity(0, 32)?;
+        let fingers = lua.create_table_with_capacity(p.count, 0)?;
+        for i in 0..p.count {
+            let c = lua.create_table_with_capacity(0, 7)?;
+            c.raw_set("x", p.fingers[i].0)?;
+            c.raw_set("y", p.fingers[i].1)?;
+            c.raw_set("major", p.size[i].0)?;
+            c.raw_set("minor", p.size[i].1)?;
+            c.raw_set("raw_major", p.major[i])?;
+            c.raw_set("resting", p.resting[i])?;
+            c.raw_set("faint", p.faint[i])?;
+            fingers.raw_set(i + 1, c)?;
+        }
+        t.raw_set("fingers", fingers)?;
+        t.raw_set("count", p.count)?;
+        t.raw_set("active", p.active)?;
+        t.raw_set("rest_zone", p.rest_zone)?;
+        t.raw_set("contact_max", p.contact_max)?;
+        t.raw_set("left", p.left)?;
+        t.raw_set("right", p.right)?;
+        t.raw_set("mode", p.mode)?;
+        t.raw_set("pan_armed", p.pan_armed)?;
+        t.raw_set("zoom_armed", p.zoom_armed)?;
+        t.raw_set("ptr_armed", p.ptr_armed)?;
+        t.raw_set("software_buttons", p.software_buttons)?;
+        t.raw_set("strip", p.strip)?;
+        t.raw_set("split", p.split)?;
+        t.raw_set("aspect", p.aspect)?;
+        t.raw_set("pan_x", p.pan.0)?;
+        t.raw_set("pan_y", p.pan.1)?;
+        t.raw_set("zoom", p.zoom)?;
+        t.raw_set("has_size", p.has_size)?;
+        t.raw_set("load", p.load)?;
+        t.raw_set("load_max", p.load_max)?;
+        Ok(Value::Table(t))
+    })?)?;
     Ok(())
 }
 
-// Run yk.draw, if the scripts define one. Called inside the draw pass, after the windows and
-// the engine's own instruments.
-pub fn draw(s: &mut Script) {
+// What engine data the scripts want to draw this frame: (surface inspection, trackpad).
+pub fn wants(s: &Script) -> (bool, bool) {
+    s.vm.lua.app_data_ref::<Io>().map_or((false, false), |io| (io.want_inspect, io.want_pad))
+}
+
+// Run yk.draw, if the scripts define one. Called inside the draw pass, after the windows. The
+// inspection list and the pad reading are lent for the call and handed back after.
+pub fn draw(s: &mut Script, cam3d: ray::Camera3D, inspect: &mut Vec<Inspect>, pad: Option<PadView>) {
     let vm = &s.vm;
     let Some(draw_fn) = vm.draw_fn.as_ref() else { return };
     if let Some(mut io) = vm.lua.app_data_mut::<Io>() {
         io.drawing = true;
+        std::mem::swap(&mut io.inspect, inspect);
+        io.pad = pad;
+        io.cam3d = Some(cam3d);
     }
     let result = draw_fn.call::<()>(());
     if let Some(mut io) = vm.lua.app_data_mut::<Io>() {
         io.drawing = false;
+        std::mem::swap(&mut io.inspect, inspect);
+        io.pad = None;
     }
     report(s, "draw", result);
 }
@@ -619,6 +744,8 @@ pub fn frame(s: &mut Script, f: &FrameIn, out: &mut Vec<Cmd>) -> Route {
     if let Some(mut io) = vm.lua.app_data_mut::<Io>() {
         io.out.clear();
         io.route = Route::default();
+        io.want_inspect = false;
+        io.want_pad = false;
         let n = f.held.len().min(io.held.len());
         io.held[..n].copy_from_slice(&f.held[..n]);
     }
@@ -717,6 +844,7 @@ fn fill_snapshot(vm: &Vm, f: &FrameIn) -> mlua::Result<()> {
     t.raw_set("zoom_max", f.zoom_max)?;
     t.raw_set("zoom_default", f.zoom_default)?;
     t.raw_set("double_click_ms", f.double_click_ms)?;
+    t.raw_set("cam_dist", f.cam_dist)?;
 
     let w = f.windows;
     t.raw_set("win_count", w.id.len())?;
@@ -727,6 +855,15 @@ fn fill_snapshot(vm: &Vm, f: &FrameIn) -> mlua::Result<()> {
     fill(&l.win_h, &w.h)?;
     fill(&l.win_max, &w.maximized)?;
     fill(&l.win_order, &w.order)?;
+    fill(&l.win_z, &w.z)?;
+    fill(&l.win_rw, &w.restore_w)?;
+    fill(&l.win_rh, &w.restore_h)?;
+    t.raw_set("move_count", f.move_requests.len())?;
+    for (i, &(id, x, y)) in f.move_requests.iter().enumerate() {
+        l.move_id.raw_set(i + 1, id)?;
+        l.move_x.raw_set(i + 1, x)?;
+        l.move_y.raw_set(i + 1, y)?;
+    }
 
     t.raw_set("mapped_count", f.mapped.len())?;
     for (i, &(id, welcome)) in f.mapped.iter().enumerate() {

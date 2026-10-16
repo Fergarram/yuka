@@ -243,6 +243,7 @@ pub struct Touchpad {
 
 // A read-only snapshot of the pad for the debug overlay: fingers as fractions of the
 // surface, the button regions, and what the gesture code currently believes.
+#[derive(Clone)]
 pub struct PadView {
     pub fingers: [(f32, f32); MAX_SLOTS],
     // Contact ellipse per finger, as a fraction of the pad's height so it scales with

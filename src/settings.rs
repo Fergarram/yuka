@@ -180,19 +180,6 @@ pub struct Settings {
     // means fresher content from a client that ignores configures, at the cost of asking
     // one that is merely slow to redraw work it will throw away.
     pub resize_wait_frames: u32,
-    // Whether to draw what a client padded around its window, which is where its shadow and
-    // its rounded corners live.
-    //
-    // A toolkit commits a surface larger than the geometry it declares, and we cannot ask it
-    // not to: server-side decorations are not implemented by the toolkits that do this. So the
-    // choice is only whether to show what is already in the buffer. Cropping to the geometry
-    // slices the shadow off square and fills the rounded corners back in, which is what it
-    // looked like before this existed. Drawing it costs the padding's worth of transparent
-    // pixels per window and lets a shadow fall across whatever is behind it.
-    //
-    // Only the drawing. Hit tests, placement, drags and maximizing all still work in the
-    // geometry rectangle, so the padding can never be clicked.
-    pub draw_shadows: bool,
 
     // Whether a window being shrunk gets a mip chain, sampled trilinear with anisotropy.
     //
@@ -272,7 +259,6 @@ pub fn defaults() -> Settings {
         resize_min_px: 120.0,
         resize_stretch: false,
         resize_wait_frames: 8,
-        draw_shadows: true,
         mips_when_minified: true,
         dmabuf_blit_below: 0.9,
         dmabuf_mode: DmabufMode::Hold,
@@ -420,14 +406,6 @@ pub fn apply(set: &mut Settings, key: &str, value: &str, origin: &str) -> bool {
             }
         },
         "dmabuf_blit_below" => f32_key!(dmabuf_blit_below),
-        "draw_shadows" => match value {
-            "true" | "1" | "yes" => set.draw_shadows = true,
-            "false" | "0" | "no" => set.draw_shadows = false,
-            _ => {
-                eprintln!("yuka: settings: {origin}: draw_shadows wants true or false");
-                return false;
-            }
-        },
         "debug_taps" => match value {
             "true" | "1" | "yes" => set.debug_taps = true,
             "false" | "0" | "no" => set.debug_taps = false,
