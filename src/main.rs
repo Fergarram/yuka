@@ -1104,10 +1104,17 @@ fn main() {
     // Behaviour lives in the scripts, not in the binary: what the keys do, where a scroll
     // goes, and the settings (lua/config.lua). Re-read while running (see
     // SETTINGS_POLL_FRAMES), so tuning is a save from another tty rather than a rebuild.
-    // Scripts that fail to load leave the defaults and a message on screen.
+    // No scripts, no yuka: without them nothing answers input, so scripts that will not load
+    // end the run here, before anything has taken the display or the keyboard.
     let lua_dir = std::env::var("YUKA_LUA").unwrap_or_else(|_| lua::DEFAULT_DIR.to_string());
-    let (mut script, loaded_set) = lua::init(&lua_dir);
-    let mut set = loaded_set.unwrap_or_else(|| settings::from_pairs(&[], "defaults").0);
+    let (mut script, mut set) = match lua::init(&lua_dir) {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            eprintln!("yuka: lua: {e}");
+            eprintln!("yuka: the scripts did not load, exiting");
+            std::process::exit(1);
+        }
+    };
     // Commands the scripts asked for this frame, drained as they are applied.
     let mut cmds: Vec<lua::Cmd> = Vec::with_capacity(32);
 
@@ -1772,27 +1779,11 @@ fn main() {
         // Pick up edited scripts. Every setting is read where it is used, per event or per
         // frame, so a save lands on the next frame with no further work.
         //
-        // Super+R reloads on demand, and is the scripts' own binding while they run. While
-        // they are missing or broken the engine answers it instead, since it is the one key
-        // that cannot live in the thing it brings back.
-        let scripts_down = !lua::loaded(&script) || script.error.is_some();
-        let forced = scripts_down
-            && inp
-                .as_ref()
-                .map(|i| {
-                    input::super_down(i)
-                        && input::events(i).iter().any(|&(c, p)| p && c == input::KEY_R)
-                })
-                .unwrap_or(false);
-        let reloaded = if forced {
-            lua::reload(&mut script)
-        } else if frame % SETTINGS_POLL_FRAMES == 0 {
-            lua::reload_if_changed(&mut script)
-        } else {
-            None
-        };
-        if let Some(new) = reloaded {
-            adopt_settings(&mut set, new);
+        // Reloading on demand is the scripts' own binding (Super+R by default).
+        if frame % SETTINGS_POLL_FRAMES == 0 {
+            if let Some(new) = lua::reload_if_changed(&mut script) {
+                adopt_settings(&mut set, new);
+            }
         }
 
         // Say which way dmabufs are being handled, at startup and on every reload that
@@ -1907,14 +1898,6 @@ fn main() {
         // are its own. Applied here, in the order asked, before anything below reads the
         // camera.
         //
-        // Without scripts the route is the plain compositor answer, everything to the window
-        // being worked in, so a broken script still leaves applications usable.
-        let pointer_on_client = !super_down && focused.is_some() && hovered.is_some();
-        let fallback_route = lua::Route {
-            wheel: pointer_on_client,
-            fingers: pointer_on_client,
-            pinch: pointer_on_client,
-        };
         let no_keys = [false; input::KEY_CODES];
         let route = {
             let f = lua::FrameIn {
@@ -1951,7 +1934,7 @@ fn main() {
                 dt: ray::frame_time(),
                 frame,
             };
-            lua::frame(&mut script, &f, &mut cmds, fallback_route)
+            lua::frame(&mut script, &f, &mut cmds)
         };
         let (sw, sh) = (ray::screen_width() as f32, ray::screen_height() as f32);
         let mut reload_now = false;

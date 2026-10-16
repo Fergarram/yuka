@@ -16,9 +16,10 @@
 // the engine the only writer, makes the order of effects the order of the buffer, and
 // means a script that misbehaves can only ever ask for things.
 //
-// Reloading builds a fresh VM. A script that fails to load leaves the running one in
-// place, and its error is kept for the screen, so a bad save costs nothing but a
-// message.
+// yuka does not run without scripts: if they will not load at startup, init says so
+// and the engine exits. Reloading builds a fresh VM, and one that fails to load leaves
+// the running one in place with its error kept for the screen, so a bad save costs
+// nothing but a message.
 //
 
 use std::time::SystemTime;
@@ -139,7 +140,7 @@ struct Io {
 // allocates no tables.
 struct Vm {
     lua: Lua,
-    frame_fn: Option<Function>,
+    frame_fn: Function,
     snap: Table,
     key_code: Table,
     key_press: Table,
@@ -147,7 +148,7 @@ struct Vm {
 
 pub struct Script {
     dir: String,
-    vm: Option<Vm>,
+    vm: Vm,
     // Newest modification time under dir as of the last load, to notice a save.
     stamp: Option<SystemTime>,
     // Why the last load failed, or why the last frame call did. Shown on screen until a
@@ -159,35 +160,40 @@ pub struct Script {
 // Load
 //
 
-pub fn init(dir: &str) -> (Script, Option<Settings>) {
-    let mut s = Script { dir: dir.to_string(), vm: None, stamp: None, error: None };
-    let set = reload(&mut s);
-    (s, set)
+// The first load. Err with the reason when the scripts will not load, which the caller
+// treats as fatal.
+pub fn init(dir: &str) -> Result<(Script, Settings), String> {
+    let stamp = newest_mtime(dir);
+    let (vm, pairs) = load_vm(dir).map_err(|e| format!("{dir}/{ENTRY}: {e}"))?;
+    let set = adopt_pairs(dir, &pairs);
+    Ok((Script { dir: dir.to_string(), vm, stamp, error: None }, set))
 }
 
 // Build a fresh VM from the scripts on disk. Some(settings) when it loaded and the new VM
-// is in force; None when it did not, and whatever was running before still is.
+// is in force; None when it did not, and the scripts that were running still are.
 pub fn reload(s: &mut Script) -> Option<Settings> {
     s.stamp = newest_mtime(&s.dir);
     match load_vm(&s.dir) {
         Ok((vm, pairs)) => {
-            let origin = format!("{}/config.lua", s.dir);
-            let (set, applied) = settings::from_pairs(&pairs, &origin);
-            println!("yuka: lua: loaded {}/{ENTRY}, {applied} settings", s.dir);
-            s.vm = Some(vm);
+            s.vm = vm;
             s.error = None;
-            Some(set)
+            Some(adopt_pairs(&s.dir, &pairs))
         }
         Err(e) => {
             let msg = format!("{}/{ENTRY}: {e}", s.dir);
             eprintln!("yuka: lua: {msg}");
-            if s.vm.is_some() {
-                eprintln!("yuka: lua: keeping the scripts that were running");
-            }
+            eprintln!("yuka: lua: keeping the scripts that were running");
             s.error = Some(msg);
             None
         }
     }
+}
+
+fn adopt_pairs(dir: &str, pairs: &[(String, String)]) -> Settings {
+    let origin = format!("{dir}/config.lua");
+    let (set, applied) = settings::from_pairs(pairs, &origin);
+    println!("yuka: lua: loaded {dir}/{ENTRY}, {applied} settings");
+    set
 }
 
 // Reload if anything under the script directory has been saved since the last load.
@@ -196,10 +202,6 @@ pub fn reload_if_changed(s: &mut Script) -> Option<Settings> {
         return None;
     }
     reload(s)
-}
-
-pub fn loaded(s: &Script) -> bool {
-    s.vm.is_some()
 }
 
 fn load_vm(dir: &str) -> mlua::Result<(Vm, Vec<(String, String)>)> {
@@ -223,10 +225,10 @@ fn load_vm(dir: &str) -> mlua::Result<(Vm, Vec<(String, String)>)> {
         .map_err(|e| mlua::Error::RuntimeError(format!("cannot read: {e}")))?;
     lua.load(source).set_name(format!("@{path}")).exec()?;
 
-    let frame_fn: Option<Function> = yk.get("frame")?;
-    if frame_fn.is_none() {
-        eprintln!("yuka: lua: {path} defines no yk.frame, nothing will respond to input");
-    }
+    let frame_fn: Function = match yk.get::<Value>("frame")? {
+        Value::Function(f) => f,
+        _ => return Err(mlua::Error::RuntimeError("defines no yk.frame function".into())),
+    };
     let pairs = match yk.get::<Value>("config")? {
         Value::Table(t) => config_pairs(&t)?,
         Value::Nil => Vec::new(),
@@ -359,21 +361,20 @@ fn register(lua: &Lua, yk: &Table) -> mlua::Result<()> {
 //
 
 // Hand the frame to the script and collect what it asks for. Commands are appended to
-// out; the route comes back, and is `fallback` whenever the script does not set one.
-pub fn frame(s: &mut Script, f: &FrameIn, out: &mut Vec<Cmd>, fallback: Route) -> Route {
-    let Some(vm) = s.vm.as_ref() else { return fallback };
-    let Some(frame_fn) = vm.frame_fn.as_ref() else { return fallback };
+// out; the route comes back, and sends nothing to clients unless the script says so.
+pub fn frame(s: &mut Script, f: &FrameIn, out: &mut Vec<Cmd>) -> Route {
+    let vm = &s.vm;
 
     if let Some(mut io) = vm.lua.app_data_mut::<Io>() {
         io.out.clear();
-        io.route = fallback;
+        io.route = Route::default();
         let n = f.held.len().min(io.held.len());
         io.held[..n].copy_from_slice(&f.held[..n]);
     }
 
-    let result = fill_snapshot(vm, f).and_then(|()| frame_fn.call::<()>(vm.snap.clone()));
+    let result = fill_snapshot(vm, f).and_then(|()| vm.frame_fn.call::<()>(vm.snap.clone()));
 
-    let mut route = fallback;
+    let mut route = Route::default();
     if let Some(mut io) = vm.lua.app_data_mut::<Io>() {
         out.extend_from_slice(&io.out);
         io.out.clear();

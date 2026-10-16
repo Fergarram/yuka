@@ -178,8 +178,9 @@ scripts (LuaJIT) in `lua/`:
 
 The scripts are read at startup and re-read while running: save any file under
 `lua/` and the change lands on the next frame, or press Super+R to reload on
-demand. Scripts that fail to load leave the previous ones running and show the
-error across the top of the screen. Ctrl+Alt+Backspace (quit) and Ctrl+Alt+Fn
+demand. yuka will not start without scripts that load. Once running, a save
+that fails to load leaves the previous scripts running and shows the error
+across the top of the screen. Ctrl+Alt+Backspace (quit) and Ctrl+Alt+Fn
 (switch VT) stay in the engine so a broken script can never lock you in.
 
 The canvas is driven with the Super key and the trackpad. Broadly: hold Super and

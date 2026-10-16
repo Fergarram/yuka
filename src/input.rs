@@ -61,7 +61,6 @@ const V120_PER_NOTCH: f32 = 120.0;
 pub const KEY_CODES: usize = 768;
 
 pub const KEY_BACKSPACE: u16 = 14;
-pub const KEY_R: u16 = 19;
 pub const KEY_LEFTCTRL: u16 = 29;
 pub const KEY_A: u16 = 30;
 pub const KEY_LEFTSHIFT: u16 = 42;

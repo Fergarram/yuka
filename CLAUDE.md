@@ -3,17 +3,35 @@
 	windows are quads we can smoothly zoom, pan, and move, drawn through a
 	shader pass that applies to all windows.
 
-	Language: Rust. Renderer: raylib (via FFI / raylib-rs). Wayland protocol
-	frontend: Smithay.
+	Language: Rust for the engine, LuaJIT (via mlua, vendored) for behaviour.
+	Renderer: raylib (via FFI / raylib-rs). Wayland protocol frontend: Smithay.
 
-	The codebase has two zones with different rules:
+	Rust is the engine: protocol, rendering, gesture recognition, and the
+	mechanics of moving and drawing things. Lua is policy: key bindings,
+	what gestures mean, where scroll and pinch go, and the settings
+	(lua/config.lua). The scripts live in lua/, entry lua/init.lua. yuka
+	does not start without scripts that load. A reload that fails keeps the
+	running scripts and shows the error on screen. Quit and VT switching
+	stay in Rust so a broken script can never lock the machine.
+
+	The codebase has three zones with different rules:
 
 	1. The protocol frontend (Smithay facing). A small, contained set of
 	   modules that implement Smithay's Handler traits and hold its reference
 	   counted surface handles. Trait impls and Arc/Rc are unavoidable here.
 	   Keep this zone as small as possible.
 
-	2. Everything else (canvas, camera, window management, input mapping,
+	2. The script boundary (src/lua.rs). The only module that touches mlua
+	   types. mlua's traits and handles stay inside it; what crosses out is
+	   plain data. Each frame the engine fills a snapshot table and calls
+	   yk.frame once. Scripts read the snapshot and call yk.* functions, which
+	   queue commands (lua::Cmd). The main loop drains them in order after the
+	   call returns, so the engine stays the only writer of its state. Scripts
+	   name windows by render::Windows ids, never by surface. To give scripts
+	   a new power, add a Cmd variant (or a snapshot field) and its yk.*
+	   function here, and apply it in the main loop.
+
+	3. Everything else (canvas, camera, window management, input mapping,
 	   shader loading, rendering). This is the code we hand craft. It follows
 	   the Data Oriented rules below with no exceptions.
 </project-context>
