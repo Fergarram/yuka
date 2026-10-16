@@ -1101,9 +1101,6 @@ fn main() {
     // The trackpad instrument in the corner: fingers, button regions, live gesture
     // state. YUKA_DEBUG_PAD=1, or Super+P at any time.
     let mut debug_pad = std::env::var("YUKA_DEBUG_PAD").is_ok();
-    // Frame rate, this frame and the worst of the last second. YUKA_DEBUG_FPS=1, or
-    // Super+F at any time.
-    let mut debug_fps = std::env::var("YUKA_DEBUG_FPS").is_ok();
 
     let egl = egl::init().expect("egl init");
     // How much anisotropic filtering the driver offers, asked once. It only matters
@@ -1206,7 +1203,8 @@ fn main() {
     let mut activated_ids: Vec<u64> = Vec::with_capacity(8);
 
     let start = Instant::now();
-    let clear = ray::Color { r: 24, g: 24, b: 32, a: 255 };
+    // Behind the canvas, until the scripts say otherwise (yk.set_background).
+    let mut clear = ray::Color { r: 24, g: 24, b: 32, a: 255 };
     let mut frame: u32 = 0;
     let debug_input = std::env::var("YUKA_DEBUG_INPUT").is_ok();
     // Dumps each toplevel's surface tree, which is what decides how children stack. Twice now
@@ -1225,11 +1223,6 @@ fn main() {
         .unwrap_or(u32::MAX);
     let mut last = Instant::now();
     let mut max_dt_ms: f64 = 0.0;
-    // The last second of frame times, for the on-screen counter. A run-long maximum is
-    // the wrong thing to watch while dragging something: one stall from startup would
-    // colour it red forever.
-    let mut dt_ring = [0.0f32; 60];
-    let mut dt_slot = 0usize;
     let mut slow_frames: u32 = 0;
     // Last session state we acted on, to catch activation edges from libseat.
     let mut session_active = true;
@@ -1343,8 +1336,6 @@ fn main() {
         let now = Instant::now();
         let dt_ms = now.duration_since(last).as_secs_f64() * 1000.0;
         last = now;
-        dt_ring[dt_slot] = dt_ms as f32;
-        dt_slot = (dt_slot + 1) % dt_ring.len();
         if frame > 5 {
             if dt_ms > max_dt_ms {
                 max_dt_ms = dt_ms;
@@ -1726,13 +1717,13 @@ fn main() {
         let mut begin_move: Option<(u64, bool)> = None;
         let mut begin_resize: Option<(u64, f32, f32)> = None;
         let mut resize_corner: Option<(f32, f32)> = None;
+        render::clear_alpha_targets(&mut windows);
         for cmd in cmds.drain(..) {
             match cmd {
                 lua::Cmd::Reload => reload_now = true,
                 lua::Cmd::ToggleDebug(which) => {
                     let (flag, name) = match which {
                         lua::Debug::Labels => (&mut debug_labels, "debug labels"),
-                        lua::Debug::Fps => (&mut debug_fps, "fps counter"),
                         lua::Debug::Pad => (&mut debug_pad, "trackpad overlay"),
                     };
                     *flag = !*flag;
@@ -1771,6 +1762,19 @@ fn main() {
                 lua::Cmd::BeginMove(id, lift) => begin_move = Some((id, lift)),
                 lua::Cmd::BeginResize(id, ex, ey) => begin_resize = Some((id, ex, ey)),
                 lua::Cmd::ResizeCorner(ex, ey) => resize_corner = Some((ex, ey)),
+                lua::Cmd::WindowAlpha(id, alpha) => {
+                    if let Some(surf) = render::surface_by_id(&windows, id) {
+                        render::set_alpha_target(&mut windows, &surf, alpha);
+                    }
+                }
+                lua::Cmd::Background(rgba) => {
+                    clear = ray::Color {
+                        r: (rgba >> 24) as u8,
+                        g: (rgba >> 16) as u8,
+                        b: (rgba >> 8) as u8,
+                        a: rgba as u8,
+                    };
+                }
                 lua::Cmd::ReleaseAll => release_all = true,
                 lua::Cmd::Spawn(cmd) => {
                     if let Some(child) = spawn_client(&server.socket_name, &cmd) {
@@ -2525,14 +2529,8 @@ fn main() {
         // visible on Chromium as part of the window trailing the rest of it while dragging.
         // Maximized windows keep their pinned top-left first, so children placed below and
         // the pixel alignment after both see the corrected position.
-        // What is covering the window you are working in, faded so you can see through it. After
-        // the drag and the settle, so it judges where things are now rather than where they were.
-        render::fade_covers(
-            &mut windows,
-            focused.as_ref(),
-            set.cover_opacity,
-            ray::frame_time().min(0.05),
-        );
+        // Each window's opacity toward what the scripts asked for this frame.
+        render::ease_alpha(&mut windows, ray::frame_time().min(0.05));
         render::hold_maximized(&mut windows);
         render::sync_children(&mut windows);
 
@@ -2646,23 +2644,6 @@ fn main() {
         if debug_labels {
             render::draw_debug_labels(&windows, cam3d, cam.zoom, anisotropy);
         }
-        if debug_fps {
-            // Averaged for the rate, worst for the stutter. Skip empty slots so the
-            // first second on screen is not distorted by zeros.
-            let mut sum = 0.0f32;
-            let mut worst = 0.0f32;
-            let mut n = 0.0f32;
-            for &v in dt_ring.iter() {
-                if v > 0.0 {
-                    sum += v;
-                    worst = worst.max(v);
-                    n += 1.0;
-                }
-            }
-            let avg = if n > 0.0 { sum / n } else { 0.0 };
-            let fps = if avg > 0.0 { 1000.0 / avg } else { 0.0 };
-            render::draw_frame_stats(fps, dt_ms as f32, worst);
-        }
         if debug_pad {
             if let Some(tp) = touchpad.as_ref() {
                 render::draw_pad_debug(
@@ -2672,6 +2653,8 @@ fn main() {
                 );
             }
         }
+        // The scripts' own drawing, over the windows and the instruments.
+        lua::draw(&mut script);
         // Scripts that would not load or run say so on screen, since the log may be on a tty
         // nobody is looking at.
         if let Some(err) = script.error.as_ref() {

@@ -180,6 +180,8 @@ scripts (LuaJIT) in `lua/`:
   corner a resize holds.
 - `lua/windows.lua` decides focus: new windows, activation requests, a focused
   window leaving the view, and the programs started with yuka.
+- `lua/looks.lua` sets the background, fades windows that cover the focused one,
+  and draws over the canvas through `yk.draw` (the fps counter lives here).
 - `lua/config.lua` holds the settings the engine itself reads (trackpad, rendering,
   zoom limits), documented inline. Defaults live in `src/settings.rs`; a key left
   out falls back to them. Tuning for behaviour lives in a `tune` table at the top

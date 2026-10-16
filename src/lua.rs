@@ -27,6 +27,7 @@ use std::time::SystemTime;
 
 use mlua::{Function, IntoLua, Lua, Table, Value};
 
+use crate::ray;
 use crate::render::WinList;
 use crate::settings::{self, Settings};
 
@@ -52,7 +53,6 @@ const KEY_CODES: usize = crate::input::KEY_CODES;
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Debug {
     Labels,
-    Fps,
     Pad,
 }
 
@@ -84,6 +84,10 @@ pub enum Cmd {
     BeginResize(u64, f32, f32),
     // Change which corner the resize in progress holds.
     ResizeCorner(f32, f32),
+    // How opaque a window should be this frame, eased toward. Every window not named is opaque.
+    WindowAlpha(u64, f32),
+    // The colour behind the canvas, as 0xRRGGBBAA.
+    Background(u32),
     // Start a program as a client of this compositor.
     Spawn(String),
 }
@@ -176,6 +180,9 @@ struct Io {
     out: Vec<Cmd>,
     route: Route,
     held: Vec<bool>,
+    // Inside yk.draw, which is the only time the drawing functions may touch raylib: outside
+    // the draw pass a draw call would land in the middle of the engine's own GL state.
+    drawing: bool,
 }
 
 // The list tables inside the snapshot, kept so a frame refills them rather than making new
@@ -189,6 +196,7 @@ struct Lists {
     win_w: Table,
     win_h: Table,
     win_max: Table,
+    win_order: Table,
     mapped: Table,
     mapped_welcome: Table,
     activated: Table,
@@ -199,6 +207,7 @@ struct Lists {
 struct Vm {
     lua: Lua,
     frame_fn: Function,
+    draw_fn: Option<Function>,
     snap: Table,
     lists: Lists,
 }
@@ -267,6 +276,7 @@ fn load_vm(dir: &str) -> mlua::Result<(Vm, Vec<(String, String)>)> {
         out: Vec::with_capacity(32),
         route: Route::default(),
         held: vec![false; KEY_CODES],
+        drawing: false,
     });
 
     // require() finds the other scripts next to the entry.
@@ -285,6 +295,10 @@ fn load_vm(dir: &str) -> mlua::Result<(Vm, Vec<(String, String)>)> {
     let frame_fn: Function = match yk.get::<Value>("frame")? {
         Value::Function(f) => f,
         _ => return Err(mlua::Error::RuntimeError("defines no yk.frame function".into())),
+    };
+    let draw_fn: Option<Function> = match yk.get::<Value>("draw")? {
+        Value::Function(f) => Some(f),
+        _ => None,
     };
     let pairs = match yk.get::<Value>("config")? {
         Value::Table(t) => config_pairs(&t)?,
@@ -307,11 +321,12 @@ fn load_vm(dir: &str) -> mlua::Result<(Vm, Vec<(String, String)>)> {
         win_w: list("win_w")?,
         win_h: list("win_h")?,
         win_max: list("win_max")?,
+        win_order: list("win_order")?,
         mapped: list("mapped")?,
         mapped_welcome: list("mapped_welcome")?,
         activated: list("activated")?,
     };
-    Ok((Vm { lua, frame_fn, snap, lists }, pairs))
+    Ok((Vm { lua, frame_fn, draw_fn, snap, lists }, pairs))
 }
 
 // The config table flattened to the key and value strings settings.rs parses. Lists become
@@ -373,10 +388,9 @@ fn edge(v: f32) -> f32 {
 fn debug_named(name: &str) -> mlua::Result<Debug> {
     match name {
         "labels" => Ok(Debug::Labels),
-        "fps" => Ok(Debug::Fps),
         "pad" => Ok(Debug::Pad),
         _ => Err(mlua::Error::RuntimeError(format!(
-            "no debug overlay called '{name}' (labels, fps, pad)"
+            "no debug overlay called '{name}' (labels, pad)"
         ))),
     }
 }
@@ -434,6 +448,15 @@ fn register(lua: &Lua, yk: &Table) -> mlua::Result<()> {
         push(lua, Cmd::ResizeCorner(edge(ex), edge(ey)));
         Ok(())
     })?)?;
+    yk.set("window_alpha", lua.create_function(|lua, (id, alpha): (u64, f32)| {
+        push(lua, Cmd::WindowAlpha(id, alpha));
+        Ok(())
+    })?)?;
+    yk.set("set_background", lua.create_function(|lua, rgba: u32| {
+        push(lua, Cmd::Background(rgba));
+        Ok(())
+    })?)?;
+    register_draw(lua, yk)?;
     yk.set("spawn", lua.create_function(|lua, cmd: String| {
         push(lua, Cmd::Spawn(cmd));
         Ok(())
@@ -449,6 +472,98 @@ fn register(lua: &Lua, yk: &Table) -> mlua::Result<()> {
         Ok(io.map_or(false, |io| code < io.held.len() && io.held[code]))
     })?)?;
     Ok(())
+}
+
+//
+// Drawing
+//
+// Thin wrappers over raylib's 2D calls, in screen pixels, with colours as 0xRRGGBBAA. Only
+// inside yk.draw, which the engine calls once a frame after the windows are drawn.
+//
+
+fn color(rgba: u32) -> ray::Color {
+    ray::Color {
+        r: (rgba >> 24) as u8,
+        g: (rgba >> 16) as u8,
+        b: (rgba >> 8) as u8,
+        a: rgba as u8,
+    }
+}
+
+fn check_drawing(lua: &Lua) -> mlua::Result<()> {
+    let drawing = lua.app_data_ref::<Io>().map_or(false, |io| io.drawing);
+    if drawing {
+        Ok(())
+    } else {
+        Err(mlua::Error::RuntimeError("drawing outside yk.draw".into()))
+    }
+}
+
+fn register_draw(lua: &Lua, yk: &Table) -> mlua::Result<()> {
+    yk.set("draw_rect", lua.create_function(|lua, (x, y, w, h, c): (f32, f32, f32, f32, u32)| {
+        check_drawing(lua)?;
+        ray::draw_rectangle(x as i32, y as i32, w as i32, h as i32, color(c));
+        Ok(())
+    })?)?;
+    yk.set("draw_rect_lines", lua.create_function(|lua, (x, y, w, h, c): (f32, f32, f32, f32, u32)| {
+        check_drawing(lua)?;
+        ray::draw_rectangle_lines(x as i32, y as i32, w as i32, h as i32, color(c));
+        Ok(())
+    })?)?;
+    yk.set("draw_line", lua.create_function(|lua, (x1, y1, x2, y2, c): (f32, f32, f32, f32, u32)| {
+        check_drawing(lua)?;
+        ray::draw_line(x1 as i32, y1 as i32, x2 as i32, y2 as i32, color(c));
+        Ok(())
+    })?)?;
+    yk.set("draw_circle", lua.create_function(|lua, (x, y, r, c): (f32, f32, f32, u32)| {
+        check_drawing(lua)?;
+        ray::draw_circle(x as i32, y as i32, r, color(c));
+        Ok(())
+    })?)?;
+    yk.set("draw_text", lua.create_function(|lua, (text, x, y, size, c): (String, f32, f32, i32, u32)| {
+        check_drawing(lua)?;
+        ray::draw_text(&text, x as i32, y as i32, size, color(c));
+        Ok(())
+    })?)?;
+    yk.set("measure_text", lua.create_function(|_, (text, size): (String, i32)| {
+        Ok(ray::measure_text(&text, size))
+    })?)?;
+    Ok(())
+}
+
+// Run yk.draw, if the scripts define one. Called inside the draw pass, after the windows and
+// the engine's own instruments.
+pub fn draw(s: &mut Script) {
+    let vm = &s.vm;
+    let Some(draw_fn) = vm.draw_fn.as_ref() else { return };
+    if let Some(mut io) = vm.lua.app_data_mut::<Io>() {
+        io.drawing = true;
+    }
+    let result = draw_fn.call::<()>(());
+    if let Some(mut io) = vm.lua.app_data_mut::<Io>() {
+        io.drawing = false;
+    }
+    report(s, "draw", result);
+}
+
+// Keep a call's error for the screen, once per distinct error, and clear it when that call
+// runs cleanly again. A failed reload is not cleared here: it stands until the scripts load.
+fn report(s: &mut Script, what: &str, result: mlua::Result<()>) {
+    let prefix = format!("{what}: ");
+    match result {
+        Ok(()) => {
+            if s.error.as_deref().is_some_and(|e| e.starts_with(&prefix)) {
+                s.error = None;
+            }
+        }
+        Err(e) => {
+            let msg = format!("{prefix}{e}");
+            if s.error.as_deref() != Some(msg.as_str()) {
+                eprintln!("yuka: lua: {msg}");
+                s.error = Some(msg);
+            }
+        }
+    }
 }
 
 //
@@ -474,23 +589,7 @@ pub fn frame(s: &mut Script, f: &FrameIn, out: &mut Vec<Cmd>) -> Route {
         out.extend(io.out.drain(..));
         route = io.route;
     }
-    match result {
-        Ok(()) => {
-            // A frame that ran clears a runtime error, though not a failed reload: that one
-            // stands until the scripts load.
-            if s.error.as_deref().is_some_and(|e| e.starts_with("frame: ")) {
-                s.error = None;
-            }
-        }
-        Err(e) => {
-            let msg = format!("frame: {e}");
-            // Once per distinct error, since a broken frame function breaks every frame.
-            if s.error.as_deref() != Some(msg.as_str()) {
-                eprintln!("yuka: lua: {msg}");
-                s.error = Some(msg);
-            }
-        }
-    }
+    report(s, "frame", result);
     route
 }
 
@@ -586,6 +685,7 @@ fn fill_snapshot(vm: &Vm, f: &FrameIn) -> mlua::Result<()> {
     fill(&l.win_w, &w.w)?;
     fill(&l.win_h, &w.h)?;
     fill(&l.win_max, &w.maximized)?;
+    fill(&l.win_order, &w.order)?;
 
     t.raw_set("mapped_count", f.mapped.len())?;
     for (i, &(id, welcome)) in f.mapped.iter().enumerate() {

@@ -202,16 +202,6 @@ pub struct Settings {
     // The gap left around a window placed that way, in canvas units. Enough that two windows read
     // as two rather than as a seam, and small enough that a crowded canvas still finds room.
     pub spawn_gap: f32,
-    // How opaque a window is drawn while it covers the one you are working in.
-    //
-    // A window in front of the focused one hides work you are looking at, and the usual answers are
-    // to raise the focused window or to move something, both of which rearrange the desk to solve a
-    // problem that only lasts while you are looking. Fading the thing on top instead leaves
-    // everything where it is and lets you see through it.
-    //
-    // Only windows above the focused one, and only where they actually overlap it. 1.0 switches the
-    // whole idea off, and anything below about 0.2 makes the covering window hard to find again.
-    pub cover_opacity: f32,
     // Whether to draw what a client padded around its window, which is where its shadow and
     // its rounded corners live.
     //
@@ -308,7 +298,6 @@ pub fn defaults() -> Settings {
         spawn_clear: true,
         spawn_order: [DIR_RIGHT, DIR_UP, DIR_LEFT, DIR_DOWN],
         spawn_gap: 24.0,
-        cover_opacity: 0.35,
         mips_when_minified: true,
         dmabuf_blit_below: 0.9,
         dmabuf_mode: DmabufMode::Hold,
@@ -486,7 +475,6 @@ pub fn apply(set: &mut Settings, key: &str, value: &str, origin: &str) -> bool {
                 return false;
             }
         },
-        "cover_opacity" => f32_key!(cover_opacity),
         "mips_when_minified" => match value {
             "true" | "1" | "yes" => set.mips_when_minified = true,
             "false" | "0" | "no" => set.mips_when_minified = false,
@@ -548,7 +536,6 @@ pub fn apply(set: &mut Settings, key: &str, value: &str, origin: &str) -> bool {
 // zoom range of zero would divide by it.
 pub fn sanitise(set: &mut Settings) {
     set.spawn_gap = set.spawn_gap.max(0.0);
-    set.cover_opacity = set.cover_opacity.clamp(0.0, 1.0);
     set.dmabuf_blit_below = set.dmabuf_blit_below.max(0.0);
     set.zoom_min = set.zoom_min.max(0.001);
     set.zoom_max = set.zoom_max.max(set.zoom_min * 1.001);

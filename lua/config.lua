@@ -249,20 +249,6 @@ return {
     -- as two rather than as a seam, small enough that a crowded canvas still finds room.
     spawn_gap = 24.0,
 
-    -- How opaque a window is drawn while it covers the one you are working in.
-    --
-    -- A window in front of the focused one hides work you are looking at. The usual answers are
-    -- to raise the focused window or to move something, both of which rearrange the desk to
-    -- solve a problem that only lasts while you are looking. Fading the thing on top instead
-    -- leaves everything where it is and lets you see through it.
-    --
-    -- Only windows above the focused one, and only where they actually overlap it. It eases
-    -- rather than switching, since the answer changes whenever you click, drag or pan.
-    --
-    -- 1.0 switches the whole idea off. Below about 0.2 the covering window gets hard to find
-    -- again.
-    cover_opacity = 0.9,
-
     -- Whether to draw what a client padded around its window, which is where its shadow
     -- and its rounded corners live.
     --

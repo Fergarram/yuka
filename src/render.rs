@@ -286,6 +286,8 @@ pub struct WinList {
     pub w: Vec<f32>,
     pub h: Vec<f32>,
     pub maximized: Vec<bool>,
+    // Stack order: higher is in front.
+    pub order: Vec<u32>,
 }
 
 pub fn win_list_new() -> WinList {
@@ -296,6 +298,7 @@ pub fn win_list_new() -> WinList {
         w: Vec::with_capacity(32),
         h: Vec::with_capacity(32),
         maximized: Vec::with_capacity(32),
+        order: Vec::with_capacity(32),
     }
 }
 
@@ -306,6 +309,7 @@ pub fn list_windows(windows: &Windows, out: &mut WinList) {
     out.w.clear();
     out.h.clear();
     out.maximized.clear();
+    out.order.clear();
     for i in 0..windows.surface.len() {
         if child(windows, i) || !drawable(windows, i) {
             continue;
@@ -317,6 +321,7 @@ pub fn list_windows(windows: &Windows, out: &mut WinList) {
         out.w.push(w);
         out.h.push(h);
         out.maximized.push(windows.maximized[i]);
+        out.order.push(windows.order[i]);
     }
 }
 
@@ -699,33 +704,27 @@ pub fn hold_maximized(windows: &mut Windows) {
     }
 }
 
-// Fade whatever is covering the window you are working in.
-//
-// Above it and overlapping it, both. Above, because a window behind the focused one hides nothing;
-// overlapping, because one off to the side is not in the way however it is stacked. Everything else
-// goes back to opaque.
-//
-// Eased rather than switched, since the answer changes whenever you click, drag or pan, and a hard
-// cut on each of those reads as flicker rather than as an answer.
-pub fn fade_covers(windows: &mut Windows, focused: Option<&WlSurface>, opacity: f32, dt: f32) {
+// How opaque each window is drawn is the scripts' to decide (yk.window_alpha): every target
+// goes back to opaque at the start of a frame, the scripts set the ones that should not be,
+// and the drawn value eases toward its target. Easing rather than switching, because the
+// answer changes whenever you click, drag or pan, and a hard cut on every change reads as
+// flicker.
+pub fn clear_alpha_targets(windows: &mut Windows) {
+    for i in 0..windows.alpha_to.len() {
+        windows.alpha_to[i] = 1.0;
+    }
+}
+
+pub fn set_alpha_target(windows: &mut Windows, surface: &WlSurface, alpha: f32) {
+    if let Some(i) = index_of(windows, surface) {
+        windows.alpha_to[i] = alpha.clamp(0.0, 1.0);
+    }
+}
+
+pub fn ease_alpha(windows: &mut Windows, dt: f32) {
     // How fast a window fades to where it is going, as a fraction of the gap per second. Fast
     // enough to feel immediate, slow enough that a click does not blink.
     const RATE: f32 = 14.0;
-
-    let front = focused.and_then(|surface| index_of(windows, surface));
-    for i in 0..windows.surface.len() {
-        windows.alpha_to[i] = 1.0;
-        let Some(f) = front else { continue };
-        if i == f || windows.order[i] <= windows.order[f] {
-            continue;
-        }
-        let (ax, ay, aw, ah) = visible(windows, i);
-        let (bx, by, bw, bh) = visible(windows, f);
-        let overlaps = ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah;
-        if overlaps {
-            windows.alpha_to[i] = opacity;
-        }
-    }
     let t = (RATE * dt).min(1.0);
     for i in 0..windows.surface.len() {
         windows.alpha[i] += (windows.alpha_to[i] - windows.alpha[i]) * t;
@@ -968,32 +967,6 @@ pub fn draw_debug_labels(windows: &Windows, cam3d: ray::Camera3D, zoom: f32, ani
     }
 }
 
-
-// Frame timing, top left. Three numbers because one is not enough to see lag: the rate,
-// this frame, and the worst frame in the last second or so. An average hides exactly the
-// stutter you are looking for, so the worst is what to watch while dragging something.
-//
-// Coloured by the worst rather than the average, and against the frame budget: green
-// while every frame fits in a 60Hz refresh, amber when some frame missed it, red when
-// something missed it badly.
-pub fn draw_frame_stats(fps: f32, ms: f32, worst_ms: f32) {
-    const PAD: i32 = 6;
-    const TEXT: i32 = 14;
-    let bg = ray::Color { r: 12, g: 12, b: 16, a: 190 };
-    let colour = if worst_ms <= 17.0 {
-        ray::Color { r: 130, g: 230, b: 140, a: 255 }
-    } else if worst_ms <= 25.0 {
-        ray::Color { r: 240, g: 210, b: 110, a: 255 }
-    } else {
-        ray::Color { r: 250, g: 120, b: 90, a: 255 }
-    };
-    // The latch margin is here because it is the number you tune against the other
-    // three: it is how far before the vblank the frame was composed.
-    let line = format!("{fps:.0} fps   {ms:.1} ms   worst {worst_ms:.1} ms");
-    let w = ray::measure_text(&line, TEXT);
-    ray::draw_rectangle(PAD, PAD, w + PAD * 2, TEXT + PAD * 2, bg);
-    ray::draw_text(&line, PAD * 2, PAD * 2, TEXT, colour);
-}
 
 // Why the scripts are not running, across the top of the screen. A few lines at most: the
 // first is where it went wrong, and a traceback past that belongs in the log.

@@ -13,7 +13,7 @@
 -- Engine functions:
 --
 --   yk.reload()                   re-read the scripts, as a save would
---   yk.toggle_debug(name)         "labels", "fps" or "pad"
+--   yk.toggle_debug(name)         engine instruments: "labels" or "pad"
 --   yk.close(id)                  ask a window to close
 --   yk.screenshot()               save the frame to shot-<n>.png
 --   yk.set_camera(cx, cy, zoom)   put the view here (view.lua does this for you)
@@ -25,6 +25,14 @@
 --   yk.begin_resize(id, ex, ey)   resize from the pointer holding a corner, 1 or -1 per axis
 --   yk.resize_corner(ex, ey)      change the corner the resize in progress holds
 --   yk.spawn(cmd)                 start a program as a client
+--   yk.window_alpha(id, a)        how opaque a window is drawn this frame (default 1)
+--   yk.set_background(rgba)       the colour behind the canvas, 0xRRGGBBAA
+--
+-- Drawing, only inside yk.draw (screen pixels, colours 0xRRGGBBAA):
+--
+--   yk.draw_rect(x, y, w, h, c)   yk.draw_rect_lines(x, y, w, h, c)
+--   yk.draw_line(x1, y1, x2, y2, c)   yk.draw_circle(x, y, r, c)
+--   yk.draw_text(text, x, y, size, c)   yk.measure_text(text, size)
 --   yk.route(wheel, fingers, pinch)
 --                                 whether each goes to the client under the pointer
 --   yk.key_down(code)             whether a key is held right now
@@ -51,7 +59,7 @@
 --   dt, time_ms, frame                     the clock
 --   zoom_min, zoom_max, zoom_default       the engine's zoom limits
 --   double_click_ms                        the double click gap
---   win_count, win_id[i], win_x[i], win_y[i], win_w[i], win_h[i], win_max[i]
+--   win_count, win_id[i], win_x[i], win_y[i], win_w[i], win_h[i], win_max[i], win_order[i]
 --                                          every toplevel, drawn rectangle in canvas units
 --   mapped_count, mapped[i], mapped_welcome[i]
 --                                          windows that drew their first frame, and whether
@@ -67,6 +75,7 @@ local view = require("view")
 local windows = require("windows")
 local gestures = require("gestures")
 local grab = require("grab")
+local looks = require("looks")
 
 yk.config = require("config")
 
@@ -141,7 +150,7 @@ bind("super+r", function() yk.reload() end)
 
 -- Debug overlays: labels under every window, the frame counter, the trackpad instrument.
 bind("super+i", function() yk.toggle_debug("labels") end)
-bind("super+f", function() yk.toggle_debug("fps") end)
+bind("super+f", function() looks.fps = not looks.fps end)
 bind("super+p", function() yk.toggle_debug("pad") end)
 
 bind("super+s", function() yk.screenshot() end)
@@ -260,5 +269,10 @@ function yk.frame(f)
     grab.frame(f, eaten)
     view.step(f, f.pinch ~= 1, f.swiping)
     windows.drop_unseen_focus(f)
+    looks.frame(f)
     view.finish()
+end
+
+function yk.draw()
+    looks.draw()
 end
