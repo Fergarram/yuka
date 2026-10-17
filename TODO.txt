@@ -23,6 +23,7 @@ BUGS:
     (weston, ghostty, ...). The restore rect is taken from the visible top-left, and the
     client changes its geometry offset (drops its shadow) while maximized, so the origin
     is restored against the wrong offset. Predates the Lua move.
+[ ] Some context menus appear out of screen so we need to make sure they appear inside.
 
 ---
 
@@ -42,8 +43,6 @@ IMPROVEMENTS OR TESTS:
 
 MINIMUM SHIT:
 
-[ ] CMDPAL
-[ ] App launcher
 [-] Picture-in-picture mode is tricky
 [-] A lot of polish for trackpad gesture/sensitivity.
 [ ] drag and drop
