@@ -1076,6 +1076,12 @@ fn main() {
     let mut inspect_list: Vec<render::Inspect> = Vec::new();
     // Which of this frame's maximize requests the scripts answered.
     let mut max_answered: Vec<u64> = Vec::with_capacity(4);
+    // The keymap's layout names, re-read when the scripts set a new keymap, with a counter so
+    // the scripts copy them only then. The xkb names in force, so asking again is free.
+    let mut layout_names: Vec<String> = Vec::with_capacity(4);
+    wl::state::layout_names(&mut state, &mut layout_names);
+    let mut layouts_gen: u32 = 1;
+    let mut keymap_names = (String::new(), String::new(), String::new());
 
     let start = Instant::now();
     // Behind the canvas, until the scripts say otherwise (yk.set_background).
@@ -1627,6 +1633,9 @@ fn main() {
                 move_requests: &move_requests,
                 closed: &closed_ids,
                 touches: pad_now.as_ref(),
+                layout: wl::state::active_layout(&mut state),
+                layout_names: &layout_names,
+                layouts_gen,
             };
             lua::frame(&mut script, &f, &mut cmds)
         };
@@ -1733,6 +1742,25 @@ fn main() {
                         children.push(child);
                     }
                 }
+                lua::Cmd::SetLayouts { layout, variant, options } => {
+                    let names = (layout, variant, options);
+                    if names != keymap_names {
+                        if wl::state::set_keymap(&mut state, &names.0, &names.1, &names.2) {
+                            wl::state::layout_names(&mut state, &mut layout_names);
+                            layouts_gen = layouts_gen.wrapping_add(1).max(1);
+                            println!("yuka: keymap {}", layout_names.join(", "));
+                            keymap_names = names;
+                        } else {
+                            let msg = format!(
+                                "set_layouts: xkb cannot build layout '{}' variant '{}' options '{}'",
+                                names.0, names.1, names.2
+                            );
+                            eprintln!("yuka: {msg}");
+                            script.error = Some(msg);
+                        }
+                    }
+                }
+                lua::Cmd::SetLayout(index) => wl::state::set_layout(&mut state, index),
             }
         }
         // A request the scripts let pass still gets its configure, since the client is waiting

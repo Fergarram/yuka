@@ -23,7 +23,7 @@ use smithay::desktop::{
     PopupPointerGrab, PopupUngrabStrategy, WindowSurfaceType,
 };
 use smithay::input::pointer::Focus;
-use smithay::input::keyboard::{KeyboardHandle, XkbConfig};
+use smithay::input::keyboard::{KeyboardHandle, Layout, XkbConfig};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::wayland_server::backend::GlobalId;
 use smithay::wayland::output::{OutputHandler, OutputManagerState};
@@ -530,6 +530,52 @@ fn clamp_dim(v: i32, min: i32, max: i32) -> i32 {
 // reading it.
 pub fn clear_clipboard_focus(state: &State) {
     set_data_device_focus(&state.display_handle, &state.seat, None);
+}
+
+// Compile a new keymap from xkb names and give it to the keyboard. Each is a comma separated
+// list as setxkbmap takes it; an empty one falls back to xkbcommon's default, which reads
+// XKB_DEFAULT_LAYOUT and friends. Smithay sends the keymap to every client. false when xkb
+// will not compile it, and the old keymap stays.
+pub fn set_keymap(state: &mut State, layout: &str, variant: &str, options: &str) -> bool {
+    let keyboard = state.keyboard.clone();
+    let config = XkbConfig {
+        layout,
+        variant,
+        options: if options.is_empty() { None } else { Some(options.to_string()) },
+        ..XkbConfig::default()
+    };
+    keyboard.set_xkb_config(state, config).is_ok()
+}
+
+// Make a layout of the keymap the active one, by index from 0. The focused client hears of it
+// through the modifiers event, which carries the group. Out of range is ignored.
+pub fn set_layout(state: &mut State, index: u32) {
+    let keyboard = state.keyboard.clone();
+    keyboard.with_xkb_state(state, |mut ctx| {
+        let count = ctx.xkb().lock().map_or(0, |x| x.layouts().count() as u32);
+        if index < count {
+            ctx.set_layout(Layout(index));
+        }
+    });
+}
+
+// The active layout by index from 0. Changes on yk.set_layout and also on any switch the xkb
+// options bind (grp:alt_shift_toggle and the like).
+pub fn active_layout(state: &mut State) -> u32 {
+    let keyboard = state.keyboard.clone();
+    keyboard.with_xkb_state(state, |ctx| ctx.xkb().lock().map_or(0, |x| x.active_layout().0))
+}
+
+// Every layout's full name ("English (US)"), in keymap order.
+pub fn layout_names(state: &mut State, out: &mut Vec<String>) {
+    out.clear();
+    let keyboard = state.keyboard.clone();
+    keyboard.with_xkb_state(state, |ctx| {
+        let Ok(x) = ctx.xkb().lock() else { return };
+        for layout in x.layouts() {
+            out.push(x.layout_name(layout).to_string());
+        }
+    });
 }
 
 // True if the surface is a real xdg toplevel window, not a cursor or subsurface

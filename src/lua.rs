@@ -105,6 +105,12 @@ pub enum Cmd {
     Cursor(String),
     // Start a program as a client of this compositor.
     Spawn(String),
+    // A new keymap from xkb names, each a comma separated list as setxkbmap takes it: layouts,
+    // their variants, and options. Applied only when it differs from the one in force, so the
+    // scripts can ask on every load. One xkb will not compile keeps the old keymap.
+    SetLayouts { layout: String, variant: String, options: String },
+    // Make a layout of the keymap the active one, by index from 0.
+    SetLayout(u32),
 }
 
 // What reaches clients this frame. true means the client under the pointer (or, for keys,
@@ -213,6 +219,11 @@ pub struct FrameIn<'a> {
     pub closed: &'a [u64],
     // Every contact on the trackpad as the gesture code sees it, when there is a pad.
     pub touches: Option<&'a PadView>,
+    // The keymap's layouts by full name, the active one by index from 0, and a counter bumped
+    // whenever the names change, so they are copied into the VM only then.
+    pub layout: u32,
+    pub layout_names: &'a [String],
+    pub layouts_gen: u32,
 }
 
 // What the functions a script calls write into. Lives in the VM's app data, so the
@@ -264,6 +275,7 @@ struct Lists {
     activated: Table,
     max_id: Table,
     max_on: Table,
+    layout_names: Table,
 }
 
 // One loaded script set: the VM and the handles the frame call reuses, so a frame
@@ -274,6 +286,8 @@ struct Vm {
     draw_fn: Option<Function>,
     snap: Table,
     lists: Lists,
+    // Which FrameIn::layouts_gen the layout names in the snapshot are from. 0 is none yet.
+    layouts_gen: u32,
 }
 
 pub struct Script {
@@ -410,8 +424,9 @@ fn load_vm(dir: &str) -> mlua::Result<(Vm, Vec<(String, String)>)> {
         activated: list("activated")?,
         max_id: list("max_id")?,
         max_on: list("max_on")?,
+        layout_names: list("layout_names")?,
     };
-    Ok((Vm { lua, frame_fn, draw_fn, snap, lists }, pairs))
+    Ok((Vm { lua, frame_fn, draw_fn, snap, lists, layouts_gen: 0 }, pairs))
 }
 
 // The config table flattened to the key and value strings settings.rs parses. Lists become
@@ -605,6 +620,23 @@ fn register(lua: &Lua, yk: &Table) -> mlua::Result<()> {
     })?)?;
     yk.set("unmaximize", lua.create_function(|lua, id: u64| {
         push(lua, Cmd::Unmaximize(id));
+        Ok(())
+    })?)?;
+    // Layouts are 1 based here like every Lua list, and from 0 in the engine.
+    yk.set("set_layouts", lua.create_function(
+        |lua, (layout, variant, options): (String, Option<String>, Option<String>)| {
+            push(lua, Cmd::SetLayouts {
+                layout,
+                variant: variant.unwrap_or_default(),
+                options: options.unwrap_or_default(),
+            });
+            Ok(())
+        },
+    )?)?;
+    yk.set("set_layout", lua.create_function(|lua, i: u32| {
+        if i >= 1 {
+            push(lua, Cmd::SetLayout(i - 1));
+        }
         Ok(())
     })?)?;
     yk.set("key_down", lua.create_function(|lua, code: usize| {
@@ -809,6 +841,8 @@ fn report(s: &mut Script, what: &str, result: mlua::Result<()>) {
 // Hand the frame to the script and collect what it asks for. Commands are appended to
 // out; the route comes back, and sends nothing to clients unless the script says so.
 pub fn frame(s: &mut Script, f: &FrameIn, out: &mut Vec<Cmd>) -> Route {
+    let names_changed = s.vm.layouts_gen != f.layouts_gen;
+    s.vm.layouts_gen = f.layouts_gen;
     let vm = &s.vm;
 
     if let Some(mut io) = vm.lua.app_data_mut::<Io>() {
@@ -819,7 +853,7 @@ pub fn frame(s: &mut Script, f: &FrameIn, out: &mut Vec<Cmd>) -> Route {
         io.held[..n].copy_from_slice(&f.held[..n]);
     }
 
-    let result = fill_snapshot(vm, f).and_then(|()| vm.frame_fn.call::<()>(vm.snap.clone()));
+    let result = fill_snapshot(vm, f, names_changed).and_then(|()| vm.frame_fn.call::<()>(vm.snap.clone()));
 
     let mut route = Route::default();
     if let Some(mut io) = vm.lua.app_data_mut::<Io>() {
@@ -839,9 +873,17 @@ fn fill<T: IntoLua + Copy>(t: &Table, values: &[T]) -> mlua::Result<()> {
     Ok(())
 }
 
-fn fill_snapshot(vm: &Vm, f: &FrameIn) -> mlua::Result<()> {
+fn fill_snapshot(vm: &Vm, f: &FrameIn, names_changed: bool) -> mlua::Result<()> {
     let t = &vm.snap;
     let l = &vm.lists;
+
+    t.raw_set("layout", f.layout + 1)?;
+    if names_changed {
+        for (i, name) in f.layout_names.iter().enumerate() {
+            l.layout_names.raw_set(i + 1, name.as_str())?;
+        }
+        t.raw_set("layout_count", f.layout_names.len())?;
+    }
 
     for (i, &(code, pressed)) in f.keys.iter().enumerate() {
         l.key_code.raw_set(i + 1, code)?;

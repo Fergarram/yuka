@@ -26,10 +26,15 @@ local keys = {
     home = 102, up = 103, pageup = 104, left = 105, right = 106,
     ["end"] = 107, down = 108, pagedown = 109, insert = 110, delete = 111,
     leftmeta = 125, rightmeta = 126,
+    hangeul = 122, hanja = 123,
 }
 
 -- Shorter names for the ones chords are usually written with.
 keys.esc = keys.escape
 keys.plus = keys.equal
+-- The JIS keys either side of the space bar on a Mac, which Linux reports under their
+-- Korean names: 英数 as hanja, かな as hangeul.
+keys.eisu = keys.hanja
+keys.kana = keys.hangeul
 
 return keys

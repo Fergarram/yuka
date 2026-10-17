@@ -38,6 +38,10 @@
 --   yk.want_inspect(), yk.want_pad()
 --                                 gather engine data for yk.surfaces() / yk.pad() this frame
 --   yk.set_background(rgba)       the colour behind the canvas, 0xRRGGBBAA
+--   yk.set_layouts(layout [, variant, options])
+--                                 a new keymap from xkb names, comma separated as setxkbmap
+--                                 takes them; kept across reloads, only rebuilt on a change
+--   yk.set_layout(i)              make the keymap's i-th layout the active one
 --
 -- Drawing, only inside yk.draw (screen pixels, colours 0xRRGGBBAA):
 --
@@ -100,6 +104,8 @@
 --                                          every trackpad contact as fractions of the pad
 --   move_count, move_id[i], move_x[i], move_y[i]
 --                                          titlebar move requests and the press they quote
+--   layout, layout_count, layout_names[i]  the active keyboard layout, and every layout's
+--                                          full name ("English (US)")
 --
 -- Ctrl+Alt+Backspace (quit) and Ctrl+Alt+Fn (switch VT) are the engine's and cannot
 -- be rebound: they are how you get out when a script is wrong.
@@ -112,6 +118,7 @@ local gestures = require("gestures")
 local grab = require("grab")
 local looks = require("looks")
 local overlays = require("overlays")
+local layouts = require("layouts")
 
 yk.config = require("config")
 
@@ -216,6 +223,14 @@ bind("super+f", function() overlays.fps = not overlays.fps end)
 bind("super+p", function() overlays.pad = not overlays.pad end)
 
 bind("super+s", function() yk.screenshot() end)
+
+-- Next keyboard layout, from layouts.tune.list.
+bind("super+space", function(f) layouts.next(f) end)
+
+-- The JIS Mac keys beside the space bar pick a layout outright, as on macOS: 英数 for Latin,
+-- かな for Japanese. Which ones is layouts.tune.eisu and kana.
+bind("eisu", function(f) layouts.select(f, layouts.tune.eisu) end)
+bind("kana", function(f) layouts.select(f, layouts.tune.kana) end)
 
 -- Asks the focused window to close, the way every desktop's close chord does.
 bind("super+w", function(f) yk.close(f.focused) end)
@@ -375,9 +390,11 @@ function yk.frame(f)
     windows.drop_unseen_focus(f)
     looks.frame(f)
     overlays.frame(f)
+    layouts.frame(f)
     view.finish()
 end
 
 function yk.draw()
     overlays.draw()
+    layouts.draw()
 end
