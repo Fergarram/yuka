@@ -224,6 +224,9 @@ pub struct FrameIn<'a> {
     pub layout: u32,
     pub layout_names: &'a [String],
     pub layouts_gen: u32,
+    // An input method has the keyboard: a text field has focus and something like fcitx5 is
+    // reading the keys for it.
+    pub ime: bool,
 }
 
 // What the functions a script calls write into. Lives in the VM's app data, so the
@@ -878,6 +881,7 @@ fn fill_snapshot(vm: &Vm, f: &FrameIn, names_changed: bool) -> mlua::Result<()> 
     let l = &vm.lists;
 
     t.raw_set("layout", f.layout + 1)?;
+    t.raw_set("ime", f.ime)?;
     if names_changed {
         for (i, name) in f.layout_names.iter().enumerate() {
             l.layout_names.raw_set(i + 1, name.as_str())?;

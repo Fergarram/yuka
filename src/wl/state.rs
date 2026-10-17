@@ -29,7 +29,7 @@ use smithay::reexports::wayland_server::backend::GlobalId;
 use smithay::wayland::output::{OutputHandler, OutputManagerState};
 use smithay::input::pointer::{CursorImageStatus, CursorImageSurfaceData, PointerHandle};
 use smithay::input::{Seat, SeatHandler, SeatState};
-use smithay::utils::{Logical, Point, Serial};
+use smithay::utils::{Logical, Point, Rectangle, Serial};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     get_parent, get_role, with_states, with_surface_tree_downward, BufferAssignment,
@@ -61,11 +61,18 @@ use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::xdg_activation::{
     XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
 };
+use smithay::wayland::input_method::{
+    InputMethodHandler, InputMethodManagerState, InputMethodSeat,
+    PopupSurface as ImePopupSurface,
+};
+use smithay::wayland::text_input::TextInputManagerState;
+use smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState;
 use smithay::{
     delegate_compositor, delegate_cursor_shape, delegate_data_device, delegate_dmabuf,
-    delegate_output,
-    delegate_pointer_gestures, delegate_seat, delegate_shm, delegate_viewporter,
-    delegate_xdg_activation, delegate_xdg_shell,
+    delegate_input_method_manager, delegate_output,
+    delegate_pointer_gestures, delegate_seat, delegate_shm, delegate_text_input_manager,
+    delegate_viewporter, delegate_virtual_keyboard_manager, delegate_xdg_activation,
+    delegate_xdg_shell,
 };
 
 use smithay::backend::allocator::dmabuf::Dmabuf;
@@ -140,6 +147,26 @@ pub struct State {
     // opened by a different application than the one you were using. Smithay mints the tokens
     // and matches them back; the policy about which to honour is ours, below.
     pub xdg_activation_state: XdgActivationState,
+    // Input methods (fcitx5 and the like), which is how text that is not one key per character
+    // gets typed: Japanese, Chinese, Korean. Three globals that only work together. text-input
+    // is the application's side (a text field has focus, here is where its cursor is),
+    // input-method is the input method's (here is the text being composed, commit this), and
+    // virtual-keyboard is how the input method hands back the keys it did not use. Smithay
+    // relays between them and follows our keyboard focus on its own. Held to keep the globals
+    // registered.
+    #[allow(dead_code)]
+    pub text_input_state: TextInputManagerState,
+    #[allow(dead_code)]
+    pub input_method_state: InputMethodManagerState,
+    #[allow(dead_code)]
+    pub virtual_keyboard_state: VirtualKeyboardManagerState,
+    // The input method's candidate list, while it is showing one over a text field. Placed
+    // under the text cursor of the window it belongs to by the render side.
+    pub ime_popup: Option<ImePopupSurface>,
+    // The active layout changed since the input method last heard the modifiers, which is
+    // where xkb carries the layout. Smithay tells the focused client of a layout change but not
+    // the input method's keyboard grab, so the next key that reaches it carries them.
+    pub ime_mods_stale: bool,
 
     // Surfaces that committed since the last drain. The render side reads and
     // clears this each frame. Plain surface handles, no rendering state here.
@@ -215,6 +242,11 @@ pub fn init(
     let viewporter_state = ViewporterState::new::<State>(&dh);
     let data_device_state = DataDeviceState::new::<State>(&dh);
     let xdg_activation_state = XdgActivationState::new::<State>(&dh);
+    let text_input_state = TextInputManagerState::new::<State>(&dh);
+    // Any client may be the input method, as on every other compositor that offers this. One
+    // at a time: a second is told it is unavailable.
+    let input_method_state = InputMethodManagerState::new::<State, _>(&dh, |_client| true);
+    let virtual_keyboard_state = VirtualKeyboardManagerState::new::<State, _>(&dh, |_client| true);
 
     // A wl_output, and xdg_output alongside it. Toolkits that derive their scale
     // and window sizing from an output (GTK, Chromium) never map a window without
@@ -298,6 +330,11 @@ pub fn init(
         data_device_state,
         popups: PopupManager::default(),
         xdg_activation_state,
+        text_input_state,
+        input_method_state,
+        virtual_keyboard_state,
+        ime_popup: None,
+        ime_mods_stale: false,
         committed: Vec::new(),
         dead_dmabufs: Vec::new(),
         cursor_image: CursorImageStatus::default_named(),
@@ -544,7 +581,9 @@ pub fn set_keymap(state: &mut State, layout: &str, variant: &str, options: &str)
         options: if options.is_empty() { None } else { Some(options.to_string()) },
         ..XkbConfig::default()
     };
-    keyboard.set_xkb_config(state, config).is_ok()
+    let ok = keyboard.set_xkb_config(state, config).is_ok();
+    state.ime_mods_stale |= ok;
+    ok
 }
 
 // Make a layout of the keymap the active one, by index from 0. The focused client hears of it
@@ -557,6 +596,45 @@ pub fn set_layout(state: &mut State, index: u32) {
             ctx.set_layout(Layout(index));
         }
     });
+    state.ime_mods_stale = true;
+}
+
+// Whether an input method has the keyboard: a text field has focus and something like fcitx5
+// is reading the keys for it.
+pub fn ime_active(state: &State) -> bool {
+    state.seat.input_method().keyboard_grabbed()
+}
+
+// Where the input method's candidate list goes: the popup surface, the window it belongs to,
+// and its offset from that window's surface origin. Under the text cursor the application
+// reported, which is in the coordinates of the surface holding the text field, so that
+// surface's own place in the window's tree is added in. None while nothing is showing.
+pub fn ime_popup_placement(state: &State) -> Option<(WlSurface, WlSurface, f32, f32)> {
+    let popup = state.ime_popup.as_ref()?;
+    if !popup.alive() {
+        return None;
+    }
+    let parent = popup.get_parent()?.surface.clone();
+    if !parent.is_alive() {
+        return None;
+    }
+    let root = window_root(state, &parent);
+    let (px, py) = surface_tree(&root)
+        .into_iter()
+        .find(|(s, _, _)| *s == parent)
+        .map(|(_, x, y)| (x, y))
+        .unwrap_or((0.0, 0.0));
+    let r = popup.text_input_rectangle();
+    Some((
+        popup.wl_surface().clone(),
+        root,
+        px + r.loc.x as f32,
+        py + (r.loc.y + r.size.h) as f32,
+    ))
+}
+
+fn is_ime_popup(state: &State, surface: &WlSurface) -> bool {
+    state.ime_popup.as_ref().is_some_and(|p| p.wl_surface() == surface)
 }
 
 // The active layout by index from 0. Changes on yk.set_layout and also on any switch the xkb
@@ -591,7 +669,7 @@ pub fn is_toplevel(state: &State, surface: &WlSurface) -> bool {
 // True if the surface is a mapped xdg popup (a menu), which we do composite, but
 // positioned by its parent rather than placed on the canvas.
 pub fn is_popup(state: &State, surface: &WlSurface) -> bool {
-    state.popups.find_popup(surface).is_some()
+    state.popups.find_popup(surface).is_some() || is_ime_popup(state, surface)
 }
 
 // The popups of a toplevel, each with the offset of its surface's top-left from
@@ -695,6 +773,13 @@ fn focus_root(surface: &WlSurface) -> WlSurface {
 // click lands on one of its popups or subsurfaces.
 pub fn window_root(state: &State, surface: &WlSurface) -> WlSurface {
     let root = focus_root(surface);
+    // The candidate list belongs to the window whose text it is composing, so clicking a
+    // candidate is a click in that window and never takes the keyboard away from it.
+    if let Some(popup) = state.ime_popup.as_ref().filter(|p| p.wl_surface() == &root) {
+        if let Some(parent) = popup.get_parent() {
+            return window_root(state, &parent.surface.clone());
+        }
+    }
     if let Some(popup) = state.popups.find_popup(&root) {
         if let Ok(toplevel) = find_popup_root_surface(&popup) {
             return toplevel;
@@ -1224,8 +1309,13 @@ impl XdgShellHandler for State {
         };
 
         if let Some(keyboard) = seat.get_keyboard() {
+            // An input method holds the keyboard whenever a text field has focus. That is not a
+            // menu competing for input, and refusing on it would refuse every menu opened from
+            // a window you are typing in. The menu's grab replaces it, and focus moving to the
+            // menu deactivates the input method anyway.
             let ours = keyboard.has_grab(serial)
-                || keyboard.has_grab(grab.previous_serial().unwrap_or(serial));
+                || keyboard.has_grab(grab.previous_serial().unwrap_or(serial))
+                || seat.input_method().keyboard_grabbed();
             if keyboard.is_grabbed() && !ours {
                 grab.ungrab(PopupUngrabStrategy::All);
                 return;
@@ -1254,6 +1344,32 @@ impl XdgShellHandler for State {
     }
 }
 
+// The input method's candidate list. Kept rather than placed here: where it goes depends on
+// where its window is on the canvas, which is the render side's to know.
+impl InputMethodHandler for State {
+    fn new_popup(&mut self, surface: ImePopupSurface) {
+        self.ime_popup = Some(surface);
+    }
+
+    fn dismiss_popup(&mut self, surface: ImePopupSurface) {
+        if self.ime_popup.as_ref() == Some(&surface) {
+            self.ime_popup = None;
+        }
+    }
+
+    // The text cursor moved. The rectangle is shared with the handle we keep, so the next
+    // frame places it from the new one; only the parent could be stale, and this carries it.
+    fn popup_repositioned(&mut self, surface: ImePopupSurface) {
+        self.ime_popup = Some(surface);
+    }
+
+    // Only used by Smithay to fill in a field we never read: the popup is placed from the
+    // parent's tree each frame instead.
+    fn parent_geometry(&self, _parent: &WlSurface) -> Rectangle<i32, Logical> {
+        Rectangle::default()
+    }
+}
+
 //
 // Delegates
 //
@@ -1273,3 +1389,6 @@ delegate_output!(State);
 delegate_data_device!(State);
 delegate_xdg_activation!(State);
 delegate_pointer_gestures!(State);
+delegate_text_input_manager!(State);
+delegate_input_method_manager!(State);
+delegate_virtual_keyboard_manager!(State);

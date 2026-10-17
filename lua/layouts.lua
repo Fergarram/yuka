@@ -3,6 +3,11 @@
 --
 -- Which layouts the keymap carries, the chord that steps through them, and a small pill at
 -- the bottom of the screen naming the one that just became active, which fades on its own.
+-- Also the input method started with yuka, for typing Japanese and the like.
+--
+-- Layouts are ours and composing is the input method's: fcitx5 turns romaji into kana and
+-- kanji on top of whatever layout is active here, and is configured not to manage layouts
+-- of its own.
 --
 -- The pill follows the active layout rather than the chord, so a switch the xkb options
 -- make (grp:alt_shift_toggle and the like) shows it too.
@@ -26,8 +31,14 @@ layouts.tune = {
 
     -- What the 英数 and かな keys of a JIS Mac keyboard pick, by their name in list, the way
     -- macOS uses them: one for Latin, one for Japanese. A name not in list does nothing.
+    -- fcitx5 can be told to turn composing off and on with the same keys (Hangul_Hanja and
+    -- Hangul, as xkb names them), so one press changes both.
     eisu = "us",
     kana = "jp",
+
+    -- The input method, started once when yuka starts and stopped when it exits. A program
+    -- name only, no arguments. "" starts none.
+    input_method = "fcitx5",
 
     -- How long the pill stays fully visible after a switch, then how long it takes to fade,
     -- in seconds. 0.8 / 0.3 is a glance; 1.5 / 0.5 is there long enough to read twice.
@@ -93,6 +104,9 @@ end
 --
 
 function layouts.frame(f)
+    if f.frame == 0 and layouts.tune.input_method ~= "" then
+        yk.spawn(layouts.tune.input_method)
+    end
     screen_w, screen_h = f.sw, f.sh
     age = age + f.dt
     if last ~= nil and f.layout ~= last then

@@ -106,6 +106,8 @@
 --                                          titlebar move requests and the press they quote
 --   layout, layout_count, layout_names[i]  the active keyboard layout, and every layout's
 --                                          full name ("English (US)")
+--   ime                                    an input method (fcitx5) has the keyboard: a text
+--                                          field has focus and it is reading the keys
 --
 -- Ctrl+Alt+Backspace (quit) and Ctrl+Alt+Fn (switch VT) are the engine's and cannot
 -- be rebound: they are how you get out when a script is wrong.
@@ -234,6 +236,9 @@ bind("kana", function(f) layouts.select(f, layouts.tune.kana) end)
 
 -- Asks the focused window to close, the way every desktop's close chord does.
 bind("super+w", function(f) yk.close(f.focused) end)
+
+-- A new terminal.
+bind("super+shift+t", function() yk.spawn("ghostty") end)
 
 -- Back to 1:1 around the middle of the screen.
 bind("super+0", function()

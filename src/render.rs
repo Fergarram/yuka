@@ -992,7 +992,10 @@ pub fn set_place_origin(windows: &mut Windows, cx: f32, cy: f32) {
 // Called once a frame, before anything is hit tested or drawn. A child that is no
 // longer in any parent's tree stays unplaced, and unplaced children neither draw
 // nor accept clicks.
-pub fn sync_children(windows: &mut Windows) {
+//
+// ime is the input method's candidate list, if one is showing: the popup, the window it
+// belongs to, and its offset from that window's origin (state::ime_popup_placement).
+pub fn sync_children(windows: &mut Windows, ime: Option<(WlSurface, WlSurface, f32, f32)>) {
     for i in 0..windows.surface.len() {
         windows.placed[i] = false;
     }
@@ -1091,6 +1094,29 @@ pub fn sync_children(windows: &mut Windows) {
         windows.params[j] = windows.params[parent];
         windows.placed[j] = true;
     }
+
+    // Last, under the text cursor and one step nearer than anything else of its window, menus
+    // and subsurfaces included: the candidates are what you are reading while you type. Drawn
+    // with the window's look but plain, since a window shader is about the window.
+    let Some((popup, root, ox, oy)) = ime else { return };
+    let (Some(i), Some(j)) = (index_of(windows, &root), index_of(windows, &popup)) else {
+        return;
+    };
+    let mut nearest = windows.z[i];
+    for k in 0..windows.surface.len() {
+        if windows.placed[k] && windows.order[k] == windows.order[i] && windows.z[k] < nearest {
+            nearest = windows.z[k];
+        }
+    }
+    windows.canvas_x[j] = windows.canvas_x[i] + ox;
+    windows.canvas_y[j] = windows.canvas_y[i] + oy;
+    windows.z[j] = nearest - CHILD_LIFT;
+    windows.order[j] = windows.order[i];
+    windows.alpha[j] = windows.alpha[i];
+    windows.shadow[j] = false;
+    windows.shader[j] = 0;
+    windows.params[j] = [0.0; 4];
+    windows.placed[j] = true;
 }
 
 // Bring a window to the front of the stack (higher order draws on top).

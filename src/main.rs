@@ -762,15 +762,13 @@ fn forward_keys(
             KeyState::Released
         };
         let serial = SERIAL_COUNTER.next_serial();
-        // Smithay expects the xkb keycode (evdev + 8).
-        keyboard.input::<(), _>(
-            state,
-            Keycode::new(code as u32 + 8),
-            key_state,
-            serial,
-            time_ms,
-            |_, _, _| FilterResult::Forward,
-        );
+        // Smithay expects the xkb keycode (evdev + 8). In two halves so a layout change the
+        // input method has not heard about goes with this key: the modifiers carry the layout,
+        // and Smithay only sends them along when the key itself changed them.
+        let keycode = Keycode::new(code as u32 + 8);
+        let ((), mods_changed) = keyboard.input_intercept(state, keycode, key_state, |_, _, _| ());
+        let stale = std::mem::take(&mut state.ime_mods_stale);
+        keyboard.input_forward(state, keycode, key_state, serial, time_ms, mods_changed || stale);
     }
 }
 
@@ -1407,6 +1405,10 @@ fn main() {
                 wl::state::send_frame_callbacks_tree(&popup, time_ms);
             }
         }
+        // The input method's candidate list waits on its callback like any popup.
+        if let Some((popup, ..)) = wl::state::ime_popup_placement(&state) {
+            wl::state::send_frame_callbacks_tree(&popup, time_ms);
+        }
         wl::state::flush(&mut server);
 
         if let Some(i) = inp.as_mut() {
@@ -1636,6 +1638,7 @@ fn main() {
                 layout: wl::state::active_layout(&mut state),
                 layout_names: &layout_names,
                 layouts_gen,
+                ime: wl::state::ime_active(&state),
             };
             lua::frame(&mut script, &f, &mut cmds)
         };
@@ -2346,7 +2349,7 @@ fn main() {
         // Maximized windows keep their pinned top-left first, so children placed below and
         // the pixel alignment after both see the corrected position.
         render::hold_maximized(&mut windows);
-        render::sync_children(&mut windows);
+        render::sync_children(&mut windows, wl::state::ime_popup_placement(&state));
 
         // Everything that could move a window has run. Put them all on the pixel grid, then
         // decide how each one is sampled from where it actually ended up.
