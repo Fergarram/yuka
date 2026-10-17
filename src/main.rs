@@ -1734,6 +1734,7 @@ fn main() {
                 }
                 lua::Cmd::Cursor(name) => canvas_cursor = name,
                 lua::Cmd::FloorShader(slot) => floor_slot = slot,
+                lua::Cmd::ClientShadows(on) => wl::state::set_client_shadows(&mut state, on),
                 lua::Cmd::Background(rgba) => {
                     clear = ray::Color {
                         r: (rgba >> 24) as u8,

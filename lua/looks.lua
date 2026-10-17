@@ -32,6 +32,12 @@ looks.tune = {
         light = { background = 0xf2f2f5ff, dots = 0x30303a38 },
     },
 
+    -- Whether windows draw their own drop shadows. false tells every window it is tiled, the one
+    -- hint toolkits act on: GTK, libadwaita, Qt and Chromium then draw no shadow, square their
+    -- corners, and offer no resize handles at their edges (Super+right drag still resizes). A
+    -- client that ignores the hint keeps its shadow.
+    client_shadows = false,
+
     -- The floor: a dot grid on the canvas itself, behind every window, moving and zooming
     -- with them. Drawn by shaders/grid.frag through slot 2 (shaders below); false for none.
     -- Its colour comes from the theme.
@@ -204,6 +210,8 @@ function looks.set_theme(name)
             math.floor(c / 0x100) % 256 / 255, c % 256 / 255)
     end
 end
+
+yk.client_shadows(tune.client_shadows)
 
 if tune.floor then
     yk.shader_uniform(FLOOR_SLOT, "spacing", tune.floor.spacing)

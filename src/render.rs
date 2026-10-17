@@ -489,13 +489,31 @@ fn rescale(windows: &mut Windows, i: usize) {
 
 // Record what the client called its window geometry, clamped to the texture we
 // have, since a stale configure can describe a size the current buffer does not.
-pub fn set_geometry(windows: &mut Windows, surface: &WlSurface, geo: Option<(f32, f32, f32, f32)>) {
+// keep_visible holds the window's visible top-left where it is when the client moves its
+// geometry inside the buffer. A client cannot move itself, so a changed offset is never a move:
+// it is a shadow appearing or going away (unmaximizing, being told it is tiled), and without
+// this the window jumped by the shadow's width every time. Only for a window already on the
+// canvas; a new one is placed by the scripts from its geometry.
+pub fn set_geometry(
+    windows: &mut Windows,
+    surface: &WlSurface,
+    geo: Option<(f32, f32, f32, f32)>,
+    keep_visible: bool,
+) {
     let Some(i) = index_of(windows, surface) else { return };
     let tw = windows.tex_w[i] as f32;
     let th = windows.tex_h[i] as f32;
     let (x, y, w, h) = geo.unwrap_or((0.0, 0.0, tw, th));
+    let (old_x, old_y) = (windows.geo_x[i], windows.geo_y[i]);
     windows.geo_x[i] = x.clamp(0.0, tw);
     windows.geo_y[i] = y.clamp(0.0, th);
+    if keep_visible {
+        let (dx, dy) = (windows.geo_x[i] - old_x, windows.geo_y[i] - old_y);
+        windows.canvas_x[i] -= dx;
+        windows.canvas_y[i] -= dy;
+        windows.draw_x[i] -= dx;
+        windows.draw_y[i] -= dy;
+    }
     windows.geo_w[i] = w.min(tw - windows.geo_x[i]).max(1.0);
     windows.geo_h[i] = h.min(th - windows.geo_y[i]).max(1.0);
 }
@@ -1340,12 +1358,15 @@ pub fn upload_committed(
         state::take_shm_buffer(surface, |_, _, _, _| {});
         return;
     };
+    // Children are placed from their parent every frame, so only a toplevel already on the
+    // canvas has a position to keep.
+    let keep_visible = !popup && !sub && index_of(windows, surface).is_some();
 
     let handled_shm = state::take_shm_buffer(surface, |w, h, stride, ptr| {
         upload_shm(windows, surface, w, h, stride, ptr, popup, sub);
     });
     if handled_shm {
-        set_geometry(windows, surface, state::geometry_of(surface));
+        set_geometry(windows, surface, state::geometry_of(surface), keep_visible);
         // Surface is on an shm buffer now; drop any dmabuf we were holding.
         state::release_held_dmabuf(state, surface);
         return;
@@ -1375,7 +1396,7 @@ pub fn upload_committed(
             }
         }
     });
-    set_geometry(windows, surface, state::geometry_of(surface));
+    set_geometry(windows, surface, state::geometry_of(surface), keep_visible);
 }
 
 // Copy an imported client buffer into a texture we own and store that instead. Reuses the

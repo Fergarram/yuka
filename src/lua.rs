@@ -100,6 +100,8 @@ pub enum Cmd {
     ShaderUniform { slot: u8, name: String, values: [f32; 4], count: u8 },
     // Which slot draws a window, and four numbers for it (windowParams).
     WindowShader { id: u64, slot: u8, params: [f32; 4] },
+    // Whether clients draw their own shadows; off tells every window it is tiled.
+    ClientShadows(bool),
     // Which shader slot draws the floor, the canvas plane behind every window, or no floor.
     FloorShader(Option<u8>),
     // The cursor shown when no client has the pointer, by theme name ("default", "grabbing",
@@ -604,6 +606,10 @@ fn register(lua: &Lua, yk: &Table) -> mlua::Result<()> {
             Ok(())
         },
     )?)?;
+    yk.set("client_shadows", lua.create_function(|lua, on: bool| {
+        push(lua, Cmd::ClientShadows(on));
+        Ok(())
+    })?)?;
     yk.set("floor_shader", lua.create_function(|lua, slot: Option<u8>| {
         push(lua, Cmd::FloorShader(slot));
         Ok(())

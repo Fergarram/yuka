@@ -167,6 +167,12 @@ pub struct State {
     // where xkb carries the layout. Smithay tells the focused client of a layout change but not
     // the input method's keyboard grab, so the next key that reaches it carries them.
     pub ime_mods_stale: bool,
+    // Whether clients draw their own shadows. When not, every toplevel is told it is tiled on
+    // all four edges, which is the one thing the toolkits listen to: GTK, libadwaita, Qt and
+    // Chromium drop the shadow, square their corners, and stop offering resize handles of their
+    // own, since those live in the shadow. Applied to a new window's first configure, so it
+    // never draws one.
+    pub client_shadows: bool,
 
     // Surfaces that committed since the last drain. The render side reads and
     // clears this each frame. Plain surface handles, no rendering state here.
@@ -335,6 +341,7 @@ pub fn init(
         virtual_keyboard_state,
         ime_popup: None,
         ime_mods_stale: false,
+        client_shadows: true,
         committed: Vec::new(),
         dead_dmabufs: Vec::new(),
         cursor_image: CursorImageStatus::default_named(),
@@ -404,6 +411,34 @@ pub fn toplevel_surfaces(state: &State) -> Vec<WlSurface> {
 //
 // Called every frame of a resize drag: Smithay only puts a configure on the wire when
 // the pending state actually differs, so a drag that has not moved sends nothing.
+// Tell every toplevel whether to draw its own shadow (State::client_shadows).
+pub fn set_client_shadows(state: &mut State, on: bool) {
+    if state.client_shadows == on {
+        return;
+    }
+    state.client_shadows = on;
+    for toplevel in state.xdg_state.toplevel_surfaces() {
+        toplevel.with_pending_state(|pending| set_tiled_states(&mut pending.states, !on));
+        toplevel.send_pending_configure();
+    }
+}
+
+fn set_tiled_states(states: &mut smithay::wayland::shell::xdg::ToplevelStateSet, on: bool) {
+    let edges = [
+        ToplevelState::TiledLeft,
+        ToplevelState::TiledRight,
+        ToplevelState::TiledTop,
+        ToplevelState::TiledBottom,
+    ];
+    for edge in edges {
+        if on {
+            states.set(edge);
+        } else {
+            states.unset(edge);
+        }
+    }
+}
+
 // Tell a toplevel whether it has the keyboard.
 //
 // A client draws its own chrome, and it draws it greyed out with no focus ring until it is
@@ -1227,6 +1262,9 @@ impl XdgShellHandler for State {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
+        if !self.client_shadows {
+            surface.with_pending_state(|pending| set_tiled_states(&mut pending.states, true));
+        }
         surface.send_configure();
     }
 

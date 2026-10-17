@@ -38,6 +38,8 @@
 --   yk.want_inspect(), yk.want_pad()
 --                                 gather engine data for yk.surfaces() / yk.pad() this frame
 --   yk.set_background(rgba)       the colour behind the canvas, 0xRRGGBBAA
+--   yk.client_shadows(on)         whether windows draw their own shadows; false tells them
+--                                 they are tiled, which toolkits answer with no shadow
 --   yk.floor_shader(slot)         which shader slot draws the floor, the canvas plane behind
 --                                 every window; nil for none. It is handed frag_uv (the canvas
 --                                 point), canvasZoom, time and the slot's uniforms
