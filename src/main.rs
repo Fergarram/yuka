@@ -10,6 +10,7 @@
 mod camera;
 mod cursor;
 mod egl;
+mod gamma;
 mod input;
 mod lua;
 mod ray;
@@ -1074,6 +1075,8 @@ fn main() {
     } else {
         cursor::init(ray::screen_width(), ray::screen_height())
     };
+    // The display's gamma ramp, which the scripts set (yk.gamma). Nested, the host owns it.
+    let mut gamma = if windowed { None } else { gamma::init() };
 
 
     // libinput drives keyboards and pointers. Without a session it grabs them as
@@ -1263,6 +1266,10 @@ fn main() {
                     // leaves the cursor plane empty.
                     if let Some(c) = cursor.as_mut() {
                         cursor::rearm(c);
+                    }
+                    // And its gamma ramp is the console's.
+                    if let Some(g) = gamma.as_mut() {
+                        gamma::reapply(g);
                     }
                     // libinput reopens the devices; input that arrived while
                     // another VT had them was not meant for us.
@@ -1908,6 +1915,11 @@ fn main() {
                 }
                 lua::Cmd::Cursor(name) => canvas_cursor = name,
                 lua::Cmd::FloorShader(slot) => floor_slot = slot,
+                lua::Cmd::Gamma { r, g, b } => {
+                    if let Some(gm) = gamma.as_mut() {
+                        gamma::set(gm, &r, &g, &b);
+                    }
+                }
                 lua::Cmd::PopupBounds(rect) => popup_bounds = Some(rect),
                 lua::Cmd::ClientShadows(on) => wl::state::set_client_shadows(&mut state, on),
                 lua::Cmd::ClientDecorations(on) => wl::state::set_client_decorations(&mut state, on),
@@ -2737,6 +2749,10 @@ fn main() {
         cursor::destroy(c);
     }
     render::shaders_destroy(&mut shaders);
+    // While we are still DRM master, or it is not ours to set.
+    if let Some(g) = gamma.as_mut() {
+        gamma::restore(g);
+    }
     ray::close_window();
     // Release the session last: logind restores our VT to a text console when the
     // connection goes.

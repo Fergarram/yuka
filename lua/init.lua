@@ -49,6 +49,11 @@
 --   yk.floor_shader(slot)         which shader slot draws the floor, the canvas plane behind
 --                                 every window; nil for none. It is handed frag_uv (the canvas
 --                                 point), canvasZoom, time and the slot's uniforms
+--   yk.gamma(r [, g, b])          the display's gamma ramp: per channel a list of 2 to 4096
+--                                 outputs from 0 to 1, evenly spaced over the inputs (g and b
+--                                 default to the one before). The brightest output is held at
+--                                 0.1 or more. Kept until changed; yk.gamma() puts back the
+--                                 ramp yuka found. Nothing nested (screen.lua does this for you)
 --   yk.set_layouts(layout [, variant, options])
 --                                 a new keymap from xkb names, comma separated as setxkbmap
 --                                 takes them; kept across reloads, only rebuilt on a change
@@ -157,6 +162,7 @@ local overlays = require("overlays")
 local layouts = require("layouts")
 local desktop = require("desktop")
 local banner = require("banner")
+local screen = require("screen")
 
 yk.config = require("config")
 
@@ -261,6 +267,9 @@ bind("super+f", function() overlays.fps = not overlays.fps end)
 bind("super+p", function() overlays.pad = not overlays.pad end)
 
 bind("super+s", function() yk.screenshot() end)
+
+-- Night light on or off, eased in: screen.tune says what each looks like.
+bind("super+n", function() screen.toggle_night() end)
 
 -- Next keyboard layout, from layouts.tune.list.
 bind("super+space", function(f) layouts.next(f) end)
@@ -435,6 +444,7 @@ function yk.frame(f)
     overlays.frame(f)
     layouts.frame(f)
     desktop.frame(f)
+    screen.frame(f)
     view.finish()
 end
 

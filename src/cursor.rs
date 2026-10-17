@@ -53,11 +53,37 @@ struct DrmModeRes {
     max_height: u32,
 }
 
-// Prefix of drmModeCrtc; we only read crtc_id and buffer_id via the pointer.
+#[repr(C)]
+struct DrmModeModeInfo {
+    clock: u32,
+    hdisplay: u16,
+    hsync_start: u16,
+    hsync_end: u16,
+    htotal: u16,
+    hskew: u16,
+    vdisplay: u16,
+    vsync_start: u16,
+    vsync_end: u16,
+    vtotal: u16,
+    vscan: u16,
+    vrefresh: u32,
+    flags: u32,
+    kind: u32,
+    name: [u8; 32],
+}
+
+// All of drmModeCrtc, since gamma_size (gamma.rs) is its last field.
 #[repr(C)]
 struct DrmModeCrtc {
     crtc_id: u32,
     buffer_id: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    mode_valid: i32,
+    mode: DrmModeModeInfo,
+    gamma_size: i32,
 }
 
 extern "C" {
@@ -568,7 +594,7 @@ pub fn destroy(c: &mut Cursor) {
 //
 
 // raylib opened /dev/dri/card0 in this process, so that fd is DRM master.
-fn find_drm_fd() -> Option<i32> {
+pub fn find_drm_fd() -> Option<i32> {
     let card = Path::new("/dev/dri/card0");
     for entry in fs::read_dir("/proc/self/fd").ok()? {
         let entry = entry.ok()?;
@@ -587,7 +613,7 @@ fn find_drm_fd() -> Option<i32> {
 }
 
 // The CRTC currently scanning out a framebuffer (the one raylib set a mode on).
-fn find_active_crtc(fd: i32) -> Option<u32> {
+pub fn find_active_crtc(fd: i32) -> Option<u32> {
     let res = unsafe { drmModeGetResources(fd) };
     if res.is_null() {
         return None;
@@ -611,6 +637,17 @@ fn find_active_crtc(fd: i32) -> Option<u32> {
     }
     unsafe { drmModeFreeResources(res) };
     found
+}
+
+// Entries per channel in a CRTC's gamma ramp, 0 for none.
+pub fn gamma_size(fd: i32, crtc: u32) -> usize {
+    let c = unsafe { drmModeGetCrtc(fd, crtc) };
+    if c.is_null() {
+        return 0;
+    }
+    let size = unsafe { (*c).gamma_size }.max(0) as usize;
+    unsafe { drmModeFreeCrtc(c) };
+    size
 }
 
 //

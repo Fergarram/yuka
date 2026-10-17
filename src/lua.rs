@@ -119,6 +119,9 @@ pub enum Cmd {
     PopupBounds(Option<[f32; 4]>),
     // Which shader slot draws the floor, the canvas plane behind every window, or no floor.
     FloorShader(Option<u8>),
+    // The display's gamma ramp: one curve per channel, outputs from 0 to 1 evenly spaced over
+    // the inputs. Empty puts back the ramp yuka found at start.
+    Gamma { r: Vec<f32>, g: Vec<f32>, b: Vec<f32> },
     // The cursor shown when no client has the pointer, by theme name ("default", "grabbing",
     // "nwse-resize"...).
     Cursor(String),
@@ -721,6 +724,27 @@ fn register(lua: &Lua, yk: &Table) -> mlua::Result<()> {
         push(lua, Cmd::FloorShader(slot));
         Ok(())
     })?)?;
+    yk.set("gamma", lua.create_function(
+        |lua, (r, g, b): (Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>)| {
+            let Some(r) = r else {
+                push(lua, Cmd::Gamma { r: Vec::new(), g: Vec::new(), b: Vec::new() });
+                return Ok(());
+            };
+            let g = g.unwrap_or_else(|| r.clone());
+            let b = b.unwrap_or_else(|| g.clone());
+            for c in [&r, &g, &b] {
+                if c.len() < 2 || c.len() > crate::gamma::MAX_POINTS {
+                    return Err(mlua::Error::runtime(format!(
+                        "yk.gamma: a curve needs 2 to {} points, got {}",
+                        crate::gamma::MAX_POINTS,
+                        c.len()
+                    )));
+                }
+            }
+            push(lua, Cmd::Gamma { r, g, b });
+            Ok(())
+        },
+    )?)?;
     yk.set("set_cursor", lua.create_function(|lua, name: String| {
         push(lua, Cmd::Cursor(name));
         Ok(())
