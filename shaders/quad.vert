@@ -1,6 +1,10 @@
 #version 100
 precision mediump float;
 
+// The vertex shader every quad yuka draws shares, windows and the floor alike: position through
+// the camera, texture coordinates and colour passed along untouched. What a quad looks like is
+// the fragment shader's business, so this one has no reason to change.
+
 // raylib standard vertex attributes and transform
 attribute vec3 vertexPosition;
 attribute vec2 vertexTexCoord;

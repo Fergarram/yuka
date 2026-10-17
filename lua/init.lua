@@ -38,6 +38,9 @@
 --   yk.want_inspect(), yk.want_pad()
 --                                 gather engine data for yk.surfaces() / yk.pad() this frame
 --   yk.set_background(rgba)       the colour behind the canvas, 0xRRGGBBAA
+--   yk.floor_shader(slot)         which shader slot draws the floor, the canvas plane behind
+--                                 every window; nil for none. It is handed frag_uv (the canvas
+--                                 point), canvasZoom, time and the slot's uniforms
 --   yk.set_layouts(layout [, variant, options])
 --                                 a new keymap from xkb names, comma separated as setxkbmap
 --                                 takes them; kept across reloads, only rebuilt on a change

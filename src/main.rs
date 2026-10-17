@@ -984,7 +984,7 @@ fn main() {
     );
 
     // Window shaders by slot. Slot 0 is the built-in one until the scripts replace it.
-    let mut shaders = render::shaders_new("shaders/window.vert", "shaders/window.frag");
+    let mut shaders = render::shaders_new("shaders/quad.vert", "shaders/window.frag");
 
     let (mut server, mut state) =
         wl::state::init(
@@ -1084,6 +1084,8 @@ fn main() {
     let start = Instant::now();
     // Behind the canvas, until the scripts say otherwise (yk.set_background).
     let mut clear = ray::Color { r: 24, g: 24, b: 32, a: 255 };
+    // The shader slot that draws the floor, if the scripts asked for one.
+    let mut floor_slot: Option<u8> = None;
     let mut frame: u32 = 0;
     let debug_input = std::env::var("YUKA_DEBUG_INPUT").is_ok();
     // Dumps each toplevel's surface tree, which is what decides how children stack. Twice now
@@ -1731,6 +1733,7 @@ fn main() {
                     }
                 }
                 lua::Cmd::Cursor(name) => canvas_cursor = name,
+                lua::Cmd::FloorShader(slot) => floor_slot = slot,
                 lua::Cmd::Background(rgba) => {
                     clear = ray::Color {
                         r: (rgba >> 24) as u8,
@@ -2449,7 +2452,12 @@ fn main() {
 
         ray::begin_drawing();
         ray::clear_background(clear);
-        render::draw_windows(&windows, cam3d, &shaders, start.elapsed().as_secs_f32());
+        let time = start.elapsed().as_secs_f32();
+        if let Some(slot) = floor_slot {
+            let screen = (ray::screen_width() as f32, ray::screen_height() as f32);
+            render::draw_floor(&shaders, slot as usize, cam3d, (cam.cx, cam.cy, cam.zoom), screen, time);
+        }
+        render::draw_windows(&windows, cam3d, &shaders, time);
         // The scripts' own drawing over the windows, overlays included. What the engine knows
         // that they want drawn is gathered only on the frames they ask for it.
         let (want_inspect, want_pad) = lua::wants(&script);

@@ -1549,6 +1549,9 @@ pub struct ShaderSlot {
     params_loc: i32,
     size_loc: i32,
     time_loc: i32,
+    // Only the floor sets this one: canvas to screen scale, for things meant to be a fixed
+    // number of pixels on screen however far the view is zoomed.
+    zoom_loc: i32,
     // Uniforms the scripts set on this slot: name, location, value, how many floats.
     globals: Vec<(String, i32, [f32; 4], u8)>,
 }
@@ -1566,6 +1569,7 @@ fn slot_from(shader: ray::Shader) -> ShaderSlot {
         params_loc: ray::shader_location(shader, "windowParams"),
         size_loc: ray::shader_location(shader, "windowSize"),
         time_loc: ray::shader_location(shader, "time"),
+        zoom_loc: ray::shader_location(shader, "canvasZoom"),
         globals: Vec::new(),
     }
 }
@@ -1624,6 +1628,58 @@ pub fn shaders_destroy(sh: &mut Shaders) {
 //
 // Draw
 //
+
+// The floor: the canvas plane itself, drawn behind every window by the shader slot the scripts
+// chose for it. A quad at z 0 over the part of the canvas in view, with a margin, whose texture
+// coordinates are canvas coordinates. So the shader is told where on the canvas each pixel is
+// and the floor pans and zooms with the windows by construction; a lifted window moves off it
+// toward the camera like it does off anything else at z 0.
+//
+// What the shader gets: frag_uv, the canvas point; canvasZoom, the canvas to screen scale; time;
+// and whatever uniforms the scripts set on the slot. The texture is raylib's one white pixel.
+pub fn draw_floor(
+    shaders: &Shaders,
+    slot: usize,
+    cam3d: ray::Camera3D,
+    view: (f32, f32, f32),
+    screen: (f32, f32),
+    time: f32,
+) {
+    let Some(Some(sl)) = shaders.slots.get(slot) else { return };
+    let (cx, cy, zoom) = view;
+    // Half the view in canvas units, and a tenth again, so a frame that pans further than the
+    // camera says never shows an edge.
+    let hw = screen.0 * 0.55 / zoom;
+    let hh = screen.1 * 0.55 / zoom;
+    let (x0, y0, x1, y1) = (cx - hw, cy - hh, cx + hw, cy + hh);
+    let corners = [
+        (Vector3 { x: x0, y: y0, z: 0.0 }, x0, y0),
+        (Vector3 { x: x1, y: y0, z: 0.0 }, x1, y0),
+        (Vector3 { x: x1, y: y1, z: 0.0 }, x1, y1),
+        (Vector3 { x: x0, y: y1, z: 0.0 }, x0, y1),
+    ];
+    let shader = sl.shader;
+    ray::begin_mode_3d(cam3d);
+    ray::disable_backface_culling();
+    ray::disable_depth_test();
+    ray::begin_shader_mode(shader);
+    if sl.zoom_loc >= 0 {
+        ray::set_shader_float(shader, sl.zoom_loc, zoom);
+    }
+    if sl.time_loc >= 0 {
+        ray::set_shader_float(shader, sl.time_loc, time);
+    }
+    for (_, loc, v, n) in sl.globals.iter() {
+        if *loc >= 0 {
+            ray::set_shader_vec(shader, *loc, &v[..*n as usize]);
+        }
+    }
+    ray::draw_textured_quad(0, corners);
+    ray::end_shader_mode();
+    ray::enable_depth_test();
+    ray::enable_backface_culling();
+    ray::end_mode_3d();
+}
 
 pub fn draw_windows(windows: &Windows, cam3d: ray::Camera3D, shaders: &Shaders, time: f32) {
     // Painter's order: stack order first, then z within a stack entry. Depth test is off,

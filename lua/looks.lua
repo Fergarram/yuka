@@ -18,8 +18,30 @@ local looks = {}
 --
 
 looks.tune = {
-    -- Behind the canvas, 0xRRGGBBAA.
-    background = 0x181820ff,
+    -- Light or dark: "dark", "light", or "system", which asks gsettings
+    -- (org.gnome.desktop.interface color-scheme) as the scripts load and falls back to
+    -- theme_default when it states no preference, as it does until something sets it.
+    -- looks.set_theme switches while running.
+    theme = "system",
+    theme_default = "light",
+
+    -- What each theme paints, 0xRRGGBBAA: behind the canvas, and the floor's dots. On the dark
+    -- background a dot alpha around 0x30 is a hint and 0x60 is plainly there.
+    themes = {
+        dark = { background = 0x181820ff, dots = 0xc8c8d040 },
+        light = { background = 0xf2f2f5ff, dots = 0x30303a38 },
+    },
+
+    -- The floor: a dot grid on the canvas itself, behind every window, moving and zooming
+    -- with them. Drawn by shaders/grid.frag through slot 2 (shaders below); false for none.
+    -- Its colour comes from the theme.
+    --
+    --   spacing   canvas units between dots, 24 is a dot every 24 pixels at zoom 1
+    --   dot_px    dot size on screen, the same at any zoom
+    --   fade_px   the closest dots get on screen: zoomed out past it, every other dot fades
+    --             and the spacing doubles (24, 48, 96...), so the floor thins out instead of
+    --             crowding into a pattern. Around 12 keeps it airy, 8 keeps it dense
+    floor = { spacing = 24, dot_px = 2, fade_px = 12 },
 
     -- How opaque a window is drawn while it covers the one you are working in.
     --
@@ -77,7 +99,8 @@ looks.tune = {
     -- slot as it was and puts the error on screen. See src/render.rs (Shaders) for the
     -- uniforms every window shader is handed.
     shaders = {
-        [1] = { "shaders/window.vert", "shaders/desaturate.frag" },
+        [1] = { "shaders/quad.vert", "shaders/desaturate.frag" },
+        [2] = { "shaders/quad.vert", "shaders/grid.frag" },
     },
 
     -- How much colour drains out of windows you are not working in, through slot 1. 0 is off,
@@ -145,6 +168,52 @@ end
 -- recompiles them.
 for slot, files in pairs(tune.shaders) do
     yk.shader(slot, files[1], files[2])
+end
+
+--
+-- Theme
+--
+
+-- The floor's numbers, handed to its shader as the scripts load and again when the theme
+-- changes: a uniform stays set until the slot reloads, and the slot only reloads along with
+-- this file.
+local FLOOR_SLOT = 2
+
+-- The theme in force, a key of tune.themes.
+looks.theme = tune.theme_default
+
+-- What gsettings says, "dark" or "light", or nil when it states no preference. Runs a process,
+-- so only as the scripts load, never per frame.
+local function system_theme()
+    local p = io.popen("gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null")
+    if not p then return nil end
+    local out = p:read("*a") or ""
+    p:close()
+    if string.find(out, "prefer%-dark") then return "dark" end
+    if string.find(out, "prefer%-light") then return "light" end
+    return nil
+end
+
+function looks.set_theme(name)
+    if not tune.themes[name] then return end
+    looks.theme = name
+    if tune.floor then
+        local c = tune.themes[name].dots
+        yk.shader_uniform(FLOOR_SLOT, "dotColor",
+            math.floor(c / 0x1000000) % 256 / 255, math.floor(c / 0x10000) % 256 / 255,
+            math.floor(c / 0x100) % 256 / 255, c % 256 / 255)
+    end
+end
+
+if tune.floor then
+    yk.shader_uniform(FLOOR_SLOT, "spacing", tune.floor.spacing)
+    yk.shader_uniform(FLOOR_SLOT, "dotPx", tune.floor.dot_px)
+    yk.shader_uniform(FLOOR_SLOT, "fadePx", tune.floor.fade_px)
+end
+if tune.theme == "system" then
+    looks.set_theme(system_theme() or tune.theme_default)
+else
+    looks.set_theme(tune.theme)
 end
 
 -- The cursor over the canvas this frame, sent only when it changes.
@@ -254,7 +323,8 @@ local function notice_resize_end(f)
 end
 
 function looks.frame(f)
-    yk.set_background(tune.background)
+    yk.set_background(tune.themes[looks.theme].background)
+    yk.floor_shader(tune.floor and FLOOR_SLOT or nil)
     notice_drop(f)
     notice_resize_end(f)
     find_covers(f)

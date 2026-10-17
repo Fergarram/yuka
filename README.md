@@ -193,11 +193,13 @@ scripts (LuaJIT) in `lua/`:
   out falls back to them. Tuning for behaviour lives in a `tune` table at the top
   of the module that uses it.
 - `lua/keys.lua` maps key names to evdev codes for chords like `"super+w"`.
-- `shaders/` holds the window shaders. `window.vert` and `window.frag` are the
-  built-in pair (slot 0); `looks.tune.shaders` loads others into numbered slots
-  and `looks.window_shader` picks one per window. `desaturate.frag` is an example,
+- `shaders/` holds the shaders. `quad.vert` is the vertex shader every quad
+  shares; `window.frag` is the built-in window shader (slot 0).
+  `looks.tune.shaders` loads others into numbered slots and
+  `looks.window_shader` picks one per window. `desaturate.frag` is an example,
   used for unfocused windows when `looks.tune.unfocused_desaturate` is above 0.
-  The uniforms every window shader receives are listed in `src/render.rs`.
+  `grid.frag` draws the floor, the dot grid on the canvas behind every window
+  (`looks.tune.floor`). The uniforms each receives are listed in `src/render.rs`.
 
 The scripts are read at startup and re-read while running: save any file under
 `lua/` or `shaders/` and the change lands on the next frame, or press Super+R to reload on
