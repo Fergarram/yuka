@@ -66,10 +66,19 @@ use smithay::wayland::input_method::{
     PopupSurface as ImePopupSurface,
 };
 use smithay::wayland::text_input::TextInputManagerState;
+use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
+use smithay::wayland::shell::kde::decoration::{KdeDecorationHandler, KdeDecorationState};
+use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as XdgDecorationMode;
+use smithay::reexports::wayland_protocols_misc::server_decoration::server::org_kde_kwin_server_decoration::{
+    Mode as KdeMode, OrgKdeKwinServerDecoration,
+};
+use smithay::reexports::wayland_protocols_misc::server_decoration::server::org_kde_kwin_server_decoration_manager::Mode as KdeDefaultMode;
+use smithay::reexports::wayland_server::WEnum;
 use smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState;
 use smithay::{
     delegate_compositor, delegate_cursor_shape, delegate_data_device, delegate_dmabuf,
-    delegate_input_method_manager, delegate_output,
+    delegate_input_method_manager, delegate_kde_decoration, delegate_output,
+    delegate_xdg_decoration,
     delegate_pointer_gestures, delegate_seat, delegate_shm, delegate_text_input_manager,
     delegate_viewporter, delegate_virtual_keyboard_manager, delegate_xdg_activation,
     delegate_xdg_shell,
@@ -173,6 +182,18 @@ pub struct State {
     // own, since those live in the shadow. Applied to a new window's first configure, so it
     // never draws one.
     pub client_shadows: bool,
+    // Who draws the titlebar, negotiated through both decoration protocols: xdg-decoration,
+    // and KDE's older one, which GTK 3 listens to for windows without a headerbar of their own.
+    // When not the client, every window is told the compositor decorates it, and we draw
+    // nothing, so a client that listens draws no titlebar at all. GTK windows built around a
+    // headerbar ignore both protocols and keep theirs.
+    pub client_decorations: bool,
+    #[allow(dead_code)]
+    pub xdg_decoration_state: XdgDecorationState,
+    pub kde_decoration_state: KdeDecorationState,
+    // KDE decoration objects, with the mode last told to each, kept to tell them again when the
+    // policy changes.
+    pub kde_decorations: Vec<(OrgKdeKwinServerDecoration, KdeMode)>,
 
     // Surfaces that committed since the last drain. The render side reads and
     // clears this each frame. Plain surface handles, no rendering state here.
@@ -253,6 +274,10 @@ pub fn init(
     // at a time: a second is told it is unavailable.
     let input_method_state = InputMethodManagerState::new::<State, _>(&dh, |_client| true);
     let virtual_keyboard_state = VirtualKeyboardManagerState::new::<State, _>(&dh, |_client| true);
+    let xdg_decoration_state = XdgDecorationState::new::<State>(&dh);
+    // The default a client hears on binding, matching client_decorations below until the
+    // scripts say otherwise, which replaces the global (set_client_decorations).
+    let kde_decoration_state = KdeDecorationState::new::<State>(&dh, KdeDefaultMode::Client);
 
     // A wl_output, and xdg_output alongside it. Toolkits that derive their scale
     // and window sizing from an output (GTK, Chromium) never map a window without
@@ -342,6 +367,10 @@ pub fn init(
         ime_popup: None,
         ime_mods_stale: false,
         client_shadows: true,
+        client_decorations: true,
+        xdg_decoration_state,
+        kde_decoration_state,
+        kde_decorations: Vec::new(),
         committed: Vec::new(),
         dead_dmabufs: Vec::new(),
         cursor_image: CursorImageStatus::default_named(),
@@ -411,6 +440,51 @@ pub fn toplevel_surfaces(state: &State) -> Vec<WlSurface> {
 //
 // Called every frame of a resize drag: Smithay only puts a configure on the wire when
 // the pending state actually differs, so a drag that has not moved sends nothing.
+// Tell every window who draws its titlebar (State::client_decorations).
+pub fn set_client_decorations(state: &mut State, on: bool) {
+    if state.client_decorations == on {
+        return;
+    }
+    state.client_decorations = on;
+    let mode = xdg_decoration_mode(on);
+    for toplevel in state.xdg_state.toplevel_surfaces() {
+        let negotiated = toplevel.with_pending_state(|pending| {
+            if pending.decoration_mode.is_some() {
+                pending.decoration_mode = Some(mode);
+                true
+            } else {
+                false
+            }
+        });
+        if negotiated {
+            toplevel.send_pending_configure();
+        }
+    }
+    // KDE's default mode is announced when a client binds and fixed when the global is made,
+    // and GTK 3 decides from it alone. So the global is replaced by one announcing the new
+    // policy. Disabled rather than removed: a client binding it at this moment would otherwise
+    // be an error, and a disabled global costs nothing but its slot.
+    let default = if on { KdeDefaultMode::Client } else { KdeDefaultMode::Server };
+    state.display_handle.disable_global::<State>(state.kde_decoration_state.global());
+    state.kde_decoration_state = KdeDecorationState::new::<State>(&state.display_handle, default);
+    let mode = kde_decoration_mode(on);
+    state.kde_decorations.retain(|(d, _)| d.is_alive());
+    for (decoration, told) in state.kde_decorations.iter_mut() {
+        if *told != mode {
+            decoration.mode(mode);
+            *told = mode;
+        }
+    }
+}
+
+fn xdg_decoration_mode(client: bool) -> XdgDecorationMode {
+    if client { XdgDecorationMode::ClientSide } else { XdgDecorationMode::ServerSide }
+}
+
+fn kde_decoration_mode(client: bool) -> KdeMode {
+    if client { KdeMode::Client } else { KdeMode::Server }
+}
+
 // Tell every toplevel whether to draw its own shadow (State::client_shadows).
 pub fn set_client_shadows(state: &mut State, on: bool) {
     if state.client_shadows == on {
@@ -1382,6 +1456,70 @@ impl XdgShellHandler for State {
     }
 }
 
+// xdg-decoration. The mode is ours to choose: whatever a client asks for, it is told the
+// policy, and the protocol says it must use the mode it is told.
+impl XdgDecorationHandler for State {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        self.answer_decoration(toplevel);
+    }
+
+    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: XdgDecorationMode) {
+        self.answer_decoration(toplevel);
+    }
+
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        self.answer_decoration(toplevel);
+    }
+}
+
+impl State {
+    fn answer_decoration(&mut self, toplevel: ToplevelSurface) {
+        let mode = xdg_decoration_mode(self.client_decorations);
+        toplevel.with_pending_state(|pending| pending.decoration_mode = Some(mode));
+        // Before the first configure the mode simply rides along with it.
+        if toplevel.is_initial_configure_sent() {
+            toplevel.send_pending_configure();
+        }
+    }
+}
+
+// KDE's server decoration protocol. Same policy, but here the mode is a suggestion and a client
+// answers it by requesting a mode back. A request for the policy is that answer and gets none,
+// or the two would echo forever; a request for anything else is told the policy, since a client
+// that hears nothing assumes it got what it asked for.
+impl KdeDecorationHandler for State {
+    fn kde_decoration_state(&self) -> &KdeDecorationState {
+        &self.kde_decoration_state
+    }
+
+    fn new_decoration(&mut self, _surface: &WlSurface, decoration: &OrgKdeKwinServerDecoration) {
+        let mode = kde_decoration_mode(self.client_decorations);
+        decoration.mode(mode);
+        self.kde_decorations.retain(|(d, _)| d.is_alive());
+        self.kde_decorations.push((decoration.clone(), mode));
+    }
+
+    fn request_mode(
+        &mut self,
+        _surface: &WlSurface,
+        decoration: &OrgKdeKwinServerDecoration,
+        asked: WEnum<KdeMode>,
+    ) {
+        let mode = kde_decoration_mode(self.client_decorations);
+        if asked == WEnum::Value(mode) {
+            return;
+        }
+        decoration.mode(mode);
+        if let Some(entry) = self.kde_decorations.iter_mut().find(|(d, _)| d == decoration) {
+            entry.1 = mode;
+        }
+    }
+
+    fn release(&mut self, decoration: &OrgKdeKwinServerDecoration, _surface: &WlSurface) {
+        self.kde_decorations.retain(|(d, _)| d != decoration);
+    }
+}
+
 // The input method's candidate list. Kept rather than placed here: where it goes depends on
 // where its window is on the canvas, which is the render side's to know.
 impl InputMethodHandler for State {
@@ -1430,3 +1568,5 @@ delegate_pointer_gestures!(State);
 delegate_text_input_manager!(State);
 delegate_input_method_manager!(State);
 delegate_virtual_keyboard_manager!(State);
+delegate_xdg_decoration!(State);
+delegate_kde_decoration!(State);

@@ -38,6 +38,13 @@ looks.tune = {
     -- client that ignores the hint keeps its shadow.
     client_shadows = false,
 
+    -- Whether windows draw their own titlebars. false answers both decoration protocols with
+    -- "the compositor decorates you" and yuka draws nothing, so a client that listens has no
+    -- titlebar at all: Qt, Chromium with "use system title bar", SDL and GLFW programs, most
+    -- terminals, and GTK 3 windows without a headerbar of their own. GTK windows built around
+    -- a headerbar (libadwaita, ghostty, most GNOME apps) keep it; that is their UI.
+    client_titlebars = true,
+
     -- The floor: a dot grid on the canvas itself, behind every window, moving and zooming
     -- with them. Drawn by shaders/grid.frag through slot 2 (shaders below); false for none.
     -- Its colour comes from the theme.
@@ -212,6 +219,7 @@ function looks.set_theme(name)
 end
 
 yk.client_shadows(tune.client_shadows)
+yk.client_decorations(tune.client_titlebars)
 
 if tune.floor then
     yk.shader_uniform(FLOOR_SLOT, "spacing", tune.floor.spacing)
