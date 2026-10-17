@@ -52,6 +52,12 @@ screen.tune = {
     -- How finely the curves are sent: points per channel, resampled by the engine to what the
     -- display takes. 256 is already finer than the eye can tell.
     points = 256,
+
+    -- How often, at most, the curves are sent while a change eases in, in seconds. On Intel
+    -- (and likely other drivers) setting the ramp waits for a refresh of its own, so each send
+    -- costs a frame: sent every frame, a fade runs at half the frame rate. 0.1 is ten a second,
+    -- one late frame per send and too fine a step to see in the colour. 0 sends every frame.
+    send_every = 0.1,
 }
 
 --
@@ -63,6 +69,9 @@ local night = screen.tune.night_start
 
 -- How long a range key has been held, in seconds, 0 when none is.
 local held_for = 0
+
+-- Seconds since the curves were last sent during a change.
+local since_sent = 0
 
 -- The look the range points at right now, refilled each frame.
 local want = { kelvin = 6500, dim = 1.0, contrast = 1.0, gamma = 1.0 }
@@ -193,7 +202,18 @@ function screen.frame(f)
             end
         end
     end
-    if moving then
+    if not moving then
+        since_sent = 0
+        return
+    end
+    -- The last step always goes out, so a change ends exactly where it was going.
+    local settled = true
+    for i = 1, #FIELDS do
+        if now[FIELDS[i]] ~= want[FIELDS[i]] then settled = false end
+    end
+    since_sent = since_sent + f.dt
+    if settled or since_sent >= screen.tune.send_every then
+        since_sent = 0
         build(now)
     end
 end

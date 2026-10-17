@@ -83,4 +83,11 @@ MINIMUM SHIT:
     immediately, i.e. tearing, since that would explain the feel and would make
     vsync versus async flips a deliberate per-output switch rather than a
     regression.
+    Owning the flips also fixes the night light fade. Setting the gamma ramp
+    (drmModeCrtcSetGamma) is a blocking commit of its own on top of raylib's
+    blocking drmModeSetCrtc, so a frame that sends one waits two refreshes:
+    measured on the tty, 261 slow frames over a fade against 16 without.
+    lua/screen.lua sends at most ten a second (tune.send_every) to hide it. With
+    our own atomic commits, the GAMMA_LUT blob rides in the frame's commit and
+    every frame of a fade can carry a new ramp for free.
 [ ] Window mode we did is kinda weird? I haven't tested it as such
