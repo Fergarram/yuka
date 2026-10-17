@@ -47,8 +47,9 @@ use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::{
 };
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface,
-    XdgShellHandler, XdgShellState,
+    XdgShellHandler, XdgShellState, XdgToplevelSurfaceData,
 };
+use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::wayland::dmabuf::{
     get_dmabuf, DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState,
     ImportNotifier,
@@ -207,6 +208,9 @@ pub struct State {
     // Bumped on every set_cursor, so the frame loop can see the call rather than infer it from the
     // value changing.
     pub cursor_serial: u32,
+    // Toplevels created since the last frame, waiting for their first configure until the
+    // scripts have heard of them and had a chance to size them (configure_new_toplevel).
+    pub new_toplevels: Vec<WlSurface>,
     // Popups waiting to be placed and configured, with the token of the reposition request that
     // asked, if one did. Placing one needs the view and where its window is on the canvas,
     // which only the main loop knows, so they wait for it (popups_to_place).
@@ -223,6 +227,11 @@ pub struct State {
     // is maximize. Queued rather than answered here, because what maximizing means is a
     // question about the canvas and this is the protocol boundary.
     pub maximize_requests: Vec<(WlSurface, bool)>,
+    // The same for fullscreen: true asks for it, false asks to leave it.
+    pub fullscreen_requests: Vec<(WlSurface, bool)>,
+    // Toplevels whose title, app id or parent changed since the last frame, for the scripts to
+    // hear about (toplevel_info).
+    pub info_changed: Vec<WlSurface>,
     // Surfaces a client has asked us to activate with a token we accepted. Drained each frame
     // by the main loop, which is where focus lives.
     pub activation_requests: Vec<WlSurface>,
@@ -379,10 +388,13 @@ pub fn init(
         dead_dmabufs: Vec::new(),
         cursor_image: CursorImageStatus::default_named(),
         cursor_serial: 0,
+        new_toplevels: Vec::new(),
         popups_to_place: Vec::new(),
         move_requests: Vec::new(),
         resize_requests: Vec::new(),
         maximize_requests: Vec::new(),
+        fullscreen_requests: Vec::new(),
+        info_changed: Vec::new(),
         activation_requests: Vec::new(),
         held_dmabufs: Vec::new(),
     };
@@ -445,6 +457,27 @@ pub fn toplevel_surfaces(state: &State) -> Vec<WlSurface> {
 //
 // Called every frame of a resize drag: Smithay only puts a configure on the wire when
 // the pending state actually differs, so a drag that has not moved sends nothing.
+// The toplevels created since the last frame, taken.
+pub fn new_toplevels(state: &mut State) -> Vec<WlSurface> {
+    std::mem::take(&mut state.new_toplevels)
+}
+
+// Send a new toplevel its first configure, carrying whatever the scripts set on it, unless
+// something already did (a resize sends its own).
+pub fn configure_new_toplevel(state: &State, surface: &WlSurface) {
+    let Some(toplevel) = state
+        .xdg_state
+        .toplevel_surfaces()
+        .iter()
+        .find(|t| t.wl_surface() == surface)
+    else {
+        return;
+    };
+    if !toplevel.is_initial_configure_sent() {
+        toplevel.send_configure();
+    }
+}
+
 // The popups waiting to be placed, taken.
 pub fn popups_to_place(state: &mut State) -> Vec<(PopupSurface, Option<u32>)> {
     std::mem::take(&mut state.popups_to_place)
@@ -674,6 +707,63 @@ pub fn close_toplevel(state: &State, surface: &WlSurface) {
 // of saying "you choose", which is the only honest thing to send a window we have never seen: it
 // has no size yet for us to clamp against, and running it through the usual path would hand it its
 // own declared minimum, which is a refusal that also shrinks it to nothing.
+// Fullscreen on or off, at a size. Off also clears maximized: leaving fullscreen goes back to
+// the window's own rectangle, whatever it was before.
+pub fn fullscreen_toplevel(state: &State, surface: &WlSurface, w: i32, h: i32, on: bool) {
+    let Some(toplevel) = state
+        .xdg_state
+        .toplevel_surfaces()
+        .iter()
+        .find(|t| t.wl_surface() == surface)
+    else {
+        return;
+    };
+    toplevel.with_pending_state(|pending| {
+        pending.size = Some((w, h).into());
+        if on {
+            pending.states.set(ToplevelState::Fullscreen);
+        } else {
+            pending.states.unset(ToplevelState::Fullscreen);
+            pending.states.unset(ToplevelState::Maximized);
+        }
+    });
+    if toplevel.send_pending_configure().is_none() {
+        toplevel.send_configure();
+    }
+}
+
+// A fullscreen request the scripts did not grant. Owed a configure like a refused maximize.
+pub fn decline_fullscreen(state: &State, surface: &WlSurface) {
+    let Some(toplevel) = state
+        .xdg_state
+        .toplevel_surfaces()
+        .iter()
+        .find(|t| t.wl_surface() == surface)
+    else {
+        return;
+    };
+    toplevel.with_pending_state(|pending| pending.states.unset(ToplevelState::Fullscreen));
+    if toplevel.send_pending_configure().is_none() {
+        toplevel.send_configure();
+    }
+}
+
+// A toplevel's app id and title, empty when unset, and its parent: the window a dialog
+// belongs to.
+pub fn toplevel_info(surface: &WlSurface) -> (String, String, Option<WlSurface>) {
+    with_states(surface, |states| {
+        let Some(data) = states.data_map.get::<XdgToplevelSurfaceData>() else {
+            return (String::new(), String::new(), None);
+        };
+        let attrs = data.lock().unwrap();
+        (
+            attrs.app_id.clone().unwrap_or_default(),
+            attrs.title.clone().unwrap_or_default(),
+            attrs.parent.clone(),
+        )
+    })
+}
+
 pub fn decline_maximize(state: &State, surface: &WlSurface) {
     let Some(toplevel) = state
         .xdg_state
@@ -1383,11 +1473,13 @@ impl XdgShellHandler for State {
         &mut self.xdg_state
     }
 
+    // The first configure waits for the main loop: the scripts hear of the window first and
+    // may give it a size (configure_new_toplevel).
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         if !self.client_shadows {
             surface.with_pending_state(|pending| set_tiled_states(&mut pending.states, true));
         }
-        surface.send_configure();
+        self.new_toplevels.push(surface.wl_surface().clone());
     }
 
     // A client asking to be moved or resized, which is what dragging its own titlebar or
@@ -1439,6 +1531,30 @@ impl XdgShellHandler for State {
 
     fn unmaximize_request(&mut self, surface: ToplevelSurface) {
         self.maximize_requests.push((surface.wl_surface().clone(), false));
+    }
+
+    // Fullscreen, queued like maximize and answered by the scripts. The output a client names
+    // is ignored: there is one, and on a canvas what fullscreen covers is the scripts' call.
+    fn fullscreen_request(&mut self, surface: ToplevelSurface, _output: Option<WlOutput>) {
+        self.fullscreen_requests.push((surface.wl_surface().clone(), true));
+    }
+
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        self.fullscreen_requests.push((surface.wl_surface().clone(), false));
+    }
+
+    // What a window is called and whose dialog it is, which the scripts hear about as it
+    // changes rather than every frame.
+    fn title_changed(&mut self, surface: ToplevelSurface) {
+        self.info_changed.push(surface.wl_surface().clone());
+    }
+
+    fn app_id_changed(&mut self, surface: ToplevelSurface) {
+        self.info_changed.push(surface.wl_surface().clone());
+    }
+
+    fn parent_changed(&mut self, surface: ToplevelSurface) {
+        self.info_changed.push(surface.wl_surface().clone());
     }
 
     // The positioner carries where the client wants this, relative to the parent's geometry,

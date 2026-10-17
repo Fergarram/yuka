@@ -123,6 +123,12 @@ pub struct Windows {
     pub shader: Vec<u8>,
     pub params: Vec<[f32; 4]>,
     pub maximized: Vec<bool>,
+    // Whether the window is fullscreen rather than maximized. Both are held the same way (the
+    // pin and the rectangle to give back below); this only says which the client was told.
+    pub fullscreen: Vec<bool>,
+    // Taken out of drawing and hit testing by the scripts, children included, while staying a
+    // window they can see and bring back.
+    pub hidden: Vec<bool>,
     // And the canvas point its visible top-left is pinned to while it is. Held every frame
     // rather than set once, because the offset between a surface and its visible top-left is
     // the client's to change and it does change on exactly this transition: a client that
@@ -161,6 +167,10 @@ pub struct Windows {
     next_order: u32,
     // Next handle to hand out. Starts at 1 so 0 is never a window.
     next_id: u64,
+    // Toplevels a client has created but not drawn into yet, with the handle each will carry.
+    // Handed out as the window is created rather than when it maps, so the scripts can size a
+    // window before its first frame and it never appears at a size it then has to leave.
+    pub pending: Vec<(WlSurface, u64)>,
     // Reused scratch for repacking shm rows when stride != width*4.
     scratch: Vec<u8>,
     // Windows that became real this frame: a toplevel's first buffer, which is the moment it
@@ -213,6 +223,8 @@ pub fn windows_new() -> Windows {
         shader: Vec::new(),
         params: Vec::new(),
         maximized: Vec::new(),
+        fullscreen: Vec::new(),
+        hidden: Vec::new(),
         max_x: Vec::new(),
         max_y: Vec::new(),
         restore_x: Vec::new(),
@@ -227,6 +239,7 @@ pub fn windows_new() -> Windows {
         place_at: (0.0, 0.0),
         next_order: 0,
         next_id: 1,
+        pending: Vec::new(),
         scratch: Vec::new(),
         mapped: Vec::new(),
     }
@@ -356,6 +369,8 @@ pub struct WinList {
     pub w: Vec<f32>,
     pub h: Vec<f32>,
     pub maximized: Vec<bool>,
+    pub fullscreen: Vec<bool>,
+    pub hidden: Vec<bool>,
     // Stack order: higher is in front.
     pub order: Vec<u32>,
     // How far the window is lifted toward the camera, as last set.
@@ -376,6 +391,8 @@ pub fn win_list_new() -> WinList {
         w: Vec::with_capacity(32),
         h: Vec::with_capacity(32),
         maximized: Vec::with_capacity(32),
+        fullscreen: Vec::with_capacity(32),
+        hidden: Vec::with_capacity(32),
         order: Vec::with_capacity(32),
         z: Vec::with_capacity(32),
         restore_w: Vec::with_capacity(32),
@@ -392,6 +409,8 @@ pub fn list_windows(windows: &Windows, out: &mut WinList) {
     out.w.clear();
     out.h.clear();
     out.maximized.clear();
+    out.fullscreen.clear();
+    out.hidden.clear();
     out.order.clear();
     out.z.clear();
     out.restore_w.clear();
@@ -409,6 +428,8 @@ pub fn list_windows(windows: &Windows, out: &mut WinList) {
         out.w.push(w);
         out.h.push(h);
         out.maximized.push(windows.maximized[i]);
+        out.fullscreen.push(windows.fullscreen[i]);
+        out.hidden.push(windows.hidden[i]);
         out.order.push(windows.order[i]);
         out.z.push(windows.z[i]);
         let max = windows.maximized[i];
@@ -524,19 +545,44 @@ fn index_of(windows: &Windows, surface: &WlSurface) -> Option<usize> {
 
 // The handle for a surface we hold, and the surface behind a handle. A handle whose window
 // has gone answers None.
+// Windows not yet drawn answer from the pending list.
 pub fn window_id(windows: &Windows, surface: &WlSurface) -> Option<u64> {
-    index_of(windows, surface).map(|i| windows.id[i])
+    if let Some(i) = index_of(windows, surface) {
+        return Some(windows.id[i]);
+    }
+    windows.pending.iter().find(|(s, _)| s == surface).map(|(_, id)| *id)
 }
 
 pub fn surface_by_id(windows: &Windows, id: u64) -> Option<WlSurface> {
-    let i = windows.id.iter().position(|&x| x == id)?;
-    Some(windows.surface[i].clone())
+    if let Some(i) = windows.id.iter().position(|&x| x == id) {
+        return Some(windows.surface[i].clone());
+    }
+    windows.pending.iter().find(|(_, x)| *x == id).map(|(s, _)| s.clone())
+}
+
+// Hand a toplevel its handle as it is created, before it has drawn anything. It keeps the
+// same one when its first buffer arrives.
+pub fn reserve_id(windows: &mut Windows, surface: &WlSurface) -> u64 {
+    let id = windows.next_id;
+    windows.next_id += 1;
+    windows.pending.push((surface.clone(), id));
+    id
 }
 
 // Remove windows whose surface has died (client closed), freeing any shm
 // texture we own. dmabuf textures belong to the cache and its buffer_destroyed
 // path, so we do not touch them here.
 pub fn prune_dead(windows: &mut Windows, closed: &mut Vec<u64>) {
+    // A window that went away before drawing anything still closed, as far as the scripts
+    // know: they heard it was created.
+    let mut p = 0;
+    while p < windows.pending.len() {
+        if windows.pending[p].0.is_alive() {
+            p += 1;
+        } else {
+            closed.push(windows.pending.swap_remove(p).1);
+        }
+    }
     let mut i = 0;
     while i < windows.surface.len() {
         if windows.surface[i].is_alive() {
@@ -576,6 +622,8 @@ pub fn prune_dead(windows: &mut Windows, closed: &mut Vec<u64>) {
         windows.shader.remove(i);
         windows.params.remove(i);
         windows.maximized.remove(i);
+        windows.fullscreen.remove(i);
+        windows.hidden.remove(i);
         windows.max_x.remove(i);
         windows.max_y.remove(i);
         windows.restore_x.remove(i);
@@ -588,6 +636,11 @@ pub fn prune_dead(windows: &mut Windows, closed: &mut Vec<u64>) {
         windows.sub.remove(i);
         windows.placed.remove(i);
     }
+}
+
+// Drawable, and not hidden by the scripts: what is drawn and what the pointer can hit.
+fn shown(windows: &Windows, i: usize) -> bool {
+    drawable(windows, i) && !windows.hidden[i]
 }
 
 // A stored entry is drawable when it has a texture and, if it is a child, when its
@@ -618,7 +671,7 @@ pub fn window_at(
     let (cx, cy) = camera::screen_to_plane(cam3d, sx, sy, 0.0)?;
     let mut best: Option<usize> = None;
     for i in 0..windows.surface.len() {
-        if !drawable(windows, i) {
+        if !shown(windows, i) {
             continue;
         }
         let (x, y, w, h) = visible(windows, i);
@@ -743,12 +796,26 @@ pub fn maximize(
 
 // And give it back, once. None when this window was not maximized, so an unmaximize that
 // answers nothing moves nothing.
+// Which of the two a maximized window is: fullscreen or maximized. Set after maximize.
+pub fn set_fullscreen(windows: &mut Windows, surface: &WlSurface, on: bool) {
+    if let Some(i) = index_of(windows, surface) {
+        windows.fullscreen[i] = on;
+    }
+}
+
+pub fn set_hidden(windows: &mut Windows, surface: &WlSurface, on: bool) {
+    if let Some(i) = index_of(windows, surface) {
+        windows.hidden[i] = on;
+    }
+}
+
 pub fn unmaximize(windows: &mut Windows, surface: &WlSurface) -> Option<(f32, f32, f32, f32)> {
     let i = index_of(windows, surface)?;
     if !windows.maximized[i] {
         return None;
     }
     windows.maximized[i] = false;
+    windows.fullscreen[i] = false;
     Some((windows.restore_x[i], windows.restore_y[i], windows.restore_w[i], windows.restore_h[i]))
 }
 
@@ -1043,6 +1110,7 @@ pub fn sync_children(windows: &mut Windows, ime: Option<(WlSurface, WlSurface, f
         windows.shadow[j] = windows.shadow[parent];
         windows.shader[j] = windows.shader[parent];
         windows.params[j] = windows.params[parent];
+        windows.hidden[j] = windows.hidden[parent];
         windows.placed[j] = true;
     }
 
@@ -1110,6 +1178,7 @@ pub fn sync_children(windows: &mut Windows, ime: Option<(WlSurface, WlSurface, f
         windows.shadow[j] = windows.shadow[parent];
         windows.shader[j] = windows.shader[parent];
         windows.params[j] = windows.params[parent];
+        windows.hidden[j] = windows.hidden[parent];
         windows.placed[j] = true;
     }
 
@@ -1134,6 +1203,7 @@ pub fn sync_children(windows: &mut Windows, ime: Option<(WlSurface, WlSurface, f
     windows.shadow[j] = false;
     windows.shader[j] = 0;
     windows.params[j] = [0.0; 4];
+    windows.hidden[j] = windows.hidden[i];
     windows.placed[j] = true;
 }
 
@@ -1192,9 +1262,16 @@ fn store_entry(
             };
             let order = windows.next_order;
             windows.next_order += 1;
+            // The handle it was given when created, if it was a toplevel; a new one otherwise.
+            let id = match windows.pending.iter().position(|(s, _)| s == surface) {
+                Some(p) => windows.pending.swap_remove(p).1,
+                None => {
+                    windows.next_id += 1;
+                    windows.next_id - 1
+                }
+            };
             windows.surface.push(surface.clone());
-            windows.id.push(windows.next_id);
-            windows.next_id += 1;
+            windows.id.push(id);
             windows.tex_id.push(tex_id);
             windows.tex_w.push(w);
             windows.tex_h.push(h);
@@ -1222,6 +1299,8 @@ fn store_entry(
             windows.shader.push(0);
             windows.params.push([0.0; 4]);
             windows.maximized.push(false);
+            windows.fullscreen.push(false);
+            windows.hidden.push(false);
             windows.max_x.push(0.0);
             windows.max_y.push(0.0);
             windows.restore_x.push(0.0);
@@ -1714,7 +1793,7 @@ pub fn draw_windows(windows: &Windows, cam3d: ray::Camera3D, shaders: &Shaders, 
     // another window could not help, because z decided everything and raising only changes
     // order. Which also made a freshly mapped window appear underneath.
     let mut idx: Vec<usize> = (0..windows.surface.len())
-        .filter(|&i| drawable(windows, i))
+        .filter(|&i| shown(windows, i))
         .collect();
     idx.sort_by(|&a, &b| {
         windows.order[a].cmp(&windows.order[b]).then(

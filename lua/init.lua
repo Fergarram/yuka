@@ -70,6 +70,12 @@
 --   yk.move_window(id, x, y)      put a window's visible top-left at a canvas point
 --   yk.maximize(id, x, y, w, h)   fill a canvas rectangle with a window
 --   yk.unmaximize(id)             give it its own rectangle back
+--   yk.fullscreen(id, x, y, w, h), yk.unfullscreen(id)
+--                                 the same, telling the client it is fullscreen
+--   yk.resize_window(id, w, h)    ask a window to be this size, canvas units; on a window just
+--                                 created (f.created) it is the size it first draws at
+--   yk.hide(id [, on])            take a window out of drawing and hit testing, children
+--                                 included, or bring it back with on = false
 --
 -- Nothing reaches clients unless yk.route_scroll and yk.route_input say so, every frame.
 --   yk.key_down(code)             whether a key is held right now
@@ -107,6 +113,14 @@
 --   mapped_count, mapped[i], mapped_welcome[i]
 --                                          windows that drew their first frame, and whether
 --                                          each is from the client with the keyboard
+--   created_count, created[i]              windows just created and not drawn yet; size them now
+--                                          and they first appear at that size
+--   info_count, info_id[i], info_app_id[i], info_title[i], info_parent[i]
+--                                          what windows are called and whose dialogs they are
+--                                          (parent 0 for none): sent on creation, on change, and
+--                                          for every window after a reload. Keep a table by id
+--   full_count, full_id[i], full_on[i]     fullscreen requests, answered like maximize ones
+--   win_full[i], win_hidden[i]             fullscreen, and hidden by yk.hide
 --   activated_count, activated[i]          windows another client asked to activate
 --   max_count, max_id[i], max_on[i]        windows asking to be maximized (on) or let go;
 --                                          unanswered ones are refused, or given their size back
@@ -403,6 +417,7 @@ function yk.frame(f)
     grab.frame(f, eaten)
     windows.click_focus(f, eaten)
     windows.maximize_requests(f)
+    windows.fullscreen_requests(f)
     windows.popup_bounds(f)
     view.step(f, f.pinch ~= 1, f.swiping)
     windows.drop_unseen_focus(f)

@@ -801,6 +801,42 @@ fn maximize_window(
 // And back to the rectangle it had. A window we never maximized still gets an answer, at the
 // size it already is, because a client waiting on a configure it asked for is stuck until it
 // arrives.
+// Fullscreen is maximize with a different state told to the client: the same rectangle given
+// back, the same pin. A window already maximized keeps the rectangle from before that, and
+// leaving fullscreen goes all the way back to it.
+#[allow(clippy::too_many_arguments)]
+fn fullscreen_window(
+    windows: &mut Windows,
+    state: &State,
+    surf: &WlSurface,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) {
+    if let (Some((ox, oy)), Some((ow, oh))) =
+        (render::window_origin(windows, surf), render::geo_size(windows, surf))
+    {
+        render::maximize(windows, surf, x, y, ox, oy, ow, oh);
+    }
+    render::set_fullscreen(windows, surf, true);
+    render::front(windows, surf);
+    render::set_window_origin(windows, surf, x, y);
+    wl::state::fullscreen_toplevel(state, surf, w.round() as i32, h.round() as i32, true);
+}
+
+fn unfullscreen_window(windows: &mut Windows, state: &State, surf: &WlSurface) {
+    let restore = render::unmaximize(windows, surf);
+    if let Some((x, y, _, _)) = restore {
+        render::set_window_origin(windows, surf, x, y);
+    }
+    let (w, h) = restore
+        .map(|(_, _, w, h)| (w, h))
+        .or_else(|| render::geo_size(windows, surf))
+        .unwrap_or((0.0, 0.0));
+    wl::state::fullscreen_toplevel(state, surf, w.round() as i32, h.round() as i32, false);
+}
+
 fn unmaximize_window(windows: &mut Windows, state: &State, surf: &WlSurface) {
     let restore = render::unmaximize(windows, surf);
     if let Some((x, y, _, _)) = restore {
@@ -1062,8 +1098,20 @@ fn main() {
     // one. Reused, so a frame allocates nothing for them.
     let mut win_list = render::win_list_new();
     let mut mapped_ids: Vec<(u64, bool)> = Vec::with_capacity(8);
+    // Toplevels created since the last frame: their handles for the scripts, and the surfaces
+    // whose first configure goes out once the scripts' commands have run.
+    let mut created_ids: Vec<u64> = Vec::with_capacity(4);
+    let mut created_surfaces: Vec<WlSurface> = Vec::with_capacity(4);
     let mut activated_ids: Vec<u64> = Vec::with_capacity(8);
     let mut max_requests: Vec<(u64, bool)> = Vec::with_capacity(4);
+    let mut full_requests: Vec<(u64, bool)> = Vec::with_capacity(2);
+    // Windows that asked for fullscreen before drawing anything, held until they map.
+    let mut full_waiting: Vec<WlSurface> = Vec::with_capacity(2);
+    // What windows are called and whose they are, for the scripts, and whether every window
+    // is owed that again: true at the start and after a reload, since a fresh VM remembers
+    // nothing it was told.
+    let mut win_info: Vec<lua::WinInfo> = Vec::with_capacity(4);
+    let mut info_all = true;
     let mut move_requests: Vec<(u64, f32, f32)> = Vec::with_capacity(2);
     // Windows that went away last frame, for the scripts to hear about on this one.
     let mut closed_ids: Vec<u64> = Vec::with_capacity(4);
@@ -1074,6 +1122,7 @@ fn main() {
     let mut inspect_list: Vec<render::Inspect> = Vec::new();
     // Which of this frame's maximize requests the scripts answered.
     let mut max_answered: Vec<u64> = Vec::with_capacity(4);
+    let mut full_answered: Vec<u64> = Vec::with_capacity(2);
     // The keymap's layout names, re-read when the scripts set a new keymap, with a counter so
     // the scripts copy them only then. The xkb names in force, so asking again is free.
     let mut layout_names: Vec<String> = Vec::with_capacity(4);
@@ -1330,6 +1379,15 @@ fn main() {
         // the client that already has the keyboard, or nothing had it, which is the difference
         // between a dialog opening in front of you and a background application helping itself
         // to your keystrokes.
+        // Windows a client has just created and not drawn into. They get their handle now and
+        // their first configure after the scripts have run, so a size the scripts give one is
+        // the size it first draws at.
+        created_ids.clear();
+        for surface in wl::state::new_toplevels(&mut state) {
+            created_ids.push(render::reserve_id(&mut windows, &surface));
+            created_surfaces.push(surface);
+        }
+
         mapped_ids.clear();
         for surface in windows.mapped.drain(..).collect::<Vec<_>>() {
             let welcome = match focused.as_ref() {
@@ -1390,6 +1448,58 @@ fn main() {
             }
         }
 
+        // Fullscreen requests, for the scripts to answer like maximize ones. Unlike maximize, one
+        // made before the window has drawn is not refused: a game or a video player asking to
+        // start fullscreen means it. It waits for the window to map and is asked then.
+        full_requests.clear();
+        let mut i = 0;
+        while i < full_waiting.len() {
+            let surf = &full_waiting[i];
+            if !surf.is_alive() {
+                full_waiting.swap_remove(i);
+            } else if render::geo_size(&windows, surf).is_some() {
+                let surf = full_waiting.swap_remove(i);
+                if let Some(id) = render::window_id(&windows, &surf) {
+                    full_requests.push((id, true));
+                }
+            } else {
+                i += 1;
+            }
+        }
+        for (surf, on) in state.fullscreen_requests.drain(..).collect::<Vec<_>>() {
+            if render::geo_size(&windows, &surf).is_none() {
+                full_waiting.retain(|s| s != &surf);
+                if on {
+                    full_waiting.push(surf);
+                }
+                continue;
+            }
+            if let Some(id) = render::window_id(&windows, &surf) {
+                full_requests.push((id, on));
+            }
+        }
+
+        // What windows are called and whose dialogs they are: the ones just created, the ones
+        // that changed, or every one after a reload. Once each per frame.
+        win_info.clear();
+        let mut info_surfaces = state.info_changed.drain(..).collect::<Vec<_>>();
+        info_surfaces.extend(created_surfaces.iter().cloned());
+        if std::mem::take(&mut info_all) {
+            info_surfaces.extend(wl::state::toplevel_surfaces(&state));
+        }
+        for surface in info_surfaces {
+            if !surface.is_alive() {
+                continue;
+            }
+            let Some(id) = render::window_id(&windows, &surface) else { continue };
+            if win_info.iter().any(|w| w.id == id) {
+                continue;
+            }
+            let (app_id, title, parent) = wl::state::toplevel_info(&surface);
+            let parent = parent.and_then(|p| render::window_id(&windows, &p));
+            win_info.push(lua::WinInfo { id, app_id, title, parent });
+        }
+
         // New windows open where the view is.
         render::set_place_origin(&mut windows, cam.cx, cam.cy);
 
@@ -1428,6 +1538,7 @@ fn main() {
         if frame % SETTINGS_POLL_FRAMES == 0 {
             if let Some(new) = lua::reload_if_changed(&mut script) {
                 adopt_settings(&mut set, new);
+                info_all = true;
             }
         }
 
@@ -1636,8 +1747,11 @@ fn main() {
                 },
                 windows: &win_list,
                 mapped: &mapped_ids,
+                created: &created_ids,
                 activated: &activated_ids,
                 max_requests: &max_requests,
+                full_requests: &full_requests,
+                info: &win_info,
                 move_requests: &move_requests,
                 closed: &closed_ids,
                 touches: pad_now.as_ref(),
@@ -1654,6 +1768,7 @@ fn main() {
         let mut begin_resize: Option<(u64, f32, f32)> = None;
         let mut resize_corner: Option<(f32, f32)> = None;
         max_answered.clear();
+        full_answered.clear();
         for cmd in cmds.drain(..) {
             match cmd {
                 lua::Cmd::Reload => reload_now = true,
@@ -1717,6 +1832,28 @@ fn main() {
                         max_answered.push(id);
                     }
                 }
+                lua::Cmd::Fullscreen(id, x, y, w, h) => {
+                    if let Some(surf) = render::surface_by_id(&windows, id) {
+                        fullscreen_window(&mut windows, &state, &surf, x, y, w, h);
+                        full_answered.push(id);
+                    }
+                }
+                lua::Cmd::Unfullscreen(id) => {
+                    if let Some(surf) = render::surface_by_id(&windows, id) {
+                        unfullscreen_window(&mut windows, &state, &surf);
+                        full_answered.push(id);
+                    }
+                }
+                lua::Cmd::Hide(id, on) => {
+                    if let Some(surf) = render::surface_by_id(&windows, id) {
+                        render::set_hidden(&mut windows, &surf, on);
+                    }
+                }
+                lua::Cmd::ResizeWindow(id, w, h) => {
+                    if let Some(surf) = render::surface_by_id(&windows, id) {
+                        wl::state::resize_toplevel(&state, &surf, w.round() as i32, h.round() as i32, false);
+                    }
+                }
                 lua::Cmd::MoveWindow(id, x, y) => {
                     if let Some(surf) = render::surface_by_id(&windows, id) {
                         render::set_window_origin(&mut windows, &surf, x, y);
@@ -1776,8 +1913,26 @@ fn main() {
                 lua::Cmd::SetLayout(index) => wl::state::set_layout(&mut state, index),
             }
         }
+        // New windows get their first configure now, with whatever size the scripts gave them,
+        // or none, which leaves the size to the client. Even when the scripts failed: a client
+        // waits for this before it draws anything.
+        for surface in created_surfaces.drain(..) {
+            wl::state::configure_new_toplevel(&state, &surface);
+        }
         // A request the scripts let pass still gets its configure, since the client is waiting
         // on one: refused if it asked for maximized, its own size back if it asked to leave.
+        for &(id, on) in full_requests.iter() {
+            if full_answered.contains(&id) {
+                continue;
+            }
+            if let Some(surf) = render::surface_by_id(&windows, id) {
+                if on {
+                    wl::state::decline_fullscreen(&state, &surf);
+                } else {
+                    unfullscreen_window(&mut windows, &state, &surf);
+                }
+            }
+        }
         for &(id, on) in max_requests.iter() {
             if max_answered.contains(&id) {
                 continue;
@@ -1793,6 +1948,7 @@ fn main() {
         if reload_now {
             if let Some(new) = lua::reload(&mut script) {
                 adopt_settings(&mut set, new);
+                info_all = true;
             }
         }
         // The stop goes even when the pointer has wandered off the window, because a client

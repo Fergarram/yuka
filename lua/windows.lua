@@ -317,6 +317,21 @@ end
 -- fixed in canvas space afterwards: pan away from a maximized window and you leave it behind,
 -- the way you leave everything else behind. The zoom is left alone, since a maximized window at
 -- 0.6 fills a view you chose to be zoomed out.
+-- Fullscreen: the screen's size at 1:1, around the middle of the view, and the view glides to
+-- 1:1 so the window covers the screen exactly. Leaving gives the window its rectangle back
+-- where the view is.
+function windows.fullscreen_requests(f)
+    for k = 1, f.full_count do
+        local id = f.full_id[k]
+        if f.full_on[k] then
+            yk.fullscreen(id, f.cx - f.sw * 0.5, f.cy - f.sh * 0.5, f.sw, f.sh)
+            view.go_to(1, f.cx, f.cy)
+        else
+            yk.unfullscreen(id)
+        end
+    end
+end
+
 -- The canvas rectangle menus are kept inside: the view, less the margin.
 function windows.popup_bounds(f)
     local m = tune.popup_margin

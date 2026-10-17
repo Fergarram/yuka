@@ -87,12 +87,21 @@ pub enum Cmd {
     WindowLook { id: u64, alpha: f32, z: f32, shadow: bool, stretch: bool },
     // The colour behind the canvas, as 0xRRGGBBAA.
     Background(u32),
+    // Ask a window to be this size, in canvas units. Clamped to the limits the client set.
+    ResizeWindow(u64, f32, f32),
     // Put a window's visible top-left at a canvas point.
     MoveWindow(u64, f32, f32),
     // Fill a canvas rectangle with a window, remembering what to give back, and tell the
     // client. Or give it back. Answers a maximize request; also works unasked.
     Maximize(u64, f32, f32, f32, f32),
     Unmaximize(u64),
+    // The same for fullscreen: fill a canvas rectangle and tell the client it is fullscreen, or
+    // give it back.
+    Fullscreen(u64, f32, f32, f32, f32),
+    Unfullscreen(u64),
+    // Take a window out of drawing and hit testing, children included, or bring it back. It
+    // stays in the snapshot.
+    Hide(u64, bool),
     // Load a window shader into a slot (0 is the built-in one), from a vertex and a fragment
     // file. One that will not compile leaves the slot as it was.
     LoadShader { slot: u8, vs: String, fs: String },
@@ -142,6 +151,16 @@ pub struct Route {
     pub pointer: bool,
     // Key presses. Modifiers and releases go regardless.
     pub keys: bool,
+}
+
+// What a window is called and whose it is, sent when it is created, when any of it changes, and
+// for every window after the scripts reload. Strings, so never every frame.
+pub struct WinInfo {
+    pub id: u64,
+    pub app_id: String,
+    pub title: String,
+    // The window this one belongs to, for a dialog.
+    pub parent: Option<u64>,
 }
 
 // The frame as a script sees it. Filled by the main loop, copied into the VM once per
@@ -217,11 +236,18 @@ pub struct FrameIn<'a> {
     // Windows that drew their first frame, with whether each came from the client that has
     // the keyboard (or nothing had it), and windows another client asked to activate.
     pub mapped: &'a [(u64, bool)],
+    // Windows a client created since the last frame, not drawn yet. Their first configure goes
+    // out after this frame's commands, so a yk.resize_window now is the size they first draw at.
+    pub created: &'a [u64],
     pub activated: &'a [u64],
     // Windows asking to be maximized (true) or let go of it (false). A request the script
     // does not answer with yk.maximize or yk.unmaximize is answered for it: refused, or the
     // window's own size back.
     pub max_requests: &'a [(u64, bool)],
+    // And fullscreen. Unanswered ones are refused, or given their own size back.
+    pub full_requests: &'a [(u64, bool)],
+    // Windows whose app id, title or parent the scripts have not heard yet.
+    pub info: &'a [WinInfo],
     // Clients asking to be moved by their titlebar, with the screen point the press landed on.
     // A request the script does not accept with yk.accept_move is ignored.
     pub move_requests: &'a [(u64, f32, f32)],
@@ -268,6 +294,8 @@ struct Lists {
     win_w: Table,
     win_h: Table,
     win_max: Table,
+    win_full: Table,
+    win_hidden: Table,
     win_order: Table,
     win_z: Table,
     win_rw: Table,
@@ -285,9 +313,16 @@ struct Lists {
     touch_faint: Table,
     mapped: Table,
     mapped_welcome: Table,
+    created: Table,
     activated: Table,
     max_id: Table,
     max_on: Table,
+    full_id: Table,
+    full_on: Table,
+    info_id: Table,
+    info_app_id: Table,
+    info_title: Table,
+    info_parent: Table,
     layout_names: Table,
 }
 
@@ -417,6 +452,8 @@ fn load_vm(dir: &str) -> mlua::Result<(Vm, Vec<(String, String)>)> {
         win_w: list("win_w")?,
         win_h: list("win_h")?,
         win_max: list("win_max")?,
+        win_full: list("win_full")?,
+        win_hidden: list("win_hidden")?,
         win_order: list("win_order")?,
         win_z: list("win_z")?,
         win_rw: list("win_rw")?,
@@ -434,9 +471,16 @@ fn load_vm(dir: &str) -> mlua::Result<(Vm, Vec<(String, String)>)> {
         touch_faint: list("touch_faint")?,
         mapped: list("mapped")?,
         mapped_welcome: list("mapped_welcome")?,
+        created: list("created")?,
         activated: list("activated")?,
         max_id: list("max_id")?,
         max_on: list("max_on")?,
+        full_id: list("full_id")?,
+        full_on: list("full_on")?,
+        info_id: list("info_id")?,
+        info_app_id: list("info_app_id")?,
+        info_title: list("info_title")?,
+        info_parent: list("info_parent")?,
         layout_names: list("layout_names")?,
     };
     Ok((Vm { lua, frame_fn, draw_fn, snap, lists, layouts_gen: 0 }, pairs))
@@ -647,6 +691,22 @@ fn register(lua: &Lua, yk: &Table) -> mlua::Result<()> {
     })?)?;
     yk.set("move_window", lua.create_function(|lua, (id, x, y): (u64, f32, f32)| {
         push(lua, Cmd::MoveWindow(id, x, y));
+        Ok(())
+    })?)?;
+    yk.set("fullscreen", lua.create_function(|lua, (id, x, y, w, h): (u64, f32, f32, f32, f32)| {
+        push(lua, Cmd::Fullscreen(id, x, y, w, h));
+        Ok(())
+    })?)?;
+    yk.set("unfullscreen", lua.create_function(|lua, id: u64| {
+        push(lua, Cmd::Unfullscreen(id));
+        Ok(())
+    })?)?;
+    yk.set("hide", lua.create_function(|lua, (id, on): (u64, Option<bool>)| {
+        push(lua, Cmd::Hide(id, on.unwrap_or(true)));
+        Ok(())
+    })?)?;
+    yk.set("resize_window", lua.create_function(|lua, (id, w, h): (u64, f32, f32)| {
+        push(lua, Cmd::ResizeWindow(id, w, h));
         Ok(())
     })?)?;
     yk.set("maximize", lua.create_function(|lua, (id, x, y, w, h): (u64, f32, f32, f32, f32)| {
@@ -1003,6 +1063,8 @@ fn fill_snapshot(vm: &Vm, f: &FrameIn, names_changed: bool) -> mlua::Result<()> 
     fill(&l.win_w, &w.w)?;
     fill(&l.win_h, &w.h)?;
     fill(&l.win_max, &w.maximized)?;
+    fill(&l.win_full, &w.fullscreen)?;
+    fill(&l.win_hidden, &w.hidden)?;
     fill(&l.win_order, &w.order)?;
     fill(&l.win_z, &w.z)?;
     fill(&l.win_rw, &w.restore_w)?;
@@ -1036,8 +1098,23 @@ fn fill_snapshot(vm: &Vm, f: &FrameIn, names_changed: bool) -> mlua::Result<()> 
         l.mapped.raw_set(i + 1, id)?;
         l.mapped_welcome.raw_set(i + 1, welcome)?;
     }
+    t.raw_set("created_count", f.created.len())?;
+    fill(&l.created, f.created)?;
     t.raw_set("activated_count", f.activated.len())?;
     fill(&l.activated, f.activated)?;
+    t.raw_set("full_count", f.full_requests.len())?;
+    for (i, &(id, on)) in f.full_requests.iter().enumerate() {
+        l.full_id.raw_set(i + 1, id)?;
+        l.full_on.raw_set(i + 1, on)?;
+    }
+    t.raw_set("info_count", f.info.len())?;
+    for (i, info) in f.info.iter().enumerate() {
+        l.info_id.raw_set(i + 1, info.id)?;
+        l.info_app_id.raw_set(i + 1, info.app_id.as_str())?;
+        l.info_title.raw_set(i + 1, info.title.as_str())?;
+        // 0 for none rather than nil, so the list has no holes.
+        l.info_parent.raw_set(i + 1, info.parent.unwrap_or(0))?;
+    }
     t.raw_set("max_count", f.max_requests.len())?;
     for (i, &(id, on)) in f.max_requests.iter().enumerate() {
         l.max_id.raw_set(i + 1, id)?;
