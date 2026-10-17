@@ -18,11 +18,14 @@ local looks = {}
 --
 
 looks.tune = {
-    -- Light or dark: "dark", "light", or "system", which asks gsettings
-    -- (org.gnome.desktop.interface color-scheme) as the scripts load and falls back to
-    -- theme_default when it states no preference, as it does until something sets it.
-    -- looks.set_theme switches while running.
-    theme = "system",
+    -- Light or dark: "dark", "light", or "system".
+    --
+    -- yuka is the session, so a fixed choice is published as the system's: written to gsettings
+    -- (org.gnome.desktop.interface color-scheme), which the portal serves to every application
+    -- set to follow the system, live. "system" only reads that setting as the scripts load,
+    -- falling back to theme_default when it states no preference, and leaves it to whoever
+    -- else sets it. looks.set_theme switches while running, and publishes too.
+    theme = "dark",
     theme_default = "light",
 
     -- What each theme paints, 0xRRGGBBAA: behind the canvas, and the floor's dots. On the dark
@@ -197,6 +200,8 @@ looks.theme = tune.theme_default
 
 -- What gsettings says, "dark" or "light", or nil when it states no preference. Runs a process,
 -- so only as the scripts load, never per frame.
+local desktop = require("desktop")
+
 local function system_theme()
     local p = io.popen("gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null")
     if not p then return nil end
@@ -207,9 +212,19 @@ local function system_theme()
     return nil
 end
 
-function looks.set_theme(name)
+-- Switch to a theme. publish (on unless false) also makes it the system's color scheme, so
+-- applications follow.
+function looks.set_theme(name, publish)
     if not tune.themes[name] then return end
     looks.theme = name
+    if publish ~= false then
+        desktop.gsettings_set("org.gnome.desktop.interface", "color-scheme",
+            name == "dark" and "'prefer-dark'" or "'prefer-light'")
+        -- GTK 3 predates color-scheme and goes dark by theme name instead, which its
+        -- applications watch while running.
+        desktop.gsettings_set("org.gnome.desktop.interface", "gtk-theme",
+            name == "dark" and "'Adwaita-dark'" or "'Adwaita'")
+    end
     if tune.floor then
         local c = tune.themes[name].dots
         yk.shader_uniform(FLOOR_SLOT, "dotColor",
@@ -227,7 +242,7 @@ if tune.floor then
     yk.shader_uniform(FLOOR_SLOT, "fadePx", tune.floor.fade_px)
 end
 if tune.theme == "system" then
-    looks.set_theme(system_theme() or tune.theme_default)
+    looks.set_theme(system_theme() or tune.theme_default, false)
 else
     looks.set_theme(tune.theme)
 end

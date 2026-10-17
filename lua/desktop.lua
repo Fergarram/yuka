@@ -11,6 +11,10 @@
 -- import wins, so it is the place for personal tweaks. Applications read these when they
 -- start; one already running keeps what it had.
 --
+-- desktop/yuka-portals.conf goes to ~/.config/xdg-desktop-portal/, telling the portal which
+-- backend serves a yuka session. It is how applications set to follow the system hear the
+-- color scheme lua/looks.lua writes.
+--
 -- The repo is not watched for these files, so after editing one, Super+R reloads.
 --
 
@@ -23,6 +27,9 @@ local desktop = {}
 desktop.tune = {
     -- Install the stylesheets from desktop/. false leaves every gtk.css alone.
     gtk_css = true,
+
+    -- Install desktop/yuka-portals.conf. false leaves the portal to its own defaults.
+    portals_conf = true,
 
     -- gsettings applied when yuka starts, as schema, key, and the value in gsettings' own
     -- syntax: strings in single quotes, booleans and numbers bare. Run in the background, so
@@ -70,29 +77,40 @@ local function sh(s)
     return "'" .. string.gsub(s, "'", "'\\''") .. "'"
 end
 
+-- Copy a file from the repo into place, only when it differs. false when it could not.
+local function install(source_path, dir, name)
+    local source = read(source_path)
+    if not source then
+        print("yuka: desktop: no " .. source_path .. ", skipped")
+        return false
+    end
+    local target = dir .. "/" .. name
+    if read(target) == source then return true end
+    if write(target, source) then return true end
+    os.execute("mkdir -p " .. sh(dir))
+    if write(target, source) then return true end
+    print("yuka: desktop: cannot write " .. target)
+    return false
+end
+
 -- Copy one stylesheet into place and make sure gtk.css imports it. Only writes what differs,
 -- so a reload with nothing changed touches no file.
 local function install_css(version)
-    local source = read("desktop/gtk-" .. version .. ".css")
-    if not source then
-        print("yuka: desktop: no desktop/gtk-" .. version .. ".css, skipped")
-        return
-    end
     local dir = config_dir() .. "/gtk-" .. version
-    local ours = dir .. "/yuka.css"
-    if read(ours) ~= source and not write(ours, source) then
-        os.execute("mkdir -p " .. sh(dir))
-        if not write(ours, source) then
-            print("yuka: desktop: cannot write " .. ours)
-            return
-        end
-    end
+    if not install("desktop/gtk-" .. version .. ".css", dir, "yuka.css") then return end
     local gtk = dir .. "/gtk.css"
     local current = read(gtk) or ""
     if not string.find(current, IMPORT, 1, true) then
         -- First, because an @import has to come before any rule.
         write(gtk, IMPORT .. "\n\n" .. current)
     end
+end
+
+-- Set one gsetting, in the background. For values that change while running, like the color
+-- scheme; the ones in the tune table go together at startup.
+function desktop.gsettings_set(schema, key, value)
+    os.execute("gsettings set " .. sh(schema) .. " " .. sh(key) .. " " .. sh(value)
+        .. " >/dev/null 2>&1 &")
 end
 
 local function apply_gsettings()
@@ -113,6 +131,9 @@ end
 if tune.gtk_css then
     install_css("3.0")
     install_css("4.0")
+end
+if tune.portals_conf then
+    install("desktop/yuka-portals.conf", config_dir() .. "/xdg-desktop-portal", "yuka-portals.conf")
 end
 
 function desktop.frame(f)

@@ -200,6 +200,34 @@ extern "C" fn on_signal(_sig: c_int) {
 // Client spawn
 //
 
+// Tell the session who we are. Everything we start inherits it from here, scripts' shell
+// commands included, and the session bus is told too, because the services it starts on demand
+// (xdg-desktop-portal above all) take their environment from the bus rather than from whoever
+// asked for them. XDG_CURRENT_DESKTOP is how the portal picks its backends, from
+// yuka-portals.conf; WAYLAND_DISPLAY is where those backends draw.
+//
+// Before any client exists, so the first one to wake the portal finds it already knowing. Waited
+// on for that reason; it is a few milliseconds once at startup.
+//
+// Nested, the bus belongs to the session we are a window in, so it is left alone: telling it
+// about our socket would point that session's portal at us.
+fn export_session(socket_name: &str, own_session: bool) {
+    std::env::set_var("WAYLAND_DISPLAY", socket_name);
+    std::env::set_var("XDG_CURRENT_DESKTOP", "yuka");
+    std::env::set_var("XDG_SESSION_DESKTOP", "yuka");
+    if !own_session {
+        return;
+    }
+    let status = Command::new("dbus-update-activation-environment")
+        .args(["--systemd", "WAYLAND_DISPLAY", "XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP"])
+        .status();
+    match status {
+        Ok(s) if s.success() => println!("yuka: session environment exported to the bus"),
+        Ok(s) => eprintln!("yuka: dbus-update-activation-environment failed ({s})"),
+        Err(e) => eprintln!("yuka: cannot run dbus-update-activation-environment: {e}"),
+    }
+}
+
 fn spawn_client(socket_name: &str, cmd: &str) -> Option<Child> {
     match Command::new(cmd)
         .env("WAYLAND_DISPLAY", socket_name)
@@ -1031,6 +1059,7 @@ fn main() {
         )
         .expect("wayland init");
     println!("yuka: WAYLAND_DISPLAY={}", server.socket_name);
+    export_session(&server.socket_name, !windowed);
 
     let mut windows = render::windows_new();
     let mut dmabuf_cache = render::dmabuf_cache_new();
