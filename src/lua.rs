@@ -122,6 +122,8 @@ pub enum Cmd {
     // The display's gamma ramp: one curve per channel, outputs from 0 to 1 evenly spaced over
     // the inputs. Empty puts back the ramp yuka found at start.
     Gamma { r: Vec<f32>, g: Vec<f32>, b: Vec<f32> },
+    // The panel's backlight, as a fraction of the most it goes to.
+    Backlight(f32),
     // The cursor shown when no client has the pointer, by theme name ("default", "grabbing",
     // "nwse-resize"...).
     Cursor(String),
@@ -266,6 +268,9 @@ pub struct FrameIn<'a> {
     // An input method has the keyboard: a text field has focus and something like fcitx5 is
     // reading the keys for it.
     pub ime: bool,
+    // The panel's backlight level and the most it goes to, in the device's own steps, when
+    // there is one yuka can set.
+    pub backlight: Option<(u32, u32)>,
 }
 
 // What the functions a script calls write into. Lives in the VM's app data, so the
@@ -745,6 +750,10 @@ fn register(lua: &Lua, yk: &Table) -> mlua::Result<()> {
             Ok(())
         },
     )?)?;
+    yk.set("backlight", lua.create_function(|lua, fraction: f32| {
+        push(lua, Cmd::Backlight(fraction));
+        Ok(())
+    })?)?;
     yk.set("set_cursor", lua.create_function(|lua, name: String| {
         push(lua, Cmd::Cursor(name));
         Ok(())
@@ -1123,6 +1132,8 @@ fn fill_snapshot(vm: &Vm, f: &FrameIn, names_changed: bool) -> mlua::Result<()> 
 
     t.raw_set("layout", f.layout + 1)?;
     t.raw_set("ime", f.ime)?;
+    t.raw_set("backlight", f.backlight.map(|(raw, max)| raw as f64 / max as f64))?;
+    t.raw_set("backlight_steps", f.backlight.map(|(_, max)| max))?;
     if names_changed {
         for (i, name) in f.layout_names.iter().enumerate() {
             l.layout_names.raw_set(i + 1, name.as_str())?;

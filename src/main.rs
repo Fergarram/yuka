@@ -7,6 +7,7 @@
 // Infinite canvas and input come next.
 //
 
+mod backlight;
 mod camera;
 mod cursor;
 mod egl;
@@ -1077,6 +1078,8 @@ fn main() {
     };
     // The display's gamma ramp, which the scripts set (yk.gamma). Nested, the host owns it.
     let mut gamma = if windowed { None } else { gamma::init() };
+    // The panel's backlight, which the scripts set (yk.backlight). Nested, it is the host's.
+    let mut backlight = if windowed { None } else { backlight::init() };
 
 
     // libinput drives keyboards and pointers. Without a session it grabs them as
@@ -1723,6 +1726,11 @@ fn main() {
                 .map(|(surf, ..)| wl::state::window_root(&state, &surf))
                 .and_then(|root| render::window_id(&windows, &root))
         });
+        // logind's replies, and a change made elsewhere (keys the firmware handles, another
+        // program) read back for the snapshot.
+        if let Some(b) = backlight.as_mut() {
+            backlight::poll(b);
+        }
         let no_keys = [false; input::KEY_CODES];
         let pad_now = touchpad.as_ref().map(|tp| touch::view(tp, &set));
         let route = {
@@ -1799,6 +1807,7 @@ fn main() {
                 layout_names: &layout_names,
                 layouts_gen,
                 ime: wl::state::ime_active(&state),
+                backlight: backlight.as_ref().map(|b| (b.raw, b.max)),
             };
             lua::frame(&mut script, &f, &mut cmds)
         };
@@ -1915,6 +1924,11 @@ fn main() {
                 }
                 lua::Cmd::Cursor(name) => canvas_cursor = name,
                 lua::Cmd::FloorShader(slot) => floor_slot = slot,
+                lua::Cmd::Backlight(fraction) => {
+                    if let Some(bl) = backlight.as_mut() {
+                        backlight::set(bl, fraction);
+                    }
+                }
                 lua::Cmd::Gamma { r, g, b } => {
                     if let Some(gm) = gamma.as_mut() {
                         gamma::set(gm, &r, &g, &b);
@@ -2700,6 +2714,9 @@ fn main() {
         // nobody is looking at.
         // They draw it themselves when they can, and the engine's own banner covers the rest.
         if script.error.is_some() {
+            if let Some(b) = backlight.as_mut() {
+                backlight::rescue(b);
+            }
             let drawn = lua::draw_error(&mut script, ray::screen_width(), ray::screen_height());
             if let Some(err) = script.error.as_ref() {
                 match drawn {
@@ -2749,6 +2766,9 @@ fn main() {
         cursor::destroy(c);
     }
     render::shaders_destroy(&mut shaders);
+    if let Some(b) = backlight.as_mut() {
+        backlight::destroy(b);
+    }
     // While we are still DRM master, or it is not ours to set.
     if let Some(g) = gamma.as_mut() {
         gamma::restore(g);

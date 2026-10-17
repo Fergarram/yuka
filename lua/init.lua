@@ -54,6 +54,9 @@
 --                                 default to the one before). The brightest output is held at
 --                                 0.1 or more. Kept until changed; yk.gamma() puts back the
 --                                 ramp yuka found. Nothing nested (screen.lua does this for you)
+--   yk.backlight(fraction)        the panel's backlight, as a fraction of the most it goes to;
+--                                 0 is off. Nothing nested or without a backlight
+--                                 (backlight.lua does this for you)
 --   yk.set_layouts(layout [, variant, options])
 --                                 a new keymap from xkb names, comma separated as setxkbmap
 --                                 takes them; kept across reloads, only rebuilt on a change
@@ -145,6 +148,8 @@
 --                                          titlebar move requests and the press they quote
 --   layout, layout_count, layout_names[i]  the active keyboard layout, and every layout's
 --                                          full name ("English (US)")
+--   backlight, backlight_steps             the panel's backlight as a fraction, and how many
+--                                          steps the device has; nil without one yuka can set
 --   ime                                    an input method (fcitx5) has the keyboard: a text
 --                                          field has focus and it is reading the keys
 --
@@ -163,6 +168,7 @@ local layouts = require("layouts")
 local desktop = require("desktop")
 local banner = require("banner")
 local screen = require("screen")
+local backlight = require("backlight")
 
 yk.config = require("config")
 
@@ -268,6 +274,10 @@ bind("super+p", function() overlays.pad = not overlays.pad end)
 
 bind("super+s", function() yk.screenshot() end)
 
+-- The backlight, a step per tap of the brightness keys; holding sweeps (backlight.tune).
+bind("brightnessdown", function() backlight.step(-1) end)
+bind("brightnessup", function() backlight.step(1) end)
+
 -- Night light as a range, like brightness: Super with brightness down steps toward night,
 -- with brightness up back toward day, eased in. screen.tune says what each end looks like.
 bind("super+brightnessdown", function() screen.step_night(1) end)
@@ -304,6 +314,7 @@ bind("super+escape", function() yk.release_all() end)
 -- no cursor to anchor to. Exponential, so a step feels the same at any scale.
 local function held_keys(f)
     screen.held(f)
+    backlight.held(f)
     if not f.super then return end
     local zoom_in = yk.key_down(keys.equal) or yk.key_down(keys.kpplus)
     local zoom_out = yk.key_down(keys.minus) or yk.key_down(keys.kpminus)
@@ -448,6 +459,7 @@ function yk.frame(f)
     layouts.frame(f)
     desktop.frame(f)
     screen.frame(f)
+    backlight.frame(f)
     view.finish()
 end
 
