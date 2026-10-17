@@ -1086,6 +1086,10 @@ fn main() {
     let mut clear = ray::Color { r: 24, g: 24, b: 32, a: 255 };
     // The shader slot that draws the floor, if the scripts asked for one.
     let mut floor_slot: Option<u8> = None;
+    // The canvas rectangle popups are kept inside: None until the scripts say, which falls back
+    // to the view, so menus stay on screen even with scripts that never mention it; then their
+    // rectangle, or Some(None) for no bounds at all.
+    let mut popup_bounds: Option<Option<[f32; 4]>> = None;
     let mut frame: u32 = 0;
     let debug_input = std::env::var("YUKA_DEBUG_INPUT").is_ok();
     // Dumps each toplevel's surface tree, which is what decides how children stack. Twice now
@@ -1734,6 +1738,7 @@ fn main() {
                 }
                 lua::Cmd::Cursor(name) => canvas_cursor = name,
                 lua::Cmd::FloorShader(slot) => floor_slot = slot,
+                lua::Cmd::PopupBounds(rect) => popup_bounds = Some(rect),
                 lua::Cmd::ClientShadows(on) => wl::state::set_client_shadows(&mut state, on),
                 lua::Cmd::ClientDecorations(on) => wl::state::set_client_decorations(&mut state, on),
                 lua::Cmd::Background(rgba) => {
@@ -2354,6 +2359,26 @@ fn main() {
         // Maximized windows keep their pinned top-left first, so children placed below and
         // the pixel alignment after both see the corrected position.
         render::hold_maximized(&mut windows);
+        // Popups that opened or asked to move, placed now that everything that moves the view
+        // or a window has run: kept inside the scripts' bounds (the view, unless they say
+        // otherwise) by the rules the client gave its positioner. A menu opened near an edge
+        // flips or slides back into view.
+        let popups = wl::state::popups_to_place(&mut state);
+        if !popups.is_empty() {
+            let bounds = popup_bounds.unwrap_or_else(|| {
+                let (sw, sh) = (ray::screen_width() as f32, ray::screen_height() as f32);
+                let (vw, vh) = (sw / cam.zoom, sh / cam.zoom);
+                Some([cam.cx - vw * 0.5, cam.cy - vh * 0.5, vw, vh])
+            });
+            for (popup, token) in popups {
+                let target = bounds.and_then(|[x, y, w, h]| {
+                    wl::state::popup_root(&popup)
+                        .and_then(|root| render::window_origin(&windows, &root))
+                        .map(|(ox, oy)| (x - ox, y - oy, w, h))
+                });
+                wl::state::configure_popup(&popup, token, target);
+            }
+        }
         render::sync_children(&mut windows, wl::state::ime_popup_placement(&state));
 
         // Everything that could move a window has run. Put them all on the pixel grid, then

@@ -55,6 +55,11 @@ windows.tune = {
     -- "right", "up", "left", "down"; empty for nearest and nothing else.
     spawn_order = { "right", "down" },
 
+    -- Menus and tooltips are kept inside the view, this many screen pixels in from its edges,
+    -- by moving them the way their application allows (flipped to the other side, slid along).
+    -- false lets them go wherever they ask, off screen included.
+    popup_margin = 8,
+
     -- Where the keyboard goes when the window that had it closes.
     --
     --   "none"    nowhere: the next window waits to be clicked
@@ -312,6 +317,17 @@ end
 -- fixed in canvas space afterwards: pan away from a maximized window and you leave it behind,
 -- the way you leave everything else behind. The zoom is left alone, since a maximized window at
 -- 0.6 fills a view you chose to be zoomed out.
+-- The canvas rectangle menus are kept inside: the view, less the margin.
+function windows.popup_bounds(f)
+    local m = tune.popup_margin
+    if not m then
+        yk.popup_bounds(nil)
+        return
+    end
+    local w, h = (f.sw - m * 2) / f.zoom, (f.sh - m * 2) / f.zoom
+    yk.popup_bounds(f.cx - w * 0.5, f.cy - h * 0.5, w, h)
+end
+
 function windows.maximize_requests(f)
     for k = 1, f.max_count do
         local id = f.max_id[k]

@@ -43,6 +43,9 @@
 --   yk.client_decorations(on)     whether windows draw their own titlebars; false answers
 --                                 both decoration protocols with server side, and yuka draws
 --                                 nothing
+--   yk.popup_bounds(x, y, w, h)   the canvas rectangle menus and tooltips are kept inside, by
+--                                 the rules their application allows; nil for none. Until set,
+--                                 the view
 --   yk.floor_shader(slot)         which shader slot draws the floor, the canvas plane behind
 --                                 every window; nil for none. It is handed frag_uv (the canvas
 --                                 point), canvasZoom, time and the slot's uniforms
@@ -400,6 +403,7 @@ function yk.frame(f)
     grab.frame(f, eaten)
     windows.click_focus(f, eaten)
     windows.maximize_requests(f)
+    windows.popup_bounds(f)
     view.step(f, f.pinch ~= 1, f.swiping)
     windows.drop_unseen_focus(f)
     looks.frame(f)

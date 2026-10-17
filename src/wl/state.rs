@@ -19,7 +19,7 @@ use smithay::reexports::wayland_server::{
 };
 use smithay::desktop::utils::under_from_surface_tree;
 use smithay::desktop::{
-    find_popup_root_surface, PopupKeyboardGrab, PopupKind, PopupManager,
+    find_popup_root_surface, get_popup_toplevel_coords, PopupKeyboardGrab, PopupKind, PopupManager,
     PopupPointerGrab, PopupUngrabStrategy, WindowSurfaceType,
 };
 use smithay::input::pointer::Focus;
@@ -207,6 +207,10 @@ pub struct State {
     // Bumped on every set_cursor, so the frame loop can see the call rather than infer it from the
     // value changing.
     pub cursor_serial: u32,
+    // Popups waiting to be placed and configured, with the token of the reposition request that
+    // asked, if one did. Placing one needs the view and where its window is on the canvas,
+    // which only the main loop knows, so they wait for it (popups_to_place).
+    pub popups_to_place: Vec<(PopupSurface, Option<u32>)>,
     // Clients asking to be moved or resized, from dragging their own titlebar or edge.
     // Drained each frame by the canvas code, which is where a drag actually lives. The
     // resize entries carry which edges are moving, as a direction per axis.
@@ -375,6 +379,7 @@ pub fn init(
         dead_dmabufs: Vec::new(),
         cursor_image: CursorImageStatus::default_named(),
         cursor_serial: 0,
+        popups_to_place: Vec::new(),
         move_requests: Vec::new(),
         resize_requests: Vec::new(),
         maximize_requests: Vec::new(),
@@ -440,6 +445,49 @@ pub fn toplevel_surfaces(state: &State) -> Vec<WlSurface> {
 //
 // Called every frame of a resize drag: Smithay only puts a configure on the wire when
 // the pending state actually differs, so a drag that has not moved sends nothing.
+// The popups waiting to be placed, taken.
+pub fn popups_to_place(state: &mut State) -> Vec<(PopupSurface, Option<u32>)> {
+    std::mem::take(&mut state.popups_to_place)
+}
+
+// The toplevel a popup belongs to, through any chain of parent popups.
+pub fn popup_root(popup: &PopupSurface) -> Option<WlSurface> {
+    find_popup_root_surface(&PopupKind::Xdg(popup.clone())).ok()
+}
+
+// Place a popup and tell the client. view is the canvas rectangle it should stay inside, as
+// x, y, w, h relative to its window's visible top-left, or None to put it exactly where the
+// client asked. Inside means the positioner's own rules: flip to the other side of the
+// anchor, slide along, or shrink, in whatever order the client allowed, which Smithay works
+// out. This is what keeps a menu opened near the edge of the screen on it.
+pub fn configure_popup(popup: &PopupSurface, token: Option<u32>, view: Option<(f32, f32, f32, f32)>) {
+    if !popup.alive() {
+        return;
+    }
+    if let Some((x, y, w, h)) = view {
+        // The target is in the coordinates of the popup's parent, which for a submenu is the
+        // menu it hangs off rather than the window.
+        let parent = get_popup_toplevel_coords(&PopupKind::Xdg(popup.clone()));
+        let target = Rectangle::new(
+            (x.floor() as i32 - parent.x, y.floor() as i32 - parent.y).into(),
+            (w.ceil() as i32, h.ceil() as i32).into(),
+        );
+        popup.with_pending_state(|pending| {
+            pending.geometry = pending.positioner.get_unconstrained_geometry(target);
+        });
+    }
+    match token {
+        Some(token) => {
+            popup.send_repositioned(token);
+        }
+        None => {
+            if let Err(e) = popup.send_configure() {
+                eprintln!("yuka: popup configure failed: {e}");
+            }
+        }
+    }
+}
+
 // Tell every window who draws its titlebar (State::client_decorations).
 pub fn set_client_decorations(state: &mut State, on: bool) {
     if state.client_decorations == on {
@@ -1393,14 +1441,14 @@ impl XdgShellHandler for State {
         self.maximize_requests.push((surface.wl_surface().clone(), false));
     }
 
+    // The positioner carries where the client wants this, relative to the parent's geometry,
+    // and how it may be moved if that does not fit. Configured by the main loop, which knows
+    // what is in view (popups_to_place).
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
-        // The positioner already carries where the client wants this, relative to
-        // the parent's geometry, and we do not constrain it to an output: the
-        // canvas has no edges to be pushed away from.
-        let _ = surface.send_configure();
-        if let Err(e) = self.popups.track_popup(PopupKind::Xdg(surface)) {
+        if let Err(e) = self.popups.track_popup(PopupKind::Xdg(surface.clone())) {
             eprintln!("yuka: popup track failed: {e}");
         }
+        self.popups_to_place.push((surface, None));
     }
 
     // A menu asking to own the input. Honouring this is what makes a popup behave
@@ -1446,13 +1494,14 @@ impl XdgShellHandler for State {
         }
     }
 
-    fn reposition_request(
-        &mut self,
-        surface: PopupSurface,
-        _positioner: PositionerState,
-        token: u32,
-    ) {
-        surface.send_repositioned(token);
+    // An open popup asking to be put somewhere else, typically a menu that grew. The new
+    // positioner replaces the old one, and the popup is placed again like a new one.
+    fn reposition_request(&mut self, surface: PopupSurface, positioner: PositionerState, token: u32) {
+        surface.with_pending_state(|pending| {
+            pending.geometry = positioner.get_geometry();
+            pending.positioner = positioner;
+        });
+        self.popups_to_place.push((surface, Some(token)));
     }
 }
 

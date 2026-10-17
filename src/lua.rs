@@ -105,6 +105,9 @@ pub enum Cmd {
     // Whether clients draw their own titlebars; off tells every window the compositor
     // decorates it, and we draw nothing.
     ClientDecorations(bool),
+    // The canvas rectangle popups (menus, tooltips) are kept inside, as x, y, w, h, or None to
+    // put them exactly where their client asks. Kept until changed.
+    PopupBounds(Option<[f32; 4]>),
     // Which shader slot draws the floor, the canvas plane behind every window, or no floor.
     FloorShader(Option<u8>),
     // The cursor shown when no client has the pointer, by theme name ("default", "grabbing",
@@ -617,6 +620,16 @@ fn register(lua: &Lua, yk: &Table) -> mlua::Result<()> {
         push(lua, Cmd::ClientDecorations(on));
         Ok(())
     })?)?;
+    yk.set("popup_bounds", lua.create_function(
+        |lua, (x, y, w, h): (Option<f32>, Option<f32>, Option<f32>, Option<f32>)| {
+            let rect = match (x, y, w, h) {
+                (Some(x), Some(y), Some(w), Some(h)) => Some([x, y, w, h]),
+                _ => None,
+            };
+            push(lua, Cmd::PopupBounds(rect));
+            Ok(())
+        },
+    )?)?;
     yk.set("floor_shader", lua.create_function(|lua, slot: Option<u8>| {
         push(lua, Cmd::FloorShader(slot));
         Ok(())
