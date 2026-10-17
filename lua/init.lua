@@ -268,8 +268,10 @@ bind("super+p", function() overlays.pad = not overlays.pad end)
 
 bind("super+s", function() yk.screenshot() end)
 
--- Night light on or off, eased in: screen.tune says what each looks like.
-bind("super+n", function() screen.toggle_night() end)
+-- Night light as a range, like brightness: Super with brightness down steps toward night,
+-- with brightness up back toward day, eased in. screen.tune says what each end looks like.
+bind("super+brightnessdown", function() screen.step_night(1) end)
+bind("super+brightnessup", function() screen.step_night(-1) end)
 
 -- Next keyboard layout, from layouts.tune.list.
 bind("super+space", function(f) layouts.next(f) end)
@@ -301,6 +303,7 @@ bind("super+escape", function() yk.release_all() end)
 -- Super with plus or minus zooms around the middle of the screen, since the keyboard has
 -- no cursor to anchor to. Exponential, so a step feels the same at any scale.
 local function held_keys(f)
+    screen.held(f)
     if not f.super then return end
     local zoom_in = yk.key_down(keys.equal) or yk.key_down(keys.kpplus)
     local zoom_out = yk.key_down(keys.minus) or yk.key_down(keys.kpminus)

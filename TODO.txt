@@ -42,6 +42,13 @@ IMPROVEMENTS OR TESTS:
 
 [x] Render texts in raylib with a way fucking nicer font like IBM Plex mono and make it so that we never scale that shit or change the font size.
 
+[ ] State that survives a reload. Not settings (those stay in lua/), but what the scripts
+    change while running: the night range, a theme switched with looks.set_theme, the
+    layout picked. A reload starts a fresh VM, so today all of it falls back to what the
+    files say. The engine could keep a small store (string keys, plain values) that Lua
+    reads and writes through yk.*, kept across reloads and maybe written to disk so it
+    also survives a restart.
+
 [ ] Expose as much of raylib to Lua as we can. The idea is to be able to build a whole game living inside yuka, in Lua only. Each fn is one line in ray.rs and one in the yk_fns! macro in src/lua.rs; loaded resources get id handles owned by the VM, like yk.font.
     - 2D draw: rounded rects, thick lines, circle/ellipse outlines and fills, triangles, polygons, rings, arcs, gradients, scissor, blend modes.
     - Textures: images and textures from files, DrawTexturePro, render textures for offscreen drawing.

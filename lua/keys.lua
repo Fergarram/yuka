@@ -27,6 +27,7 @@ local keys = {
     ["end"] = 107, down = 108, pagedown = 109, insert = 110, delete = 111,
     leftmeta = 125, rightmeta = 126,
     hangeul = 122, hanja = 123,
+    brightnessdown = 224, brightnessup = 225,
 }
 
 -- Shorter names for the ones chords are usually written with.

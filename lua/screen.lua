@@ -10,6 +10,8 @@
 -- The curves are built here from the settings below, and changes ease in rather than snap.
 --
 
+local keys = require("keys")
+
 local screen = {}
 
 --
@@ -17,7 +19,8 @@ local screen = {}
 --
 
 screen.tune = {
-    -- The two looks screen.toggle_night switches between. Each is:
+    -- The two ends of the night range: day at 0, night at 1, and every step between is the
+    -- two mixed. Each is:
     --
     --   kelvin     white point. 6500 is the panel as it comes; 4500 is a gentle evening,
     --              3400 is plainly orange, 2700 is candle light. Below 2000 blue is all but gone
@@ -27,10 +30,20 @@ screen.tune = {
     --   contrast   around mid grey. 1 is off, 1.1 is punchier, 0.9 is flatter
     --   gamma      applied before contrast. 1 is off, above 1 deepens the shadows, below lifts them
     day = { kelvin = 6500, dim = 1.0, contrast = 1.0, gamma = 1.0 },
-    night = { kelvin = 3400, dim = 0.8, contrast = 1.0, gamma = 1.0 },
+    night = { kelvin = 2300, dim = 0.8, contrast = 1.0, gamma = 1.0 },
 
-    -- Start at night. Kept until a reload; screen.toggle_night flips it while running.
-    night_on = false,
+    -- Where on the range yuka starts, 0 for day and 1 for full night. Kept until a reload;
+    -- screen.step_night moves it while running.
+    night_start = 1.0,
+
+    -- How far one key press moves along the range. 0.1 is ten presses from day to night.
+    night_step = 0.1,
+
+    -- Holding the key sweeps the range instead of stepping it: after hold_delay seconds, it
+    -- moves hold_speed of the range per second until let go or at an end. 0.3 is about where
+    -- a tap stops being a tap; a speed of 0.8 goes end to end in a little over a second.
+    hold_delay = 0.3,
+    hold_speed = 0.8,
 
     -- How fast a change eases in, as a fraction of the gap per second. 1.5 is a slow sunset,
     -- around a couple of seconds; 20 is near enough a snap.
@@ -45,7 +58,14 @@ screen.tune = {
 -- State
 --
 
-local night = screen.tune.night_on
+-- Where on the range we are, 0 for day and 1 for night.
+local night = screen.tune.night_start
+
+-- How long a range key has been held, in seconds, 0 when none is.
+local held_for = 0
+
+-- The look the range points at right now, refilled each frame.
+local want = { kelvin = 6500, dim = 1.0, contrast = 1.0, gamma = 1.0 }
 
 -- Where the look is now, easing toward the target. nil until the first frame, which takes the
 -- target outright so a reload does not fade from day.
@@ -109,19 +129,44 @@ local function build(look)
     yk.gamma(red, green, blue)
 end
 
-local function target()
-    return night and screen.tune.night or screen.tune.day
-end
-
 local FIELDS = { "kelvin", "dim", "contrast", "gamma" }
+
+local function target()
+    local day, nite = screen.tune.day, screen.tune.night
+    for i = 1, #FIELDS do
+        local name = FIELDS[i]
+        want[name] = day[name] + (nite[name] - day[name]) * night
+    end
+    return want
+end
 
 -- How close is close enough to stop easing, per field.
 local DONE = { kelvin = 5, dim = 0.002, contrast = 0.002, gamma = 0.002 }
 
-function screen.toggle_night()
-    night = not night
+-- Move along the range by this many steps: positive toward night, negative toward day.
+-- Rounded to a whole step so presses land on the same points every time.
+function screen.step_night(steps)
+    local step = screen.tune.night_step
+    local v = math.floor((night + steps * step) / step + 0.5) * step
+    night = math.max(0, math.min(1, v))
 end
 
+-- Every frame: Super with a brightness key held past hold_delay sweeps toward that end. The
+-- press itself is a step, bound in init.lua.
+function screen.held(f)
+    local down = f.super and yk.key_down(keys.brightnessdown)
+    local up = f.super and yk.key_down(keys.brightnessup)
+    if down == up then
+        held_for = 0
+        return
+    end
+    held_for = held_for + f.dt
+    if held_for < screen.tune.hold_delay then return end
+    local move = screen.tune.hold_speed * f.dt
+    night = math.max(0, math.min(1, night + (down and move or -move)))
+end
+
+-- Where on the range we are, 0 for day and 1 for night.
 function screen.night()
     return night
 end
