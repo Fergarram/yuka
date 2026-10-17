@@ -42,6 +42,16 @@ IMPROVEMENTS OR TESTS:
 
 [x] Render texts in raylib with a way fucking nicer font like IBM Plex mono and make it so that we never scale that shit or change the font size.
 
+[ ] Expose as much of raylib to Lua as we can. The idea is to be able to build a whole game living inside yuka, in Lua only. Each fn is one line in ray.rs and one in the yk_fns! macro in src/lua.rs; loaded resources get id handles owned by the VM, like yk.font.
+    - 2D draw: rounded rects, thick lines, circle/ellipse outlines and fills, triangles, polygons, rings, arcs, gradients, scissor, blend modes.
+    - Textures: images and textures from files, DrawTexturePro, render textures for offscreen drawing.
+    - Text: the rest of rtext (codepoint drawing, line spacing, text in a rect).
+    - Shaders: custom shaders and uniforms on 2D and 3D drawing, sharing the window shader slots or alongside them.
+    - 3D: Camera3D, shapes, models and meshes, materials, drawn in yk.draw.
+    - Audio: init the device, sounds, music streams, volume and pitch.
+    - Input for games: probably through the snapshot rather than raylib's input, since the engine owns input.
+    Keep a script from crashing the compositor: check every handle and size, nothing raw reaches Lua.
+
 ---
 
 MINIMUM SHIT:
