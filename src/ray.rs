@@ -22,6 +22,21 @@ pub const SHADER_UNIFORM_VEC4: i32 = 3;
 pub const RL_QUADS: i32 = 0x0007;
 // Camera projection: perspective.
 pub const CAMERA_PERSPECTIVE: i32 = 0;
+// The codepoints a font's atlas holds, as inclusive ranges: ASCII, Latin-1 and Latin Extended-A,
+// Greek, Cyrillic, general punctuation (dashes, quotes, the ellipsis), the euro sign and the
+// arrows. Anything else draws as the font's missing glyph box.
+const TEXT_RANGES: [(i32, i32); 7] = [
+    (0x20, 0x7e),
+    (0xa0, 0x17f),
+    (0x370, 0x3ff),
+    (0x400, 0x4ff),
+    (0x2010, 0x205e),
+    (0x20ac, 0x20ac),
+    (0x2190, 0x2199),
+];
+// SetTextureFilter: linear. A glyph drawn at its atlas size on a whole pixel samples texel
+// centres and comes out exact; drawn at any other size it is smoothed rather than blocky.
+const TEXTURE_FILTER_BILINEAR: c_int = 1;
 
 
 //
@@ -67,6 +82,32 @@ pub struct Camera3D {
 pub struct Ray {
     pub position: Vector3,
     pub direction: Vector3,
+}
+
+// Mirrors of raylib structs: every field has to be there for the layout, read or not.
+#[allow(dead_code)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Texture {
+    id: c_uint,
+    width: c_int,
+    height: c_int,
+    mipmaps: c_int,
+    format: c_int,
+}
+
+// A font loaded from a file: its glyphs rasterised into one atlas at one pixel size. Opaque
+// outside this module. raylib owns the glyph tables behind the pointers until unload_font.
+#[allow(dead_code)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Font {
+    base_size: c_int,
+    glyph_count: c_int,
+    glyph_padding: c_int,
+    texture: Texture,
+    recs: *mut c_void,
+    glyphs: *mut c_void,
 }
 
 #[repr(C)]
@@ -146,6 +187,19 @@ extern "C" {
     fn rlDrawRenderBatchActive();
     fn DrawText(text: *const c_char, x: c_int, y: c_int, size: c_int, color: Color);
     fn MeasureText(text: *const c_char, size: c_int) -> c_int;
+    fn LoadFontEx(path: *const c_char, size: c_int, codepoints: *mut c_int, count: c_int) -> Font;
+    fn LoadFontFromMemory(
+        file_type: *const c_char,
+        data: *const u8,
+        data_size: c_int,
+        size: c_int,
+        codepoints: *mut c_int,
+        count: c_int,
+    ) -> Font;
+    fn UnloadFont(font: Font);
+    fn DrawTextEx(font: Font, text: *const c_char, position: Vector2, size: f32, spacing: f32, tint: Color);
+    fn MeasureTextEx(font: Font, text: *const c_char, size: f32, spacing: f32) -> Vector2;
+    fn SetTextureFilter(texture: Texture, filter: c_int);
     fn DrawRectangle(x: c_int, y: c_int, w: c_int, h: c_int, color: Color);
     fn DrawRectangleLines(x: c_int, y: c_int, w: c_int, h: c_int, color: Color);
     fn DrawLine(x1: c_int, y1: c_int, x2: c_int, y2: c_int, color: Color);
@@ -387,6 +441,87 @@ pub fn measure_text(text: &str, size: i32) -> i32 {
         Err(_) => return 0,
     };
     unsafe { MeasureText(c.as_ptr(), size) }
+}
+
+//
+// Fonts
+//
+
+// Every codepoint of TEXT_RANGES, the list load_font and load_font_ttf take. Allocates, so it is
+// for load time.
+pub fn text_codepoints() -> Vec<i32> {
+    let mut codepoints = Vec::with_capacity(1024);
+    for (first, last) in TEXT_RANGES {
+        codepoints.extend(first..=last);
+    }
+    codepoints
+}
+
+// Rasterise a TrueType or OpenType file at a pixel size, for the codepoints given. Needs the GL
+// context, since the atlas is a texture. None when the file will not read or parse. Codepoints
+// the font has no glyph for are drawn as its missing glyph box.
+pub fn load_font(path: &str, size: i32, codepoints: &[i32]) -> Option<Font> {
+    let p = CString::new(path).ok()?;
+    // LoadFontEx only reads the list; the C signature is just not const.
+    let font = unsafe {
+        LoadFontEx(p.as_ptr(), size, codepoints.as_ptr() as *mut c_int, codepoints.len() as c_int)
+    };
+    font_checked(font)
+}
+
+// The same from a TrueType file already in memory, such as one built into the binary.
+pub fn load_font_ttf(data: &[u8], size: i32, codepoints: &[i32]) -> Option<Font> {
+    let font = unsafe {
+        LoadFontFromMemory(
+            c".ttf".as_ptr(),
+            data.as_ptr(),
+            data.len() as c_int,
+            size,
+            codepoints.as_ptr() as *mut c_int,
+            codepoints.len() as c_int,
+        )
+    };
+    font_checked(font)
+}
+
+// A font raylib could not build has no atlas. Whatever it did allocate goes back.
+fn font_checked(font: Font) -> Option<Font> {
+    if font.texture.id == 0 {
+        if !font.glyphs.is_null() {
+            unsafe { UnloadFont(font) };
+        }
+        return None;
+    }
+    unsafe { SetTextureFilter(font.texture, TEXTURE_FILTER_BILINEAR) };
+    Some(font)
+}
+
+pub fn unload_font(font: Font) {
+    unsafe { UnloadFont(font) };
+}
+
+// The pixel size a font was rasterised at.
+pub fn font_size(font: Font) -> i32 {
+    font.base_size
+}
+
+// No extra spacing between glyphs: a TrueType font's advances already carry it.
+pub fn draw_text_font(font: Font, text: &str, x: f32, y: f32, size: f32, color: Color) {
+    let c = match CString::new(text) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    unsafe { DrawTextEx(font, c.as_ptr(), Vector2 { x, y }, size, 0.0, color) };
+}
+
+// Width and height of a line of text in a font.
+pub fn measure_text_font(font: Font, text: &str, size: f32) -> (f32, f32) {
+    let c = match CString::new(text) {
+        Ok(c) => c,
+        Err(_) => return (0.0, 0.0),
+    };
+    let v = unsafe { MeasureTextEx(font, c.as_ptr(), size, 0.0) };
+    (v.x, v.y)
 }
 
 pub fn begin_mode_3d(camera: Camera3D) {

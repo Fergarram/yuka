@@ -10,6 +10,8 @@
 -- (yk.want_inspect, yk.want_pad), so an overlay that is off costs nothing.
 --
 
+local text = require("text")
+
 local overlays = {}
 
 overlays.fps = os.getenv("YUKA_DEBUG_FPS") ~= nil
@@ -67,10 +69,10 @@ local function draw_fps()
     local colour = 0xfa785aff
     if worst <= 17 then colour = 0x82e68cff elseif worst <= 25 then colour = 0xf0d26eff end
     local line = string.format("%.0f fps   %.1f ms   worst %.1f ms", fps, last_dt_ms, worst)
-    local pad, size = 6, 14
-    local w = yk.measure_text(line, size)
-    yk.draw_rect(pad, pad, w + pad * 2, size + pad * 2, 0x0c0c10be)
-    yk.draw_text(line, pad * 2, pad * 2, size, colour)
+    local pad = 6
+    local w = text.width(line)
+    yk.draw_rect(pad, pad, w + pad * 2, text.size + pad * 2, 0x0c0c10be)
+    text.draw(line, pad * 2, pad * 2, colour)
 end
 
 --
@@ -83,7 +85,6 @@ end
 local function draw_labels()
     local fg, bg = 0xf0e678ff, 0x000000aa
     local PAD = 3
-    local size = math.max(math.floor(13 * zoom), 10)
     local list = yk.surfaces()
     for n = 1, #list do
         local s = list[n]
@@ -97,12 +98,12 @@ local function draw_labels()
                 s.canvas_x, s.canvas_y, s.geo_x, s.geo_y, s.geo_w, s.geo_h, s.z),
         }
         local widest = 0
-        for k = 1, #lines do widest = math.max(widest, yk.measure_text(lines[k], size)) end
-        local line_h = size + PAD
+        for k = 1, #lines do widest = math.max(widest, text.width(lines[k])) end
+        local line_h = text.size + PAD
         local top = ay + PAD
         yk.draw_rect(ax - PAD, top - PAD, widest + PAD * 2, line_h * #lines + PAD, bg)
         for k = 1, #lines do
-            yk.draw_text(lines[k], ax, top + line_h * (k - 1), size, fg)
+            text.draw(lines[k], ax, top + line_h * (k - 1), fg)
         end
     end
 end
@@ -117,7 +118,8 @@ end
 local function draw_pad(sw, sh)
     local p = yk.pad()
     if not p then return end
-    local WIDTH, MARGIN, TEXT, LINE = 260, 16, 12, 15
+    local WIDTH, MARGIN = 330, 16
+    local LINE = text.size + 4
     local bg, frame, region = 0x0c0c10d2, 0x5a5f6eff, 0x3c4150ff
     local live, hot, dim = 0xf0e678ff, 0xfa785aff, 0x969baaff
 
@@ -144,9 +146,9 @@ local function draw_pad(sw, sh)
         local split_x = px + math.floor(pad_w * p.split)
         yk.draw_line(px, strip_y, px + pad_w, strip_y, region)
         yk.draw_line(split_x, strip_y, split_x, py + pad_h, region)
-        local label_y = py + pad_h - TEXT - 4
-        yk.draw_text("L", px + 6, label_y, TEXT, p.left and live or region)
-        yk.draw_text("R", split_x + 6, label_y, TEXT, p.right and live or region)
+        local label_y = py + pad_h - text.size - 4
+        text.draw("L", px + 6, label_y, p.left and live or region)
+        text.draw("R", split_x + 6, label_y, p.right and live or region)
     end
 
     -- Fingers. Parked ones are dim, faint ones (too small to count) are in the frame colour,
@@ -184,7 +186,7 @@ local function draw_pad(sw, sh)
     local sizes = ""
     for i = 1, math.min(#fingers, 3) do sizes = sizes .. " " .. fingers[i].raw_major end
     if #fingers == 0 then sizes = " -" end
-    local text = {
+    local lines = {
         string.format("trackpad  %d finger%s  %d counted  max %d",
             p.count, p.count == 1 and "" or "s", p.active, p.contact_max),
         string.format("gesture %s  pan %s  zoom %s", p.mode, armed(p.pan_armed), armed(p.zoom_armed)),
@@ -193,9 +195,9 @@ local function draw_pad(sw, sh)
         string.format("buttons %s%s%s", p.software_buttons and "regions" or "physical",
             p.left and "  LEFT" or "", p.right and "  RIGHT" or ""),
     }
-    for n = 1, #text do
+    for n = 1, #lines do
         local colour = (n == 5 and (p.left or p.right)) and live or dim
-        yk.draw_text(text[n], x0, y0 + LINE * (n - 1), TEXT, colour)
+        text.draw(lines[n], x0, y0 + LINE * (n - 1), colour)
     end
 end
 

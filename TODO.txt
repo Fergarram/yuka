@@ -40,7 +40,7 @@ IMPROVEMENTS OR TESTS:
 
 [ ] Palm rest. I think done by increasing the minimum area required to mark as finger depending on how close to the sides it is.
 
-[ ] Render texts in raylib with a way fucking nicer font like IBM Plex mono and make it so that we never scale that shit or change the font size.
+[x] Render texts in raylib with a way fucking nicer font like IBM Plex mono and make it so that we never scale that shit or change the font size.
 
 ---
 

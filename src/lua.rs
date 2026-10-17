@@ -281,6 +281,20 @@ struct Io {
     inspect: Vec<Inspect>,
     pad: Option<PadView>,
     cam3d: Option<ray::Camera3D>,
+    fonts: Fonts,
+}
+
+// The fonts the scripts asked for with yk.font, by id - 1. The scripts load before the window
+// and its GL context exist, so a request only records the file and the size, and the atlas is
+// built at the start of the next frame. Owned by the VM: a reload unloads them all and the new
+// scripts ask again.
+struct Fonts {
+    path: Vec<String>,
+    size: Vec<i32>,
+    // None until built, and for good when the file would not load.
+    font: Vec<Option<ray::Font>>,
+    // Requests before this index have been tried.
+    tried: usize,
 }
 
 // The list tables inside the snapshot, kept so a frame refills them rather than making new
@@ -332,6 +346,8 @@ struct Vm {
     lua: Lua,
     frame_fn: Function,
     draw_fn: Option<Function>,
+    // yk.draw_error, which draws the error banner when the scripts define it.
+    error_fn: Option<Function>,
     snap: Table,
     lists: Lists,
     // Which FrameIn::layouts_gen the layout names in the snapshot are from. 0 is none yet.
@@ -346,6 +362,8 @@ pub struct Script {
     // Why the last load failed, or why the last frame call did. Shown on screen until a
     // load or a frame succeeds.
     pub error: Option<String>,
+    // Why yk.draw_error itself failed, kept to say it once in the log rather than every frame.
+    banner_error: Option<String>,
 }
 
 //
@@ -358,7 +376,7 @@ pub fn init(dir: &str) -> Result<(Script, Settings), String> {
     let stamp = newest_mtime(dir);
     let (vm, pairs) = load_vm(dir).map_err(|e| format!("{dir}/{ENTRY}: {e}"))?;
     let set = adopt_pairs(dir, &pairs);
-    Ok((Script { dir: dir.to_string(), vm, stamp, error: None }, set))
+    Ok((Script { dir: dir.to_string(), vm, stamp, error: None, banner_error: None }, set))
 }
 
 // Build a fresh VM from the scripts on disk. Some(settings) when it loaded and the new VM
@@ -367,6 +385,7 @@ pub fn reload(s: &mut Script) -> Option<Settings> {
     s.stamp = newest_mtime(&s.dir);
     match load_vm(&s.dir) {
         Ok((vm, pairs)) => {
+            unload_fonts(&s.vm);
             s.vm = vm;
             s.error = None;
             Some(adopt_pairs(&s.dir, &pairs))
@@ -408,6 +427,7 @@ fn load_vm(dir: &str) -> mlua::Result<(Vm, Vec<(String, String)>)> {
         inspect: Vec::new(),
         pad: None,
         cam3d: None,
+        fonts: Fonts { path: Vec::new(), size: Vec::new(), font: Vec::new(), tried: 0 },
     });
 
     // require() finds the other scripts next to the entry.
@@ -428,6 +448,10 @@ fn load_vm(dir: &str) -> mlua::Result<(Vm, Vec<(String, String)>)> {
         _ => return Err(mlua::Error::RuntimeError("defines no yk.frame function".into())),
     };
     let draw_fn: Option<Function> = match yk.get::<Value>("draw")? {
+        Value::Function(f) => Some(f),
+        _ => None,
+    };
+    let error_fn: Option<Function> = match yk.get::<Value>("draw_error")? {
         Value::Function(f) => Some(f),
         _ => None,
     };
@@ -483,7 +507,7 @@ fn load_vm(dir: &str) -> mlua::Result<(Vm, Vec<(String, String)>)> {
         info_parent: list("info_parent")?,
         layout_names: list("layout_names")?,
     };
-    Ok((Vm { lua, frame_fn, draw_fn, snap, lists, layouts_gen: 0 }, pairs))
+    Ok((Vm { lua, frame_fn, draw_fn, error_fn, snap, lists, layouts_gen: 0 }, pairs))
 }
 
 // The config table flattened to the key and value strings settings.rs parses. Lists become
@@ -618,6 +642,25 @@ fn register(lua: &Lua, yk: &Table) -> mlua::Result<()> {
     yk.set("set_background", lua.create_function(|lua, rgba: u32| {
         push(lua, Cmd::Background(rgba));
         Ok(())
+    })?)?;
+    // A font file at a pixel size, for yk.draw_text and yk.measure_text. Returns its id, the same
+    // one for the same file and size, or nil and why when the file cannot be read. Built at the
+    // next frame, so ask at load: until then text falls back to the built-in font.
+    yk.set("font", lua.create_function(|lua, (path, size): (String, i32)| {
+        if let Err(e) = std::fs::metadata(&path) {
+            return Ok((None, Some(format!("{path}: {e}"))));
+        }
+        let Some(mut io) = lua.app_data_mut::<Io>() else { return Ok((None, None)) };
+        let fonts = &mut io.fonts;
+        for i in 0..fonts.path.len() {
+            if fonts.size[i] == size && fonts.path[i] == path {
+                return Ok((Some(i as u32 + 1), None));
+            }
+        }
+        fonts.path.push(path);
+        fonts.size.push(size.max(1));
+        fonts.font.push(None);
+        Ok((Some(fonts.path.len() as u32), None))
     })?)?;
     register_draw(lua, yk)?;
     yk.set("spawn", lua.create_function(|lua, cmd: String| {
@@ -766,49 +809,72 @@ fn check_drawing(lua: &Lua) -> mlua::Result<()> {
     }
 }
 
+fn to_screen(lua: &Lua, x: f32, y: f32, z: f32) -> (f32, f32) {
+    let cam = lua.app_data_ref::<Io>().and_then(|io| io.cam3d);
+    let Some(cam) = cam else { return (0.0, 0.0) };
+    let v = ray::world_to_screen(ray::Vector3 { x, y, z }, cam);
+    (v.x, v.y)
+}
+
+// The font behind a yk.font id, once built. None for no id, an unknown one, or a font that is
+// not built yet or would not load: the caller then uses the built-in font.
+fn font_of(lua: &Lua, id: Option<u32>) -> Option<ray::Font> {
+    let i = (id? as usize).checked_sub(1)?;
+    let io = lua.app_data_ref::<Io>()?;
+    io.fonts.font.get(i).copied().flatten()
+}
+
+// For the functions that are fine anywhere, measuring rather than drawing.
+fn anywhere(_lua: &Lua) -> mlua::Result<()> {
+    Ok(())
+}
+
+// Registers yk functions one line each: the name, the arguments as Lua passes them, and the
+// expression that does the work, whose value goes back to the script. guard runs first and
+// can refuse the call. The closure's &Lua is bound to the name given as lua, so the
+// expression can use it.
+macro_rules! yk_fns {
+    ($lua:ident, $yk:ident, $guard:path, { $( $name:ident ( $( $arg:ident : $ty:ty ),* ) => $body:expr ; )* }) => {
+        $(
+            $yk.set(stringify!($name), $lua.create_function(|$lua, ( $( $arg, )* ): ( $( $ty, )* )| {
+                $guard($lua)?;
+                Ok($body)
+            })?)?;
+        )*
+    };
+}
+
 fn register_draw(lua: &Lua, yk: &Table) -> mlua::Result<()> {
-    yk.set("draw_rect", lua.create_function(|lua, (x, y, w, h, c): (f32, f32, f32, f32, u32)| {
-        check_drawing(lua)?;
-        ray::draw_rectangle(x as i32, y as i32, w as i32, h as i32, color(c));
-        Ok(())
-    })?)?;
-    yk.set("draw_rect_lines", lua.create_function(|lua, (x, y, w, h, c): (f32, f32, f32, f32, u32)| {
-        check_drawing(lua)?;
-        ray::draw_rectangle_lines(x as i32, y as i32, w as i32, h as i32, color(c));
-        Ok(())
-    })?)?;
-    yk.set("draw_line", lua.create_function(|lua, (x1, y1, x2, y2, c): (f32, f32, f32, f32, u32)| {
-        check_drawing(lua)?;
-        ray::draw_line(x1 as i32, y1 as i32, x2 as i32, y2 as i32, color(c));
-        Ok(())
-    })?)?;
-    yk.set("draw_circle", lua.create_function(|lua, (x, y, r, c): (f32, f32, f32, u32)| {
-        check_drawing(lua)?;
-        ray::draw_circle(x as i32, y as i32, r, color(c));
-        Ok(())
-    })?)?;
-    yk.set("draw_ellipse_lines", lua.create_function(|lua, (x, y, rx, ry, c): (f32, f32, f32, f32, u32)| {
-        check_drawing(lua)?;
-        ray::draw_ellipse_lines(x as i32, y as i32, rx, ry, color(c));
-        Ok(())
-    })?)?;
-    // Where a canvas point at a lift z lands on screen, through the camera the windows were
-    // just drawn with. Only inside yk.draw.
-    yk.set("to_screen", lua.create_function(|lua, (x, y, z): (f32, f32, f32)| {
-        check_drawing(lua)?;
-        let cam = lua.app_data_ref::<Io>().and_then(|io| io.cam3d);
-        let Some(cam) = cam else { return Ok((0.0, 0.0)) };
-        let v = ray::world_to_screen(ray::Vector3 { x, y, z }, cam);
-        Ok((v.x, v.y))
-    })?)?;
-    yk.set("draw_text", lua.create_function(|lua, (text, x, y, size, c): (String, f32, f32, i32, u32)| {
-        check_drawing(lua)?;
-        ray::draw_text(&text, x as i32, y as i32, size, color(c));
-        Ok(())
-    })?)?;
-    yk.set("measure_text", lua.create_function(|_, (text, size): (String, i32)| {
-        Ok(ray::measure_text(&text, size))
-    })?)?;
+    yk_fns!(lua, yk, check_drawing, {
+        draw_rect(x: f32, y: f32, w: f32, h: f32, c: u32) =>
+            ray::draw_rectangle(x as i32, y as i32, w as i32, h as i32, color(c));
+        draw_rect_lines(x: f32, y: f32, w: f32, h: f32, c: u32) =>
+            ray::draw_rectangle_lines(x as i32, y as i32, w as i32, h as i32, color(c));
+        draw_line(x1: f32, y1: f32, x2: f32, y2: f32, c: u32) =>
+            ray::draw_line(x1 as i32, y1 as i32, x2 as i32, y2 as i32, color(c));
+        draw_circle(x: f32, y: f32, r: f32, c: u32) =>
+            ray::draw_circle(x as i32, y as i32, r, color(c));
+        draw_ellipse_lines(x: f32, y: f32, rx: f32, ry: f32, c: u32) =>
+            ray::draw_ellipse_lines(x as i32, y as i32, rx, ry, color(c));
+        // Where a canvas point at a lift z lands on screen, through the camera the windows were
+        // just drawn with.
+        to_screen(x: f32, y: f32, z: f32) => to_screen(lua, x, y, z);
+        // In a font from yk.font, or in raylib's built-in one without. Put on whole pixels, so a
+        // font drawn at its own size is exact.
+        draw_text(text: String, x: f32, y: f32, size: f32, c: u32, font: Option<u32>) =>
+            match font_of(lua, font) {
+                Some(f) => ray::draw_text_font(f, &text, x.round(), y.round(), size, color(c)),
+                None => ray::draw_text(&text, x as i32, y as i32, size as i32, color(c)),
+            };
+    });
+    yk_fns!(lua, yk, anywhere, {
+        // Width and height of a line, in pixels.
+        measure_text(text: String, size: f32, font: Option<u32>) =>
+            match font_of(lua, font) {
+                Some(f) => ray::measure_text_font(f, &text, size),
+                None => (ray::measure_text(&text, size as i32) as f32, size),
+            };
+    });
     // Every drawable surface, children included, for the labels overlay. Only inside yk.draw on
     // a frame that called yk.want_inspect; empty otherwise. Builds tables, so it is for
     // instruments rather than for every frame.
@@ -884,6 +950,30 @@ fn register_draw(lua: &Lua, yk: &Table) -> mlua::Result<()> {
     Ok(())
 }
 
+// Build the atlases for fonts asked for since the last frame. Needs the GL context, which is why
+// it waits for a frame rather than running when yk.font is called.
+fn load_fonts(fonts: &mut Fonts) {
+    if fonts.tried == fonts.path.len() {
+        return;
+    }
+    let codepoints = ray::text_codepoints();
+    for i in fonts.tried..fonts.path.len() {
+        fonts.font[i] = ray::load_font(&fonts.path[i], fonts.size[i], &codepoints);
+        match fonts.font[i] {
+            Some(f) => println!("yuka: lua: font {} at {}px", fonts.path[i], ray::font_size(f)),
+            None => eprintln!("yuka: lua: font {} would not load, using the built-in one", fonts.path[i]),
+        }
+    }
+    fonts.tried = fonts.path.len();
+}
+
+fn unload_fonts(vm: &Vm) {
+    let Some(mut io) = vm.lua.app_data_mut::<Io>() else { return };
+    for f in io.fonts.font.drain(..).flatten() {
+        ray::unload_font(f);
+    }
+}
+
 // What engine data the scripts want to draw this frame: (surface inspection, trackpad).
 pub fn wants(s: &Script) -> (bool, bool) {
     s.vm.lua.app_data_ref::<Io>().map_or((false, false), |io| (io.want_inspect, io.want_pad))
@@ -895,6 +985,7 @@ pub fn draw(s: &mut Script, cam3d: ray::Camera3D, inspect: &mut Vec<Inspect>, pa
     let vm = &s.vm;
     let Some(draw_fn) = vm.draw_fn.as_ref() else { return };
     if let Some(mut io) = vm.lua.app_data_mut::<Io>() {
+        load_fonts(&mut io.fonts);
         io.drawing = true;
         std::mem::swap(&mut io.inspect, inspect);
         io.pad = pad;
@@ -907,6 +998,39 @@ pub fn draw(s: &mut Script, cam3d: ray::Camera3D, inspect: &mut Vec<Inspect>, pa
         io.pad = None;
     }
     report(s, "draw", result);
+}
+
+// Have the scripts draw the error banner for s.error, through yk.draw_error(msg, sw, sh). After a
+// failed reload this is the VM that was already running, so the banner comes from scripts known
+// to load and never from the file that broke. Ok(false) when there is no error or no
+// yk.draw_error; Err with why when it failed. Either way the caller draws its own banner.
+pub fn draw_error(s: &mut Script, screen_w: i32, screen_h: i32) -> Result<bool, String> {
+    let vm = &s.vm;
+    let (Some(msg), Some(error_fn)) = (s.error.as_deref(), vm.error_fn.as_ref()) else {
+        return Ok(false);
+    };
+    if let Some(mut io) = vm.lua.app_data_mut::<Io>() {
+        load_fonts(&mut io.fonts);
+        io.drawing = true;
+    }
+    let result = error_fn.call::<()>((msg, screen_w, screen_h));
+    if let Some(mut io) = vm.lua.app_data_mut::<Io>() {
+        io.drawing = false;
+    }
+    match result {
+        Ok(()) => {
+            s.banner_error = None;
+            Ok(true)
+        }
+        Err(e) => {
+            let e = e.to_string();
+            if s.banner_error.as_deref() != Some(e.as_str()) {
+                eprintln!("yuka: lua: draw_error: {e}");
+                s.banner_error = Some(e.clone());
+            }
+            Err(e)
+        }
+    }
 }
 
 // Keep a call's error for the screen, once per distinct error, and clear it when that call
@@ -941,6 +1065,7 @@ pub fn frame(s: &mut Script, f: &FrameIn, out: &mut Vec<Cmd>) -> Route {
     let vm = &s.vm;
 
     if let Some(mut io) = vm.lua.app_data_mut::<Io>() {
+        load_fonts(&mut io.fonts);
         io.route = Route::default();
         io.want_inspect = false;
         io.want_pad = false;

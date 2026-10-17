@@ -13,6 +13,8 @@
 -- make (grp:alt_shift_toggle and the like) shows it too.
 --
 
+local text = require("text")
+
 local layouts = {}
 
 --
@@ -45,8 +47,7 @@ layouts.tune = {
     hold_secs = 0.8,
     fade_secs = 0.3,
 
-    -- Text size of the pill, and how far its bottom sits above the screen's, in pixels.
-    text_size = 24,
+    -- How far the pill's bottom sits above the screen's, in pixels.
     margin = 96,
 }
 
@@ -137,20 +138,18 @@ function layouts.draw()
     if age > t.hold_secs then
         a = 1 - (age - t.hold_secs) / t.fade_secs
     end
-    local size = t.text_size
-    local small = math.floor(size * 0.6)
-    local pad = math.floor(size * 0.6)
-    local w = yk.measure_text(label, size)
-    local dw = detail ~= "" and yk.measure_text(detail, small) or 0
+    local pad = text.size
+    local w = text.width(label)
+    local dw = detail ~= "" and text.width(detail) or 0
     local gap = detail ~= "" and pad or 0
     local box_w = w + gap + dw + pad * 2
-    local box_h = size + pad * 2
+    local box_h = text.size + pad * 2
     local x = math.floor((screen_w - box_w) * 0.5)
     local y = screen_h - t.margin - box_h
     yk.draw_rect(x, y, box_w, box_h, fade(0x0c0c10d8, a))
-    yk.draw_text(label, x + pad, y + pad, size, fade(0xf0f0f4ff, a))
+    text.draw(label, x + pad, y + pad, fade(0xf0f0f4ff, a))
     if detail ~= "" then
-        yk.draw_text(detail, x + pad + w + gap, y + pad + size - small, small, fade(0x9aa0aeff, a))
+        text.draw(detail, x + pad + w + gap, y + pad, fade(0x9aa0aeff, a))
     end
 end
 

@@ -1020,19 +1020,44 @@ pub fn prepare_textures(windows: &mut Windows, zoom: f32, anisotropy: f32, mips:
     }
 }
 
-// Why the scripts are not running, across the top of the screen. A few lines at most: the
-// first is where it went wrong, and a traceback past that belongs in the log.
-pub fn draw_script_error(text: &str, screen_w: i32) {
+// The face of the fallback banner, built into the binary so it needs no file and no script.
+const BANNER_TTF: &[u8] = include_bytes!("../third_party/fonts/IBMPlexMono-Regular.ttf");
+const BANNER_SIZE: i32 = 12;
+
+// The fallback banner's font. Needs the GL context, so after the window. None only if raylib
+// cannot parse the built-in file, and the banner then uses raylib's own font.
+pub fn load_banner_font() -> Option<ray::Font> {
+    ray::load_font_ttf(BANNER_TTF, BANNER_SIZE, &ray::text_codepoints())
+}
+
+// Why the scripts are not running, across the top of the screen, for when they cannot draw it
+// themselves: no yk.draw_error, or one that failed (its error comes as the second text). A few
+// lines at most: the first is where it went wrong, and a traceback past that belongs in the log.
+pub fn draw_script_error(text: &str, banner_error: Option<&str>, font: Option<ray::Font>, screen_w: i32) {
     const PAD: i32 = 8;
-    const TEXT: i32 = 16;
-    const LINE: i32 = 20;
+    const LINE: i32 = 16;
     const MAX_LINES: usize = 6;
     let bg = ray::Color { r: 60, g: 12, b: 16, a: 220 };
     let fg = ray::Color { r: 255, g: 190, b: 180, a: 255 };
-    let count = text.lines().take(MAX_LINES).count() as i32;
+    let dim = ray::Color { r: 200, g: 140, b: 135, a: 255 };
+    let extra = banner_error.map_or(0, |_| 1);
+    let count = (text.lines().take(MAX_LINES).count() + extra) as i32;
     ray::draw_rectangle(0, 0, screen_w, count * LINE + PAD * 2, bg);
-    for (i, line) in text.lines().take(MAX_LINES).enumerate() {
-        ray::draw_text(line, PAD, PAD + i as i32 * LINE, TEXT, fg);
+    let mut y = PAD;
+    for line in text.lines().take(MAX_LINES) {
+        draw_banner_line(line, PAD, y, font, fg);
+        y += LINE;
+    }
+    if let Some(e) = banner_error {
+        let first = e.lines().next().unwrap_or("");
+        draw_banner_line(&format!("and yk.draw_error failed: {first}"), PAD, y, font, dim);
+    }
+}
+
+fn draw_banner_line(line: &str, x: i32, y: i32, font: Option<ray::Font>, c: ray::Color) {
+    match font {
+        Some(f) => ray::draw_text_font(f, line, x as f32, y as f32, BANNER_SIZE as f32, c),
+        None => ray::draw_text(line, x, y, BANNER_SIZE, c),
     }
 }
 

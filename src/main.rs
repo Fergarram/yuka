@@ -1026,6 +1026,10 @@ fn main() {
     // on the z=0 plane are never clipped (raylib defaults to 0.01 .. 1000).
     ray::set_clip_planes(1.0, 200_000.0);
 
+    // The engine's own error banner, for when the scripts cannot draw one. Its font is in the
+    // binary, so it never depends on a file or a script.
+    let banner_font = render::load_banner_font();
+
     println!(
         "yuka: screen {}x{}  egl_display={:p}  egl_context={:p}",
         ray::screen_width(),
@@ -2682,8 +2686,16 @@ fn main() {
         lua::draw(&mut script, cam3d, &mut inspect_list, pad_view);
         // Scripts that would not load or run say so on screen, since the log may be on a tty
         // nobody is looking at.
-        if let Some(err) = script.error.as_ref() {
-            render::draw_script_error(err, ray::screen_width());
+        // They draw it themselves when they can, and the engine's own banner covers the rest.
+        if script.error.is_some() {
+            let drawn = lua::draw_error(&mut script, ray::screen_width(), ray::screen_height());
+            if let Some(err) = script.error.as_ref() {
+                match drawn {
+                    Ok(true) => {}
+                    Ok(false) => render::draw_script_error(err, None, banner_font, ray::screen_width()),
+                    Err(e) => render::draw_script_error(err, Some(&e), banner_font, ray::screen_width()),
+                }
+            }
         }
         if screenshot && frame == shot_frame {
             ray::flush_batch();

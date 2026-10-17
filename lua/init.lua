@@ -53,12 +53,18 @@
 --                                 a new keymap from xkb names, comma separated as setxkbmap
 --                                 takes them; kept across reloads, only rebuilt on a change
 --   yk.set_layout(i)              make the keymap's i-th layout the active one
+--   yk.font(path, size)           a font file at a pixel size, as an id for yk.draw_text; the
+--                                 same id for the same pair, or nil and why. Ask at load: it is
+--                                 built at the next frame (text.lua does this for you)
 --
 -- Drawing, only inside yk.draw (screen pixels, colours 0xRRGGBBAA):
 --
 --   yk.draw_rect(x, y, w, h, c)   yk.draw_rect_lines(x, y, w, h, c)
 --   yk.draw_line(x1, y1, x2, y2, c)   yk.draw_circle(x, y, r, c)
---   yk.draw_text(text, x, y, size, c)   yk.measure_text(text, size)
+--   yk.draw_text(text, x, y, size, c [, font])
+--                                 in a font from yk.font, raylib's built-in one without
+--   yk.measure_text(text, size [, font])
+--                                 width and height in pixels; fine outside yk.draw too
 --   yk.draw_ellipse_lines(x, y, rx, ry, c)
 --   yk.to_screen(x, y, z)         a canvas point at lift z, on screen
 --   yk.surfaces()                 every drawable surface, for the labels overlay
@@ -76,6 +82,9 @@
 --                                 created (f.created) it is the size it first draws at
 --   yk.hide(id [, on])            take a window out of drawing and hit testing, children
 --                                 included, or bring it back with on = false
+--
+-- yk.draw_error(msg, sw, sh), when defined, draws the error banner every frame the scripts
+-- have an error, after yk.draw (banner.lua). One that fails, or none, gets the engine's own.
 --
 -- Nothing reaches clients unless yk.route_scroll and yk.route_input say so, every frame.
 --   yk.key_down(code)             whether a key is held right now
@@ -147,6 +156,7 @@ local looks = require("looks")
 local overlays = require("overlays")
 local layouts = require("layouts")
 local desktop = require("desktop")
+local banner = require("banner")
 
 yk.config = require("config")
 
@@ -431,4 +441,8 @@ end
 function yk.draw()
     overlays.draw()
     layouts.draw()
+end
+
+function yk.draw_error(msg, sw, sh)
+    banner.draw(msg, sw, sh)
 end
