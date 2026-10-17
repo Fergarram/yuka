@@ -35,7 +35,7 @@ windows.tune = {
     spawn_travel = true,
 
     -- Programs started with yuka, so the canvas has something on it.
-    startup = { "weston-terminal", "weston-editor", "weston-clickdot", "weston-smoke" },
+    startup = { "ghostty", "smerge", "subl", "chromium" },
 
     -- Whether a new window looks for empty canvas instead of landing on what is already there.
     --

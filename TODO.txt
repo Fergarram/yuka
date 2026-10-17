@@ -24,6 +24,7 @@ BUGS:
     client changes its geometry offset (drops its shadow) while maximized, so the origin
     is restored against the wrong offset. Predates the Lua move.
 [ ] Some context menus appear out of screen so we need to make sure they appear inside.
+[ ] When FPS drop, it drops for everyone which I guess is expected... but i thnk the mouse drawing should not be affected by it?
 
 ---
 
@@ -38,6 +39,8 @@ IMPROVEMENTS OR TESTS:
 [ ] design three-finger gesture to grab windows when not in focus and be able to lift and resize with one hand
 
 [ ] Palm rest. I think done by increasing the minimum area required to mark as finger depending on how close to the sides it is.
+
+[ ] Render texts in raylib with a way fucking nicer font like IBM Plex mono and make it so that we never scale that shit or change the font size.
 
 ---
 
