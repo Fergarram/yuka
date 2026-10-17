@@ -126,6 +126,7 @@ local grab = require("grab")
 local looks = require("looks")
 local overlays = require("overlays")
 local layouts = require("layouts")
+local desktop = require("desktop")
 
 yk.config = require("config")
 
@@ -401,6 +402,7 @@ function yk.frame(f)
     looks.frame(f)
     overlays.frame(f)
     layouts.frame(f)
+    desktop.frame(f)
     view.finish()
 end
 

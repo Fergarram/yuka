@@ -1,0 +1,39 @@
+/*
+ * yuka's look for GTK 4 and libadwaita applications.
+ *
+ * Installed by lua/desktop.lua as ~/.config/gtk-4.0/yuka.css when the scripts load, and
+ * pulled in by an @import at the top of that directory's gtk.css. Anything written below
+ * the import in gtk.css comes later and wins, so personal tweaks belong there and this
+ * file stays yuka's.
+ *
+ * A user stylesheet outranks the theme whatever its selectors, so plain selectors are
+ * enough here. Rounding inside a surface (menu items, buttons) is left alone.
+ */
+
+/* Small, quiet titles. */
+headerbar .title, windowtitle .title { font-size: 9pt; font-weight: normal; }
+
+/* No shadows on windows. yuka already tells every window it is tiled, which drops them;
+   this covers a client that does not listen. */
+window, window:backdrop,
+window.csd, window.csd:backdrop,
+window.solid-csd, window.tiled, window.maximized { box-shadow: none; }
+
+/* Square corners. --window-radius is libadwaita's own knob for window corners. */
+:root { --window-radius: 0px; }
+window.csd, window.csd:backdrop, window.csd.popup { border-radius: 0; }
+
+/* Menus, popovers and tooltips: what the tiled hint cannot reach, since they are popups. */
+popover > contents, popover > arrow,
+popover.background > contents, popover.background > arrow { box-shadow: none; border-radius: 0; }
+tooltip { box-shadow: none; border-radius: 0; }
+
+/* Dialogs: libadwaita's, drawn as sheets inside their parent window, and GTK's message
+   dialogs with their rounded titlebar and button row. */
+floating-sheet > sheet,
+dialog-host > dialog.alert sheet,
+dialog-host > dialog.floating sheet { box-shadow: none; border-radius: 0; }
+dialog-host > dialog.alert sheet .body-scrolled-window > viewport,
+window.dialog-window.alert .body-scrolled-window > viewport,
+window.dialog.message .titlebar,
+window.dialog.message.csd .dialog-action-area button { border-radius: 0; }

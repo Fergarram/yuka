@@ -1,0 +1,28 @@
+/*
+ * yuka's look for GTK 3 applications.
+ *
+ * Installed by lua/desktop.lua as ~/.config/gtk-3.0/yuka.css when the scripts load, and
+ * pulled in by an @import at the top of that directory's gtk.css. Anything written below
+ * the import in gtk.css comes later and wins, so personal tweaks belong there and this
+ * file stays yuka's.
+ *
+ * Rounding inside a surface (menu items, buttons) is left alone.
+ */
+
+/* Small, quiet titles. */
+headerbar .title, windowtitle .title { font-size: 9pt; font-weight: normal; }
+
+/* No shadows and square corners on window decorations, popup menus and tooltips. yuka
+   already tells every window it is tiled; this covers a client that does not listen and
+   the popups the hint cannot reach. */
+decoration, decoration:backdrop,
+.csd decoration, .csd decoration:backdrop,
+.solid-csd decoration, .popup decoration, .csd.popup decoration,
+.tiled decoration, .maximized decoration,
+tooltip.csd decoration { box-shadow: none; border-radius: 0; }
+
+/* Menus, popovers and tooltips. */
+menu, .menu, .context-menu,
+.csd menu, .csd .menu, .csd .context-menu { border-radius: 0; }
+popover.background, .csd popover.background, popover.background:backdrop { box-shadow: none; border-radius: 0; }
+tooltip { box-shadow: none; border-radius: 0; }

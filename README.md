@@ -200,6 +200,11 @@ scripts (LuaJIT) in `lua/`:
   used for unfocused windows when `looks.tune.unfocused_desaturate` is above 0.
   `grid.frag` draws the floor, the dot grid on the canvas behind every window
   (`looks.tune.floor`). The uniforms each receives are listed in `src/render.rs`.
+- `desktop/` holds what applications read from the desktop rather than from the
+  compositor: GTK stylesheets (no shadows, square corners on windows, menus,
+  popovers, tooltips and dialogs). `lua/desktop.lua` installs them as
+  `~/.config/gtk-N.0/yuka.css`, imported at the top of that directory's
+  `gtk.css`, and applies the gsettings in its tune table when yuka starts.
 
 The scripts are read at startup and re-read while running: save any file under
 `lua/` or `shaders/` and the change lands on the next frame, or press Super+R to reload on
