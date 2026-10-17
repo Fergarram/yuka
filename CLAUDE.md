@@ -233,3 +233,8 @@
 		code example here
 		```
 </instructions-for-answer-format>
+
+<instructions-for-git>
+	Never add Co-Authored-By lines (or any other Claude attribution) to
+	commit messages or pull request descriptions.
+</instructions-for-git>
