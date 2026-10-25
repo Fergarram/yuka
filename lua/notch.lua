@@ -1,12 +1,16 @@
 --
 -- Notch
 --
--- A status bar shaped like a notch: a black tab at the top middle of the screen with the date
--- and time in it. Hidden until the pointer touches the top edge near the middle, then it
+-- A status bar shaped like a notch: a black tab at the top middle of the screen with the date,
+-- the time and the battery in it. Hidden until the pointer touches the top edge near the middle, then it
 -- slides down, and stays while the pointer rests on it. Once the pointer leaves it waits a
 -- moment and slides back up.
 --
 -- Drawn over everything, but it does not take input: a click on it reaches whatever is under.
+--
+-- The battery is read from sysfs only as the notch starts to open. Reading it asks the
+-- laptop's embedded controller, which can take long enough to drop a frame, so it is never
+-- polled; it is what the battery said when you looked.
 --
 
 local text = require("text")
@@ -45,7 +49,11 @@ notch.tune = {
     date_format = "%a %d %b",
     time_format = "%H:%M",
 
-    -- Space around the text and between the date and time, in pixels.
+    -- The battery's directory under /sys/class/power_supply, tried in order; the first with a
+    -- capacity file is used. None found shows no battery.
+    batteries = { "BAT0", "BAT1", "BAT2", "CMB0" },
+
+    -- Space around the text and between the items, in pixels.
     pad_x = 22,
     pad_y = 10,
     gap = 16,
@@ -68,14 +76,95 @@ local stamp = -1
 local date_s, time_s = "", ""
 local date_w, time_w = 0, 0
 
+-- The battery as last read, "" for none, and its width.
+local battery_s, battery_w = "", 0
+
 --
 -- Functions
 --
 
+-- The first line of a file, or nil when it cannot be read.
+local function read_line(path)
+    local fh = io.open(path, "r")
+    if not fh then return nil end
+    local s = fh:read("*l")
+    fh:close()
+    return s
+end
+
+-- The battery's sysfs directory and its name there, found once as the scripts load, nil
+-- without one.
+local battery_dir, battery_name = nil, nil
+for i = 1, #notch.tune.batteries do
+    local dir = "/sys/class/power_supply/" .. notch.tune.batteries[i]
+    if read_line(dir .. "/capacity") then
+        battery_dir, battery_name = dir, notch.tune.batteries[i]
+        break
+    end
+end
+
+-- A number from a sysfs file, nil when it cannot be read.
+local function read_number(path)
+    local s = read_line(path)
+    return s and tonumber(s)
+end
+
+-- Hours left at the rate the battery is going, to empty or to full by its status, nil when it
+-- says nothing useful. Batteries report either charge in microamp hours and current in
+-- microamps, or energy in microwatt hours and power in microwatts; the ratio is hours either
+-- way. The averaged current is steadier than the instant one where the battery has it.
+local function hours_left(status)
+    local d = battery_dir
+    local now = read_number(d .. "/charge_now")
+    local full, rate
+    if now then
+        full = read_number(d .. "/charge_full")
+        rate = read_number(d .. "/current_avg") or read_number(d .. "/current_now")
+    else
+        now = read_number(d .. "/energy_now")
+        full = read_number(d .. "/energy_full")
+        rate = read_number(d .. "/power_avg") or read_number(d .. "/power_now")
+    end
+    if not now or not rate then return nil end
+    -- Some report the rate negative while discharging.
+    rate = math.abs(rate)
+    if rate == 0 then return nil end
+    if status == "Discharging" then return now / rate end
+    if status == "Charging" and full then return math.max(0, full - now) / rate end
+    return nil
+end
+
+local function refresh_battery()
+    if not battery_dir then return end
+    local capacity = read_line(battery_dir .. "/capacity")
+    if not capacity then
+        battery_s, battery_w = "", 0
+        return
+    end
+    -- "BAT0 40% - discharging, 1h 23m left", the status as sysfs words it: Charging,
+    -- Discharging, Full, Not charging or Unknown.
+    local status = read_line(battery_dir .. "/status")
+    battery_s = battery_name .. " " .. capacity .. "%"
+    if status and status ~= "" then
+        battery_s = battery_s .. " - " .. string.lower(status)
+    end
+    -- ", 1h 23m left" or ", 0h 40m to full".
+    local hours = hours_left(status)
+    if hours then
+        local minutes = math.floor(hours * 60 + 0.5)
+        local tail = status == "Charging" and " to full" or " left"
+        battery_s = string.format("%s, %dh %02dm%s", battery_s, math.floor(minutes / 60),
+            minutes % 60, tail)
+    end
+    battery_w = text.width(battery_s)
+end
+
 -- The tab's size in pixels.
 local function size()
     local t = notch.tune
-    return date_w + t.gap + time_w + t.pad_x * 2, text.size + t.pad_y * 2
+    local w = date_w + t.gap + time_w + t.pad_x * 2
+    if battery_s ~= "" then w = w + t.gap + battery_w end
+    return w, text.size + t.pad_y * 2
 end
 
 local function refresh_clock()
@@ -110,6 +199,7 @@ function notch.frame(f)
     screen_w = f.sw
     refresh_clock()
     if pointed(f) then
+        if open == 0 then refresh_battery() end
         away = 0
     else
         away = away + f.dt
@@ -142,6 +232,9 @@ function notch.draw()
     local ty = y + t.pad_y
     text.draw(date_s, x + t.pad_x, ty, t.fg)
     text.draw(time_s, x + t.pad_x + date_w + t.gap, ty, t.fg)
+    if battery_s ~= "" then
+        text.draw(battery_s, x + t.pad_x + date_w + t.gap + time_w + t.gap, ty, t.fg)
+    end
 end
 
 return notch
