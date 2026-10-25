@@ -169,6 +169,7 @@ local desktop = require("desktop")
 local banner = require("banner")
 local screen = require("screen")
 local backlight = require("backlight")
+local notch = require("notch")
 
 yk.config = require("config")
 
@@ -460,12 +461,14 @@ function yk.frame(f)
     desktop.frame(f)
     screen.frame(f)
     backlight.frame(f)
+    notch.frame(f)
     view.finish()
 end
 
 function yk.draw()
     overlays.draw()
     layouts.draw()
+    notch.draw()
 end
 
 function yk.draw_error(msg, sw, sh)
