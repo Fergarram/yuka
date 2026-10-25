@@ -18,13 +18,13 @@ local text = {}
 
 text.tune = {
     -- The font file. A monospace face keeps the numbers in the overlays from jittering as
-    -- they change. The same directory has the other weights: IBMPlexMono-Text.ttf is a touch
-    -- heavier than Regular and holds up better light on dark, -Medium heavier still.
-    path = "/usr/share/fonts/truetype/ibm-plex/IBMPlexMono-Regular.ttf",
+    -- they change. The same directory has the other weights: JetBrainsMono-Medium.ttf holds up
+    -- better light on dark, -Light is thinner.
+    path = "/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf",
 
     -- The size of every line of text, in pixels. 14 reads comfortably at arm's length on a
     -- laptop panel; 12 is dense, 16 and up starts to feel like a heading.
-    size = 14,
+    size = 16,
 }
 
 --
