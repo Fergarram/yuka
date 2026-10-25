@@ -25,7 +25,7 @@ looks.tune = {
     -- set to follow the system, live. "system" only reads that setting as the scripts load,
     -- falling back to theme_default when it states no preference, and leaves it to whoever
     -- else sets it. looks.set_theme switches while running, and publishes too.
-    theme = "dark",
+    theme = "light",
     theme_default = "light",
 
     -- What each theme paints, 0xRRGGBBAA: behind the canvas, and the floor's dots. On the dark
