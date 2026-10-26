@@ -112,7 +112,7 @@ pub enum Cmd {
     // Set a uniform on every window a slot draws: one to four floats.
     ShaderUniform { slot: u8, name: String, values: [f32; 4], count: u8 },
     // Which slot draws a window, and four numbers for it (windowParams).
-    WindowShader { id: u64, slot: u8, params: [f32; 4] },
+    WindowShader { id: u64, slot: u8, params: [f32; 4], margin: f32 },
     // Whether clients draw their own shadows; off tells every window it is tiled.
     ClientShadows(bool),
     // Whether clients draw their own titlebars; off tells every window the compositor
@@ -705,9 +705,9 @@ fn register(lua: &Lua, yk: &Table) -> mlua::Result<()> {
         },
     )?)?;
     yk.set("window_shader", lua.create_function(
-        |lua, (id, slot, a, b, c, d): (u64, u8, Option<f32>, Option<f32>, Option<f32>, Option<f32>)| {
+        |lua, (id, slot, a, b, c, d, margin): (u64, u8, Option<f32>, Option<f32>, Option<f32>, Option<f32>, Option<f32>)| {
             let params = [a.unwrap_or(0.0), b.unwrap_or(0.0), c.unwrap_or(0.0), d.unwrap_or(0.0)];
-            push(lua, Cmd::WindowShader { id, slot, params });
+            push(lua, Cmd::WindowShader { id, slot, params, margin: margin.unwrap_or(0.0) });
             Ok(())
         },
     )?)?;

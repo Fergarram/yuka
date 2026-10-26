@@ -36,8 +36,9 @@
 --   yk.shader(slot, vs, fs)       load a window shader into a slot (0 is the built-in one)
 --   yk.shader_uniform(slot, name, a [, b, c, d])
 --                                 set a uniform on everything a slot draws
---   yk.window_shader(id, slot [, p1, p2, p3, p4])
---                                 which slot draws a window, and its windowParams
+--   yk.window_shader(id, slot [, p1, p2, p3, p4 [, margin]])
+--                                 which slot draws a window, its windowParams, and how far
+--                                 past the window its quad reaches, in canvas units
 --   yk.set_cursor(name)           the cursor over the canvas, by theme name
 --   yk.want_inspect(), yk.want_pad()
 --                                 gather engine data for yk.surfaces() / yk.pad() this frame

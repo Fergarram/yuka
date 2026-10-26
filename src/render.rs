@@ -119,9 +119,12 @@ pub struct Windows {
     // its rounded corners live. See draw_windows.
     pub shadow: Vec<bool>,
     // Which shader slot draws this window (0 is the built-in one), and four numbers of the
-    // scripts' own for it, handed to the shader as windowParams.
+    // scripts' own for it, handed to the shader as windowParams. margin is how far past the
+    // window the quad is drawn on every side, in canvas units, so the shader has room to draw
+    // outside it (an outline around a maximized window). Children always draw without one.
     pub shader: Vec<u8>,
     pub params: Vec<[f32; 4]>,
+    pub margin: Vec<f32>,
     pub maximized: Vec<bool>,
     // Whether the window is fullscreen rather than maximized. Both are held the same way (the
     // pin and the rectangle to give back below); this only says which the client was told.
@@ -222,6 +225,7 @@ pub fn windows_new() -> Windows {
         shadow: Vec::new(),
         shader: Vec::new(),
         params: Vec::new(),
+        margin: Vec::new(),
         maximized: Vec::new(),
         fullscreen: Vec::new(),
         hidden: Vec::new(),
@@ -621,6 +625,7 @@ pub fn prune_dead(windows: &mut Windows, closed: &mut Vec<u64>) {
         windows.shadow.remove(i);
         windows.shader.remove(i);
         windows.params.remove(i);
+        windows.margin.remove(i);
         windows.maximized.remove(i);
         windows.fullscreen.remove(i);
         windows.hidden.remove(i);
@@ -840,11 +845,13 @@ pub fn hold_maximized(windows: &mut Windows) {
 // whether it is stretched to the size a resize is asking for.
 // Any animation of these is the scripts' too; this only stores what they arrived at. Popups and
 // subsurfaces take their parent's look when they are placed (sync_children).
-// Which shader draws a window and the four numbers handed to it (yk.window_shader).
-pub fn set_shader(windows: &mut Windows, surface: &WlSurface, slot: u8, params: [f32; 4]) {
+// Which shader draws a window, the four numbers handed to it, and the margin drawn around it
+// (yk.window_shader).
+pub fn set_shader(windows: &mut Windows, surface: &WlSurface, slot: u8, params: [f32; 4], margin: f32) {
     if let Some(i) = index_of(windows, surface) {
         windows.shader[i] = slot;
         windows.params[i] = params;
+        windows.margin[i] = margin.max(0.0);
     }
 }
 
@@ -1135,6 +1142,7 @@ pub fn sync_children(windows: &mut Windows, ime: Option<(WlSurface, WlSurface, f
         windows.shadow[j] = windows.shadow[parent];
         windows.shader[j] = windows.shader[parent];
         windows.params[j] = windows.params[parent];
+        windows.margin[j] = 0.0;
         windows.hidden[j] = windows.hidden[parent];
         windows.placed[j] = true;
     }
@@ -1203,6 +1211,7 @@ pub fn sync_children(windows: &mut Windows, ime: Option<(WlSurface, WlSurface, f
         windows.shadow[j] = windows.shadow[parent];
         windows.shader[j] = windows.shader[parent];
         windows.params[j] = windows.params[parent];
+        windows.margin[j] = 0.0;
         windows.hidden[j] = windows.hidden[parent];
         windows.placed[j] = true;
     }
@@ -1228,6 +1237,7 @@ pub fn sync_children(windows: &mut Windows, ime: Option<(WlSurface, WlSurface, f
     windows.shadow[j] = false;
     windows.shader[j] = 0;
     windows.params[j] = [0.0; 4];
+    windows.margin[j] = 0.0;
     windows.hidden[j] = windows.hidden[i];
     windows.placed[j] = true;
 }
@@ -1323,6 +1333,7 @@ fn store_entry(
             windows.shadow.push(true);
             windows.shader.push(0);
             windows.params.push([0.0; 4]);
+            windows.margin.push(0.0);
             windows.maximized.push(false);
             windows.fullscreen.push(false);
             windows.hidden.push(false);
@@ -1632,6 +1643,7 @@ pub fn destroy_owned(windows: &mut Windows) {
     windows.shadow.clear();
     windows.shader.clear();
     windows.params.clear();
+    windows.margin.clear();
     windows.maximized.clear();
     windows.max_x.clear();
     windows.max_y.clear();
@@ -1662,8 +1674,9 @@ pub fn destroy_owned(windows: &mut Windows) {
 //   vec4 windowRect                        the window itself inside that: left, top, width,
 //                                          height, in canvas units from the drawn top-left.
 //                                          The drawn quad is bigger when a client pads its
-//                                          buffer (shadows), and frag_uv * windowSize is the
-//                                          point in the drawn quad.
+//                                          buffer (shadows) or the scripts ask for a margin,
+//                                          and frag_uv * windowSize is the point in the drawn
+//                                          quad. Past the texture's edge frag_uv leaves 0..1.
 //   float time                             seconds since yuka started
 //
 // plus any the scripts set on the slot with yk.shader_uniform.
@@ -1889,6 +1902,18 @@ pub fn draw_windows(windows: &Windows, cam3d: ray::Camera3D, shaders: &Shaders, 
                 (windows.geo_y[i] + h) / th,
             )
         };
+        // Grown by the margin on every side, texture coordinates running on past the edges at
+        // the same rate, so the shader sees the window where it was and room around it. What it
+        // samples out there is not the window's; the shader decides what to draw instead.
+        let m = windows.margin[i];
+        let (x, y, w, h, u0, v0, u1, v1) = if m > 0.0 {
+            let du = (u1 - u0) / w * m;
+            let dv = (v1 - v0) / h * m;
+            (x - m, y - m, w + m * 2.0, h + m * 2.0, u0 - du, v0 - dv, u1 + du, v1 + dv)
+        } else {
+            (x, y, w, h, u0, v0, u1, v1)
+        };
+        let rect = [rect[0] + m, rect[1] + m, rect[2], rect[3]];
         // Quad on a plane parallel to the canvas, raised by z. Top-left origin.
         let corners = [
             (Vector3 { x, y, z }, u0, v0),

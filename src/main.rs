@@ -1960,9 +1960,9 @@ fn main() {
                 lua::Cmd::ShaderUniform { slot, name, values, count } => {
                     render::set_shader_uniform(&mut shaders, slot as usize, &name, &values[..count as usize]);
                 }
-                lua::Cmd::WindowShader { id, slot, params } => {
+                lua::Cmd::WindowShader { id, slot, params, margin } => {
                     if let Some(surf) = render::surface_by_id(&windows, id) {
-                        render::set_shader(&mut windows, &surf, slot, params);
+                        render::set_shader(&mut windows, &surf, slot, params, margin);
                     }
                 }
                 lua::Cmd::Cursor(name) => canvas_cursor = name,

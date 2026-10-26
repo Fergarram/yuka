@@ -10,7 +10,10 @@ precision mediump float;
 // outline stays the same number of pixels on screen.
 //
 // windowParams: x corner radius in canvas units, y outline width in screen pixels, zw the
-// window's own size. Popups and subsurfaces are drawn with their parent's shader and numbers,
+// window's own size. A positive width lies over the window's edge; a negative one lies just
+// outside it, in the margin the scripts give the quad, so a window that fills the screen keeps
+// its outline off screen until the view zooms out. With a negative width, nothing else in the
+// margin is drawn. Popups and subsurfaces are drawn with their parent's shader and numbers,
 // so only a surface the size of the window itself is rounded: the rest draw as they are.
 //
 // The window is windowRect inside the drawn quad, which is bigger when the client pads its
@@ -57,15 +60,21 @@ void main() {
     vec2 point = frag_uv * windowSize - windowRect.xy;
     bool whole_window = all(lessThan(abs(rect_size - own_size), vec2(1.0)));
     bool in_rect = all(greaterThanEqual(point, vec2(0.0))) && all(lessThanEqual(point, rect_size));
-    if (whole_window && in_rect) {
-        float radius = min(windowParams.x, min(rect_size.x, rect_size.y) * 0.5);
-        float pixel = 1.0 / max(screenScale, 0.0001);
+    bool outer = windowParams.y < 0.0;
+    float radius = min(windowParams.x, min(rect_size.x, rect_size.y) * 0.5);
+    float pixel = 1.0 / max(screenScale, 0.0001);
+    if (whole_window && outer && !in_rect) {
+        // Out here the texture is not the window's: only the outline, ramped at its outer edge.
+        float edge = rounded_box(point, rect_size, radius);
+        float cover = clamp(0.5 - (edge + windowParams.y * pixel) / pixel, 0.0, 1.0);
+        color = vec4(outlineColor.rgb, outlineColor.a * cover);
+    } else if (whole_window && in_rect) {
         float edge = rounded_box(point, rect_size, radius);
 
         // A pixel wide ramp at the edge keeps the curve smooth.
         float inside = clamp(0.5 - edge / pixel, 0.0, 1.0);
         float band = clamp(0.5 + (edge + windowParams.y * pixel) / pixel, 0.0, 1.0);
-        if (windowParams.y > 0.0) {
+        if (!outer && windowParams.y > 0.0) {
             // The outline lies over the window's own pixels, so it shows on any background
             // and over a client's transparent edges alike.
             float cover = band * outlineColor.a;

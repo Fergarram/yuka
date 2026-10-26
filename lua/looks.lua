@@ -39,10 +39,13 @@ looks.settings = {
     -- shaders/rounded.frag through slot 3; false for neither. Maximized and fullscreen windows
     -- stay square. The outline's colour comes from the theme.
     --
-    --   radius      corner radius in canvas units, so it zooms with the window: 24 is soft,
-    --               8 barely rounded, 0 square
-    --   outline_px  outline width on screen, the same at any zoom: 1 is a hairline, 0 none
-    corners = { radius = 18, outline_px = 1 },
+    --   radius             corner radius in canvas units, so it zooms with the window: 24 is
+    --                      soft, 8 barely rounded, 0 square
+    --   outline_px         outline width on screen, the same at any zoom: 1 is a hairline, 0 none
+    --   outline_maximized  whether maximized and fullscreen windows are outlined too. Theirs
+    --                      lies just outside the window rather than over its edge, so one that
+    --                      fills the screen shows none, and it appears as the view zooms out
+    corners = { radius = 18, outline_px = 1, outline_maximized = true },
 
     -- Whether windows draw their own drop shadows. false tells every window it is tiled, the one
     -- hint toolkits act on: GTK, libadwaita, Qt and Chromium then draw no shadow, square their
@@ -184,17 +187,25 @@ end
 -- The slot that rounds corners and draws the outline (settings.corners).
 local CORNER_SLOT = 3
 
--- Which shader slot draws a window and the four numbers handed to it (windowParams). Slot 0 and
--- nothing by default; this is the place to decide per window.
+-- Which shader slot draws a window, the four numbers handed to it (windowParams), and how far
+-- past the window its quad reaches, in canvas units. Slot 0 and nothing by default; this is
+-- the place to decide per window.
 function looks.window_shader(frame, i)
     if settings.unfocused_desaturate > 0 and frame.win_id[i] ~= frame.focused then
-        return 1, settings.unfocused_desaturate
+        return 1, settings.unfocused_desaturate, 0, 0, 0, 0
     end
-    if settings.corners and not frame.win_max[i] and not frame.win_full[i] then
-        return CORNER_SLOT, settings.corners.radius, settings.corners.outline_px,
-            frame.win_w[i], frame.win_h[i]
+    local corners = settings.corners
+    if not corners then return 0, 0, 0, 0, 0, 0 end
+    if not frame.win_max[i] and not frame.win_full[i] then
+        return CORNER_SLOT, corners.radius, corners.outline_px, frame.win_w[i], frame.win_h[i], 0
     end
-    return 0, 0
+    if corners.outline_maximized and corners.outline_px > 0 then
+        -- A negative width puts the outline outside, in a margin a pixel wider than it for the
+        -- shader's soft edge, measured at the zoom the corner shader is told.
+        local margin = (corners.outline_px + 1) / view.cam.zoom
+        return CORNER_SLOT, 0, -corners.outline_px, frame.win_w[i], frame.win_h[i], margin
+    end
+    return 0, 0, 0, 0, 0, 0
 end
 
 -- Load every shader in the table into its slot. Run as the scripts load, so a reload
@@ -427,8 +438,8 @@ function looks.frame(frame)
         end
 
         yk.window_look(id, alpha[id], z[id], looks.shadow(frame, i), stretched(frame, i, id))
-        local slot, param1, param2, param3, param4 = looks.window_shader(frame, i)
-        yk.window_shader(id, slot, param1, param2, param3, param4)
+        local slot, param1, param2, param3, param4, margin = looks.window_shader(frame, i)
+        yk.window_shader(id, slot, param1, param2, param3, param4, margin)
     end
 
     -- Forget windows that have gone.
