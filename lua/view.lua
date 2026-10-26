@@ -169,6 +169,13 @@ function view.travelling()
     return journey ~= nil
 end
 
+-- Where the view is headed: the end of the trip it is on, or where it is when it is still or
+-- only changing scale.
+function view.heading()
+    if journey and journey.to_x then return journey.to_x, journey.to_y end
+    return cam.cx, cam.cy
+end
+
 -- Set off for a canvas point, arriving at a scale. swipe picks the swipe spring.
 function view.go_to(zoom, target_x, target_y, swipe)
     journey = {

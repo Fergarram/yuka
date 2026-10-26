@@ -5,6 +5,7 @@
 -- swiped or tapped; this decides what happens because of it.
 --
 
+local keys = require("keys")
 local view = require("view")
 local windows = require("windows")
 
@@ -42,6 +43,12 @@ gestures.tune = {
     --                    Around 3 times swipe_follow_px is a soft band, 1.5 times a tight one
     swipe_follow_px = 140.0,
     swipe_reach_px = 420.0,
+
+    -- Super+Alt with the arrows is the swipe from the keyboard, the arrows saying which way the
+    -- view goes: up and right together is 45 degrees. Arrows pressed within key_chord_ms of the
+    -- first count as one chord, since two fingers never land on the same millisecond. 40 needs
+    -- a deliberate pair, 120 forgives a sloppy one but answers a single arrow that much later.
+    key_chord_ms = 70,
 }
 
 local tune = gestures.tune
@@ -53,6 +60,11 @@ local tune = gestures.tune
 -- A swipe being made: where the view was when the fingers landed. Everything the gesture does
 -- is measured from here, so the slide cannot bias the search for where it goes.
 local preview = nil
+
+-- A keyboard swipe being gathered: when its first arrow went down (nil when none is), and
+-- which arrows have been held since. done once it went, until every arrow is let go.
+local chord = { start_ms = nil, left = false, right = false, up = false, down = false,
+    done = false }
 
 -- The last left press on a window under Super, and the last middle press, for double clicks.
 local last_left_ms, last_left_id = -100000, nil
@@ -107,6 +119,36 @@ local function swipe(frame)
         view.go_to(cam.zoom, preview.cx, preview.cy, true)
         preview = nil
     end
+end
+
+-- Super+Alt and the arrows. The arrows held during the chord make the direction, and it goes
+-- from where the view is heading rather than where it is, so a second press while the first
+-- is still travelling carries on from the window it was going to.
+local function key_swipe(frame)
+    local held = frame.super and frame.alt
+    local left = held and yk.key_down(keys.left)
+    local right = held and yk.key_down(keys.right)
+    local up = held and yk.key_down(keys.up)
+    local down = held and yk.key_down(keys.down)
+    if not (left or right or up or down) then
+        chord.start_ms, chord.done = nil, false
+        chord.left, chord.right, chord.up, chord.down = false, false, false, false
+        return
+    end
+    if chord.done then return end
+    chord.start_ms = chord.start_ms or frame.time_ms
+    chord.left, chord.right = chord.left or left, chord.right or right
+    chord.up, chord.down = chord.up or up, chord.down or down
+    if frame.time_ms - chord.start_ms < tune.key_chord_ms then return end
+
+    chord.done = true
+    local dx = (chord.right and 1 or 0) - (chord.left and 1 or 0)
+    local dy = (chord.down and 1 or 0) - (chord.up and 1 or 0)
+    if dx == 0 and dy == 0 then return end
+    local length = math.sqrt(dx * dx + dy * dy)
+    local origin_x, origin_y = view.heading()
+    local i = windows.nearest_in_direction(frame, origin_x, origin_y, dx / length, dy / length)
+    if i then windows.go_to(frame, i, true) end
 end
 
 -- Three fingers tapped twice. One gesture with three answers:
@@ -173,6 +215,7 @@ end
 -- Returns whether the left press was taken, so nothing after this starts a drag from it.
 function gestures.frame(frame)
     swipe(frame)
+    key_swipe(frame)
     local eaten = double_click(frame)
     tap(frame)
     return eaten

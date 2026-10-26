@@ -315,6 +315,9 @@ end)
 -- under work that only wanted the keyboard back.
 bind("super+escape", function() yk.release_all() end)
 
+-- Super+Alt with the arrows swipes to the next window that way, like three fingers. It is read
+-- from held keys so arrows pressed together make a diagonal (gestures.lua, key_swipe).
+
 -- Held keys, read every frame rather than on the press.
 --
 -- Super with plus or minus zooms around the middle of the screen, since the keyboard has
