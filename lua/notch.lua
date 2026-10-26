@@ -85,11 +85,11 @@ local battery_s, battery_w = "", 0
 
 -- The first line of a file, or nil when it cannot be read.
 local function read_line(path)
-    local fh = io.open(path, "r")
-    if not fh then return nil end
-    local s = fh:read("*l")
-    fh:close()
-    return s
+    local file = io.open(path, "r")
+    if not file then return nil end
+    local line = file:read("*l")
+    file:close()
+    return line
 end
 
 -- The battery's sysfs directory and its name there, found once as the scripts load, nil
@@ -105,8 +105,8 @@ end
 
 -- A number from a sysfs file, nil when it cannot be read.
 local function read_number(path)
-    local s = read_line(path)
-    return s and tonumber(s)
+    local line = read_line(path)
+    return line and tonumber(line)
 end
 
 -- Hours left at the rate the battery is going, to empty or to full by its status, nil when it
@@ -114,16 +114,16 @@ end
 -- microamps, or energy in microwatt hours and power in microwatts; the ratio is hours either
 -- way. The averaged current is steadier than the instant one where the battery has it.
 local function hours_left(status)
-    local d = battery_dir
-    local now = read_number(d .. "/charge_now")
+    local dir = battery_dir
+    local now = read_number(dir .. "/charge_now")
     local full, rate
     if now then
-        full = read_number(d .. "/charge_full")
-        rate = read_number(d .. "/current_avg") or read_number(d .. "/current_now")
+        full = read_number(dir .. "/charge_full")
+        rate = read_number(dir .. "/current_avg") or read_number(dir .. "/current_now")
     else
-        now = read_number(d .. "/energy_now")
-        full = read_number(d .. "/energy_full")
-        rate = read_number(d .. "/power_avg") or read_number(d .. "/power_now")
+        now = read_number(dir .. "/energy_now")
+        full = read_number(dir .. "/energy_full")
+        rate = read_number(dir .. "/power_avg") or read_number(dir .. "/power_now")
     end
     if not now or not rate then return nil end
     -- Some report the rate negative while discharging.
@@ -161,10 +161,10 @@ end
 
 -- The tab's size in pixels.
 local function size()
-    local t = notch.tune
-    local w = date_w + t.gap + time_w + t.pad_x * 2
-    if battery_s ~= "" then w = w + t.gap + battery_w end
-    return w, text.size + t.pad_y * 2
+    local tune = notch.tune
+    local w = date_w + tune.gap + time_w + tune.pad_x * 2
+    if battery_s ~= "" then w = w + tune.gap + battery_w end
+    return w, text.size + tune.pad_y * 2
 end
 
 local function refresh_clock()
@@ -178,36 +178,36 @@ local function refresh_clock()
 end
 
 -- Whether the pointer is on the trigger strip, or on the tab while it is out.
-local function pointed(f)
-    if f.x == nil then return false end
-    local t = notch.tune
-    local mid = f.sw * 0.5
-    if f.y < t.trigger_h and math.abs(f.x - mid) <= t.trigger_w * 0.5 then
+local function pointed(frame)
+    if frame.x == nil then return false end
+    local tune = notch.tune
+    local mid = frame.sw * 0.5
+    if frame.y < tune.trigger_h and math.abs(frame.x - mid) <= tune.trigger_w * 0.5 then
         return true
     end
     if open == 0 then return false end
     local w, h = size()
-    return f.y < h * open and math.abs(f.x - mid) <= w * 0.5
+    return frame.y < h * open and math.abs(frame.x - mid) <= w * 0.5
 end
 
 --
 -- Frame
 --
 
-function notch.frame(f)
-    local t = notch.tune
-    screen_w = f.sw
+function notch.frame(frame)
+    local tune = notch.tune
+    screen_w = frame.sw
     refresh_clock()
-    if pointed(f) then
+    if pointed(frame) then
         if open == 0 then refresh_battery() end
         away = 0
     else
-        away = away + f.dt
+        away = away + frame.dt
     end
-    if away < t.linger_secs then
-        open = math.min(1, open + f.dt / t.open_secs)
+    if away < tune.linger_secs then
+        open = math.min(1, open + frame.dt / tune.open_secs)
     else
-        open = math.max(0, open - f.dt / t.close_secs)
+        open = math.max(0, open - frame.dt / tune.close_secs)
     end
 end
 
@@ -217,23 +217,24 @@ end
 
 function notch.draw()
     if open == 0 then return end
-    local t = notch.tune
+    local tune = notch.tune
     local w, h = size()
     -- Eased out, so it arrives softly and leaves the same way backwards.
-    local e = 1 - (1 - open) ^ 3
+    local eased = 1 - (1 - open) ^ 3
     local x = math.floor((screen_w - w) * 0.5)
-    local y = math.floor(-h * (1 - e))
-    local r = t.radius
+    local y = math.floor(-h * (1 - eased))
+    local radius = tune.radius
     -- Square at the top, where it meets the edge, and round at the bottom.
-    yk.draw_rect(x, y, w, h - r, t.bg)
-    yk.draw_rect(x + r, y + h - r, w - r * 2, r, t.bg)
-    yk.draw_circle(x + r, y + h - r, r, t.bg)
-    yk.draw_circle(x + w - r, y + h - r, r, t.bg)
-    local ty = y + t.pad_y
-    text.draw(date_s, x + t.pad_x, ty, t.fg)
-    text.draw(time_s, x + t.pad_x + date_w + t.gap, ty, t.fg)
+    yk.draw_rect(x, y, w, h - radius, tune.bg)
+    yk.draw_rect(x + radius, y + h - radius, w - radius * 2, radius, tune.bg)
+    yk.draw_circle(x + radius, y + h - radius, radius, tune.bg)
+    yk.draw_circle(x + w - radius, y + h - radius, radius, tune.bg)
+    local text_y = y + tune.pad_y
+    text.draw(date_s, x + tune.pad_x, text_y, tune.fg)
+    text.draw(time_s, x + tune.pad_x + date_w + tune.gap, text_y, tune.fg)
     if battery_s ~= "" then
-        text.draw(battery_s, x + t.pad_x + date_w + t.gap + time_w + t.gap, ty, t.fg)
+        text.draw(battery_s, x + tune.pad_x + date_w + tune.gap + time_w + tune.gap, text_y,
+            tune.fg)
     end
 end
 

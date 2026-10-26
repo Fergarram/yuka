@@ -109,10 +109,10 @@ local function clamp(z)
     return z
 end
 
-function view.begin(f)
-    cam.cx, cam.cy, cam.zoom = f.cx, f.cy, f.zoom
-    cam.sw, cam.sh = f.sw, f.sh
-    cam.min, cam.max, cam.default = f.zoom_min, f.zoom_max, f.zoom_default
+function view.begin(frame)
+    cam.cx, cam.cy, cam.zoom = frame.cx, frame.cy, frame.zoom
+    cam.sw, cam.sh = frame.sw, frame.sh
+    cam.min, cam.max, cam.default = frame.zoom_min, frame.zoom_max, frame.zoom_default
     dirty = false
 end
 
@@ -122,17 +122,18 @@ function view.finish()
     end
 end
 
-function view.set(cx, cy, zoom)
-    cam.cx, cam.cy, cam.zoom = cx, cy, clamp(zoom)
+function view.set(center_x, center_y, zoom)
+    cam.cx, cam.cy, cam.zoom = center_x, center_y, clamp(zoom)
     dirty = true
 end
 
--- Scale by a factor, keeping the canvas point under the screen point (sx, sy) fixed there.
-function view.zoom_at(factor, sx, sy)
-    local ox, oy = sx - cam.sw * 0.5, sy - cam.sh * 0.5
-    local px, py = cam.cx + ox / cam.zoom, cam.cy + oy / cam.zoom
+-- Scale by a factor, keeping the canvas point under the screen point (screen_x, screen_y)
+-- fixed there.
+function view.zoom_at(factor, screen_x, screen_y)
+    local offset_x, offset_y = screen_x - cam.sw * 0.5, screen_y - cam.sh * 0.5
+    local canvas_x, canvas_y = cam.cx + offset_x / cam.zoom, cam.cy + offset_y / cam.zoom
     cam.zoom = clamp(cam.zoom * factor)
-    cam.cx, cam.cy = px - ox / cam.zoom, py - oy / cam.zoom
+    cam.cx, cam.cy = canvas_x - offset_x / cam.zoom, canvas_y - offset_y / cam.zoom
     dirty = true
 end
 
@@ -144,19 +145,20 @@ function view.pan(dx, dy)
 end
 
 -- Back to the default zoom, around a screen point or the middle of the screen.
-function view.reset(sx, sy)
-    view.zoom_at(cam.default / cam.zoom, sx or cam.sw * 0.5, sy or cam.sh * 0.5)
+function view.reset(screen_x, screen_y)
+    view.zoom_at(cam.default / cam.zoom, screen_x or cam.sw * 0.5, screen_y or cam.sh * 0.5)
 end
 
 -- The canvas point under a screen point.
-function view.to_canvas(sx, sy)
-    return cam.cx + (sx - cam.sw * 0.5) / cam.zoom, cam.cy + (sy - cam.sh * 0.5) / cam.zoom
+function view.to_canvas(screen_x, screen_y)
+    return cam.cx + (screen_x - cam.sw * 0.5) / cam.zoom,
+        cam.cy + (screen_y - cam.sh * 0.5) / cam.zoom
 end
 
 -- The visible canvas rectangle: left, top, right, bottom.
 function view.rect()
-    local hw, hh = cam.sw * 0.5 / cam.zoom, cam.sh * 0.5 / cam.zoom
-    return cam.cx - hw, cam.cy - hh, cam.cx + hw, cam.cy + hh
+    local half_w, half_h = cam.sw * 0.5 / cam.zoom, cam.sh * 0.5 / cam.zoom
+    return cam.cx - half_w, cam.cy - half_h, cam.cx + half_w, cam.cy + half_h
 end
 
 function view.stop()
@@ -168,23 +170,23 @@ function view.travelling()
 end
 
 -- Set off for a canvas point, arriving at a scale. swipe picks the swipe spring.
-function view.go_to(zoom, tx, ty, swipe)
+function view.go_to(zoom, target_x, target_y, swipe)
     journey = {
         from_zoom = cam.zoom, target = zoom,
-        to_x = tx, to_y = ty,
+        to_x = target_x, to_y = target_y,
         -- How far the centre was from its destination, in screen pixels. Screen rather than
         -- canvas, because what you watch is the canvas distance times the zoom and the zoom
         -- is moving: eased in canvas units the view barely moves at first and then slides.
-        off_x = (tx - cam.cx) * cam.zoom, off_y = (ty - cam.cy) * cam.zoom,
+        off_x = (target_x - cam.cx) * cam.zoom, off_y = (target_y - cam.cy) * cam.zoom,
         p = 0, v = 0, swipe = swipe,
     }
 end
 
 -- Change scale around a screen point, staying where the view is pointed.
-function view.turn_to(zoom, ax, ay, swipe)
+function view.turn_to(zoom, anchor_x, anchor_y, swipe)
     journey = {
         from_zoom = cam.zoom, target = zoom,
-        ax = ax, ay = ay,
+        ax = anchor_x, ay = anchor_y,
         p = 0, v = 0, swipe = swipe,
     }
 end
@@ -206,61 +208,61 @@ function view.fit(w, h, maximized)
     if maximized then
         zoom = math.min(cam.sw / w, cam.sh / h)
     else
-        local pw = math.max(cam.sw - tune.fit_padding_px * 2, 1)
-        local ph = math.max(cam.sh - tune.fit_padding_px * 2, 1)
-        zoom = math.min(cam.default, math.min(pw / w, ph / h))
+        local room_w = math.max(cam.sw - tune.fit_padding_px * 2, 1)
+        local room_h = math.max(cam.sh - tune.fit_padding_px * 2, 1)
+        zoom = math.min(cam.default, math.min(room_w / w, room_h / h))
     end
     return clamp(zoom)
 end
 
 -- The detent, then the spring. Called once a frame after everything that might start or stop
 -- a journey. pinching and swiping are the fingers owning the zoom, which keeps the detent out.
-function view.step(f, pinching, swiping)
+function view.step(frame, pinching, swiping)
     local sits_where_placed = placed and math.abs(cam.zoom - placed) < 0.001
     if tune.zoom_detent > 0 and not journey and not pinching and not swiping
         and not sits_where_placed then
         local off = cam.zoom - cam.default
         if off ~= 0 and math.abs(off) <= tune.zoom_detent then
-            view.turn_to(cam.default, f.x or 0, f.y or 0, false)
+            view.turn_to(cam.default, frame.x or 0, frame.y or 0, false)
         end
     end
 
-    local j = journey
-    if not j then return end
+    local trip = journey
+    if not trip then return end
 
     -- dt is capped, because a frame that took a long time is a stall rather than a slow moment,
     -- and integrating one whole would fling the spring somewhere absurd.
-    local dt = math.min(f.dt, 0.05)
-    local hz = j.swipe and tune.swipe_spring_hz or tune.spring_hz
-    local damping = j.swipe and tune.swipe_spring_damping or tune.spring_damping
-    local w = 2 * math.pi * hz
-    j.v = j.v + (w * w * (1 - j.p) - 2 * damping * w * j.v) * dt
-    j.p = j.p + j.v * dt
+    local dt = math.min(frame.dt, 0.05)
+    local spring_hz = trip.swipe and tune.swipe_spring_hz or tune.spring_hz
+    local damping = trip.swipe and tune.swipe_spring_damping or tune.spring_damping
+    local omega = 2 * math.pi * spring_hz
+    trip.v = trip.v + (omega * omega * (1 - trip.p) - 2 * damping * omega * trip.v) * dt
+    trip.p = trip.p + trip.v * dt
 
     -- At rest at its destination, not merely passing through it: an underdamped spring
     -- crosses the target several times on the way to stopping.
-    local landed = math.abs(j.p - 1) < 0.001 and math.abs(j.v) < 0.01
+    local landed = math.abs(trip.p - 1) < 0.001 and math.abs(trip.v) < 0.01
     -- Geometric, so halfway is the geometric mean: scale is not perceived linearly.
-    local want = j.target
-    if j.from_zoom > 0 and j.target > 0 then
-        want = clamp(j.from_zoom * (j.target / j.from_zoom) ^ j.p)
+    local want = trip.target
+    if trip.from_zoom > 0 and trip.target > 0 then
+        want = clamp(trip.from_zoom * (trip.target / trip.from_zoom) ^ trip.p)
     end
 
-    if j.to_x then
+    if trip.to_x then
         -- The screen offset it started with shrinks by the same progress, and the centre is
         -- whatever puts that offset on screen at this scale, so the window closes on the middle
         -- of the view at a steady rate rather than sliding into place after the zoom.
         local zoom = clamp(want)
-        local left = 1 - j.p
-        view.set(j.to_x - j.off_x * left / zoom, j.to_y - j.off_y * left / zoom, zoom)
+        local left = 1 - trip.p
+        view.set(trip.to_x - trip.off_x * left / zoom, trip.to_y - trip.off_y * left / zoom, zoom)
         if landed then
-            view.set(j.to_x, j.to_y, j.target)
+            view.set(trip.to_x, trip.to_y, trip.target)
             journey = nil
         end
     else
-        view.zoom_at(want / cam.zoom, j.ax, j.ay)
+        view.zoom_at(want / cam.zoom, trip.ax, trip.ay)
         if landed then
-            view.zoom_at(j.target / cam.zoom, j.ax, j.ay)
+            view.zoom_at(trip.target / cam.zoom, trip.ax, trip.ay)
             journey = nil
         end
     end

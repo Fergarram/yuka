@@ -87,17 +87,18 @@
 --   yk.fullscreen(id, x, y, w, h), yk.unfullscreen(id)
 --                                 the same, telling the client it is fullscreen
 --   yk.resize_window(id, w, h)    ask a window to be this size, canvas units; on a window just
---                                 created (f.created) it is the size it first draws at
+--                                 created (frame.created) it is the size it first draws at
 --   yk.hide(id [, on])            take a window out of drawing and hit testing, children
 --                                 included, or bring it back with on = false
 --
--- yk.draw_error(msg, sw, sh), when defined, draws the error banner every frame the scripts
--- have an error, after yk.draw (banner.lua). One that fails, or none, gets the engine's own.
+-- yk.draw_error(msg, screen_w, screen_h), when defined, draws the error banner every frame
+-- the scripts have an error, after yk.draw (banner.lua). One that fails, or none, gets the
+-- engine's own.
 --
 -- Nothing reaches clients unless yk.route_scroll and yk.route_input say so, every frame.
 --   yk.key_down(code)             whether a key is held right now
 --
--- The frame snapshot (f):
+-- The frame snapshot (frame):
 --
 --   key_count, key_code[i], key_press[i]   key edges this frame, evdev codes
 --   super, ctrl, alt, shift                modifiers held
@@ -220,18 +221,18 @@ local binds = {}
 
 local MOD_ORDER = { "super", "ctrl", "alt", "shift" }
 
-local function mods_of(f)
-    local m = ""
-    if f.super then m = m .. "super+" end
-    if f.ctrl then m = m .. "ctrl+" end
-    if f.alt then m = m .. "alt+" end
-    if f.shift then m = m .. "shift+" end
-    return m
+local function mods_of(frame)
+    local mods = ""
+    if frame.super then mods = mods .. "super+" end
+    if frame.ctrl then mods = mods .. "ctrl+" end
+    if frame.alt then mods = mods .. "alt+" end
+    if frame.shift then mods = mods .. "shift+" end
+    return mods
 end
 
--- bind("super+w", fn). fn is called with the frame on the press of the last key while
--- exactly those modifiers are held.
-local function bind(chord, fn)
+-- bind("super+w", action). action is called with the frame on the press of the last key
+-- while exactly those modifiers are held.
+local function bind(chord, action)
     local want = {}
     local key = nil
     for part in string.gmatch(chord, "[^+]+") do
@@ -245,22 +246,22 @@ local function bind(chord, fn)
     if not code then
         error("bind: no key in '" .. chord .. "'", 2)
     end
-    local m = ""
+    local mods = ""
     for i = 1, #MOD_ORDER do
-        if want[MOD_ORDER[i]] then m = m .. MOD_ORDER[i] .. "+" end
+        if want[MOD_ORDER[i]] then mods = mods .. MOD_ORDER[i] .. "+" end
     end
-    binds[m] = binds[m] or {}
-    binds[m][code] = fn
+    binds[mods] = binds[mods] or {}
+    binds[mods][code] = action
 end
 
-local function dispatch_keys(f)
-    if f.key_count == 0 then return end
-    local by_code = binds[mods_of(f)]
+local function dispatch_keys(frame)
+    if frame.key_count == 0 then return end
+    local by_code = binds[mods_of(frame)]
     if not by_code then return end
-    for i = 1, f.key_count do
-        if f.key_press[i] then
-            local fn = by_code[f.key_code[i]]
-            if fn then fn(f) end
+    for i = 1, frame.key_count do
+        if frame.key_press[i] then
+            local action = by_code[frame.key_code[i]]
+            if action then action(frame) end
         end
     end
 end
@@ -285,15 +286,15 @@ bind("super+brightnessdown", function() screen.step_night(1) end)
 bind("super+brightnessup", function() screen.step_night(-1) end)
 
 -- Next keyboard layout, from layouts.tune.list.
-bind("super+space", function(f) layouts.next(f) end)
+bind("super+space", function(frame) layouts.next(frame) end)
 
 -- The JIS Mac keys beside the space bar pick a layout outright, as on macOS: 英数 for Latin,
 -- かな for Japanese. Which ones is layouts.tune.eisu and kana.
-bind("eisu", function(f) layouts.select(f, layouts.tune.eisu) end)
-bind("kana", function(f) layouts.select(f, layouts.tune.kana) end)
+bind("eisu", function(frame) layouts.select(frame, layouts.tune.eisu) end)
+bind("kana", function(frame) layouts.select(frame, layouts.tune.kana) end)
 
 -- Asks the focused window to close, the way every desktop's close chord does.
-bind("super+w", function(f) yk.close(f.focused) end)
+bind("super+w", function(frame) yk.close(frame.focused) end)
 
 -- A new terminal.
 bind("super+shift+t", function() yk.spawn("ghostty") end)
@@ -313,16 +314,16 @@ bind("super+escape", function() yk.release_all() end)
 --
 -- Super with plus or minus zooms around the middle of the screen, since the keyboard has
 -- no cursor to anchor to. Exponential, so a step feels the same at any scale.
-local function held_keys(f)
-    screen.held(f)
-    backlight.held(f)
-    if not f.super then return end
+local function held_keys(frame)
+    screen.held(frame)
+    backlight.held(frame)
+    if not frame.super then return end
     local zoom_in = yk.key_down(keys.equal) or yk.key_down(keys.kpplus)
     local zoom_out = yk.key_down(keys.minus) or yk.key_down(keys.kpminus)
     if zoom_in == zoom_out then return end
-    local step = 1 + view.tune.zoom_rate_per_sec * f.dt
+    local step = 1 + view.tune.zoom_rate_per_sec * frame.dt
     view.stop()
-    view.zoom_at(zoom_in and step or 1 / step, f.sw * 0.5, f.sh * 0.5)
+    view.zoom_at(zoom_in and step or 1 / step, frame.sw * 0.5, frame.sh * 0.5)
 end
 
 --
@@ -344,12 +345,12 @@ local lock = { axes = "none", tx = 0, ty = 0 }
 
 -- Shape this frame's finger scroll for a client: the axis lock, the sensitivity, and the
 -- client's sign, which is Wayland's (positive down) flipped by invert_scroll like the wheel.
-local function scroll_for_client(f)
-    lock.tx = lock.tx * tune.scroll_travel_decay + math.abs(f.scroll_x)
-    lock.ty = lock.ty * tune.scroll_travel_decay + math.abs(f.scroll_y)
+local function scroll_for_client(frame)
+    lock.tx = lock.tx * tune.scroll_travel_decay + math.abs(frame.scroll_x)
+    lock.ty = lock.ty * tune.scroll_travel_decay + math.abs(frame.scroll_y)
     -- The first frame decides which axis holds it, a tie going to the vertical.
     if lock.axes == "none" then
-        lock.axes = math.abs(f.scroll_y) >= math.abs(f.scroll_x) and "v" or "h"
+        lock.axes = math.abs(frame.scroll_y) >= math.abs(frame.scroll_x) and "v" or "h"
     end
     -- The minor axis takes it back once it is doing real work, and once both are going they
     -- stay going: dropping an axis under a hand still moving is worse than carrying one.
@@ -358,14 +359,16 @@ local function scroll_for_client(f)
     if lock.axes == "h" and lock.ty >= lock.tx * frac then lock.axes = "both" end
     local sign = cfg.invert_scroll == false and -1 or 1
     local sens = tune.window_scroll_sens
-    local v = (lock.axes == "v" or lock.axes == "both") and f.scroll_y * sign * sens or 0
-    local h = (lock.axes == "h" or lock.axes == "both") and f.scroll_x * -sign * sens or 0
-    if v ~= 0 or h ~= 0 then
-        yk.scroll_client(h, v)
+    local vertical = (lock.axes == "v" or lock.axes == "both")
+        and frame.scroll_y * sign * sens or 0
+    local horizontal = (lock.axes == "h" or lock.axes == "both")
+        and frame.scroll_x * -sign * sens or 0
+    if vertical ~= 0 or horizontal ~= 0 then
+        yk.scroll_client(horizontal, vertical)
     end
 end
 
-local function route(f)
+local function route(frame)
     -- Super takes the wheel and the fingers for the canvas; otherwise they go to the window
     -- being worked in. Nothing focused means nothing is being worked in, so they go to the
     -- canvas, and you do not have to reach for Super to move the view you are looking at.
@@ -373,10 +376,10 @@ local function route(f)
     -- Focus rather than hover, because hover is where the cursor happens to be resting and
     -- focus is what you last chose. Click a window and two fingers scroll it; click the
     -- canvas and the same two fingers move the canvas.
-    local on_client = not f.super and f.focused ~= nil and f.hovered ~= nil
+    local on_client = not frame.super and frame.focused ~= nil and frame.hovered ~= nil
 
     -- The wheel is not latched: a notch is a whole event with nothing to be halfway through.
-    local scrolling = f.scroll_x ~= 0 or f.scroll_y ~= 0
+    local scrolling = frame.scroll_x ~= 0 or frame.scroll_y ~= 0
     if scrolling and not scroll.active then
         scroll.active = true
         scroll.to_client = on_client
@@ -385,52 +388,52 @@ local function route(f)
     -- they lifted. Not on the pad merely saying the scroll stopped leading, which is what a
     -- swipe does as it slows down before letting go, and not on the whole hand leaving
     -- either: a palm left on the pad must not keep a finished gesture alive.
-    if f.scroll_lifted or (f.pad_driving and f.fingers < 2) then
+    if frame.scroll_lifted or (frame.pad_driving and frame.fingers < 2) then
         scroll.active = false
     end
     local fingers_to_client = scroll.active and scroll.to_client
     yk.route_scroll(on_client, on_client)
     -- Values only for the side that owns the gesture: this frame can be both the last of a
     -- canvas pan and the frame the stop goes out on.
-    if fingers_to_client and (f.scroll_x ~= 0 or f.scroll_y ~= 0) then
-        scroll_for_client(f)
+    if fingers_to_client and (frame.scroll_x ~= 0 or frame.scroll_y ~= 0) then
+        scroll_for_client(frame)
     end
-    if f.scroll_ended then
+    if frame.scroll_ended then
         lock.axes, lock.tx, lock.ty = "none", 0, 0
     end
 
     -- Super is the compositor's modifier. While it is held the canvas claims the pointer, so
     -- zooming and dragging never make the thing under the cursor react, and nothing typed
     -- reaches a client, so Super+S does not also type an s into whatever has focus.
-    yk.route_input(not f.super, not f.super)
+    yk.route_input(not frame.super, not frame.super)
 
     -- What the canvas does with what is its own. The wheel and a pinch are zooms of their
     -- own, so whatever the view was travelling toward is not where it is going any more.
-    local x, y = f.x or 0, f.y or 0
-    if f.super or f.focused == nil then
-        if f.wheel ~= 0 then
-            local wheel = cfg.invert_scroll == false and f.wheel or -f.wheel
+    local x, y = frame.x or 0, frame.y or 0
+    if frame.super or frame.focused == nil then
+        if frame.wheel ~= 0 then
+            local wheel = cfg.invert_scroll == false and frame.wheel or -frame.wheel
             view.stop()
             view.zoom_at(1.15 ^ wheel, x, y)
         end
-        if f.hwheel ~= 0 then
-            local hwheel = cfg.invert_scroll == false and f.hwheel or -f.hwheel
+        if frame.hwheel ~= 0 then
+            local hwheel = cfg.invert_scroll == false and frame.hwheel or -frame.hwheel
             view.pan(hwheel * tune.hwheel_pan, 0)
         end
-        if f.pinch ~= 1 then
+        if frame.pinch ~= 1 then
             view.stop()
-            view.zoom_at(f.pinch, x, y)
+            view.zoom_at(frame.pinch, x, y)
         end
     end
     -- A gesture that began on the canvas finishes on the canvas, whatever the keyboard has
     -- done since. The view moves against the fingers so the canvas travels with them.
     if scroll.active and not scroll.to_client then
-        view.pan(-f.scroll_x, f.scroll_y)
+        view.pan(-frame.scroll_x, frame.scroll_y)
     end
     -- Super with the wheel held down drags the canvas; the grabbed point stays under the
     -- cursor because the view moves by exactly the cursor's delta.
-    if f.super and f.middle then
-        view.pan(-f.dx, -f.dy)
+    if frame.super and frame.middle then
+        view.pan(-frame.dx, -frame.dy)
     end
 end
 
@@ -441,27 +444,27 @@ end
 -- The order matters where two things touch the same state: window events first, so a window
 -- that just opened is focused before anything asks; input next; then the view settles, and
 -- only once it has does a focused window that left it let go.
-function yk.frame(f)
-    view.begin(f)
-    windows.events(f)
-    dispatch_keys(f)
-    held_keys(f)
-    route(f)
-    local eaten = gestures.frame(f)
-    grab.frame(f, eaten)
-    windows.click_focus(f, eaten)
-    windows.maximize_requests(f)
-    windows.fullscreen_requests(f)
-    windows.popup_bounds(f)
-    view.step(f, f.pinch ~= 1, f.swiping)
-    windows.drop_unseen_focus(f)
-    looks.frame(f)
-    overlays.frame(f)
-    layouts.frame(f)
-    desktop.frame(f)
-    screen.frame(f)
-    backlight.frame(f)
-    notch.frame(f)
+function yk.frame(frame)
+    view.begin(frame)
+    windows.events(frame)
+    dispatch_keys(frame)
+    held_keys(frame)
+    route(frame)
+    local eaten = gestures.frame(frame)
+    grab.frame(frame, eaten)
+    windows.click_focus(frame, eaten)
+    windows.maximize_requests(frame)
+    windows.fullscreen_requests(frame)
+    windows.popup_bounds(frame)
+    view.step(frame, frame.pinch ~= 1, frame.swiping)
+    windows.drop_unseen_focus(frame)
+    looks.frame(frame)
+    overlays.frame(frame)
+    layouts.frame(frame)
+    desktop.frame(frame)
+    screen.frame(frame)
+    backlight.frame(frame)
+    notch.frame(frame)
     view.finish()
 end
 
@@ -471,6 +474,6 @@ function yk.draw()
     notch.draw()
 end
 
-function yk.draw_error(msg, sw, sh)
-    banner.draw(msg, sw, sh)
+function yk.draw_error(msg, screen_w, screen_h)
+    banner.draw(msg, screen_w, screen_h)
 end

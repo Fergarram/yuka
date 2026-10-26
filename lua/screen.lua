@@ -90,24 +90,25 @@ local red, green, blue = {}, {}, {}
 -- The colour of a black body at this temperature, relative to 6500K so that 6500 is white.
 -- Tanner Helland's fit to the blackbody table, good from 1000K to 40000K.
 local function white_raw(kelvin)
-    local t = math.max(1000, math.min(40000, kelvin)) / 100
+    -- The fit works in hundreds of kelvin.
+    local hecto_kelvin = math.max(1000, math.min(40000, kelvin)) / 100
     local r, g, b
-    if t <= 66 then
+    if hecto_kelvin <= 66 then
         r = 255
-        g = 99.4708025861 * math.log(t) - 161.1195681661
+        g = 99.4708025861 * math.log(hecto_kelvin) - 161.1195681661
     else
-        r = 329.698727446 * (t - 60) ^ -0.1332047592
-        g = 288.1221695283 * (t - 60) ^ -0.0755148492
+        r = 329.698727446 * (hecto_kelvin - 60) ^ -0.1332047592
+        g = 288.1221695283 * (hecto_kelvin - 60) ^ -0.0755148492
     end
-    if t >= 66 then
+    if hecto_kelvin >= 66 then
         b = 255
-    elseif t <= 19 then
+    elseif hecto_kelvin <= 19 then
         b = 0
     else
-        b = 138.5177312231 * math.log(t - 10) - 305.0447927307
+        b = 138.5177312231 * math.log(hecto_kelvin - 10) - 305.0447927307
     end
-    local function c(v) return math.max(0, math.min(255, v)) / 255 end
-    return c(r), c(g), c(b)
+    local function unit(channel) return math.max(0, math.min(255, channel)) / 255 end
+    return unit(r), unit(g), unit(b)
 end
 
 local ref_r, ref_g, ref_b = white_raw(6500)
@@ -123,16 +124,16 @@ local function build(look)
         yk.gamma()
         return
     end
-    local wr, wg, wb = white(look.kelvin)
-    local n = screen.tune.points
-    for i = 1, n do
-        local x = (i - 1) / (n - 1)
-        local v = x ^ look.gamma
-        v = (v - 0.5) * look.contrast + 0.5
-        v = math.max(0, math.min(1, v)) * look.dim
-        red[i], green[i], blue[i] = v * wr, v * wg, v * wb
+    local white_r, white_g, white_b = white(look.kelvin)
+    local points = screen.tune.points
+    for i = 1, points do
+        local x = (i - 1) / (points - 1)
+        local level = x ^ look.gamma
+        level = (level - 0.5) * look.contrast + 0.5
+        level = math.max(0, math.min(1, level)) * look.dim
+        red[i], green[i], blue[i] = level * white_r, level * white_g, level * white_b
     end
-    for i = #red, n + 1, -1 do
+    for i = #red, points + 1, -1 do
         red[i], green[i], blue[i] = nil, nil, nil
     end
     yk.gamma(red, green, blue)
@@ -141,10 +142,10 @@ end
 local FIELDS = { "kelvin", "dim", "contrast", "gamma" }
 
 local function target()
-    local day, nite = screen.tune.day, screen.tune.night
+    local day_look, night_look = screen.tune.day, screen.tune.night
     for i = 1, #FIELDS do
         local name = FIELDS[i]
-        want[name] = day[name] + (nite[name] - day[name]) * night
+        want[name] = day_look[name] + (night_look[name] - day_look[name]) * night
     end
     return want
 end
@@ -156,23 +157,23 @@ local DONE = { kelvin = 5, dim = 0.002, contrast = 0.002, gamma = 0.002 }
 -- Rounded to a whole step so presses land on the same points every time.
 function screen.step_night(steps)
     local step = screen.tune.night_step
-    local v = math.floor((night + steps * step) / step + 0.5) * step
-    night = math.max(0, math.min(1, v))
+    local stepped = math.floor((night + steps * step) / step + 0.5) * step
+    night = math.max(0, math.min(1, stepped))
 end
 
 -- Every frame: Super with a brightness key held past hold_delay sweeps toward that end. The
 -- press itself is a step, bound in init.lua.
-function screen.held(f)
-    local down = f.super and yk.key_down(keys.brightnessdown)
-    local up = f.super and yk.key_down(keys.brightnessup)
-    if down == up then
+function screen.held(frame)
+    local down_held = frame.super and yk.key_down(keys.brightnessdown)
+    local up_held = frame.super and yk.key_down(keys.brightnessup)
+    if down_held == up_held then
         held_for = 0
         return
     end
-    held_for = held_for + f.dt
+    held_for = held_for + frame.dt
     if held_for < screen.tune.hold_delay then return end
-    local move = screen.tune.hold_speed * f.dt
-    night = math.max(0, math.min(1, night + (down and move or -move)))
+    local move = screen.tune.hold_speed * frame.dt
+    night = math.max(0, math.min(1, night + (down_held and move or -move)))
 end
 
 -- Where on the range we are, 0 for day and 1 for night.
@@ -181,7 +182,7 @@ function screen.night()
 end
 
 -- Every frame, but it only sends curves while something is changing.
-function screen.frame(f)
+function screen.frame(frame)
     local want = target()
     if now == nil then
         now = { kelvin = want.kelvin, dim = want.dim, contrast = want.contrast, gamma = want.gamma }
@@ -189,7 +190,7 @@ function screen.frame(f)
         return
     end
     local moving = false
-    local k = math.min(1, screen.tune.rate * f.dt)
+    local ease = math.min(1, screen.tune.rate * frame.dt)
     for i = 1, #FIELDS do
         local name = FIELDS[i]
         local gap = want[name] - now[name]
@@ -198,7 +199,7 @@ function screen.frame(f)
             if math.abs(gap) < DONE[name] then
                 now[name] = want[name]
             else
-                now[name] = now[name] + gap * k
+                now[name] = now[name] + gap * ease
             end
         end
     end
@@ -211,7 +212,7 @@ function screen.frame(f)
     for i = 1, #FIELDS do
         if now[FIELDS[i]] ~= want[FIELDS[i]] then settled = false end
     end
-    since_sent = since_sent + f.dt
+    since_sent = since_sent + frame.dt
     if settled or since_sent >= screen.tune.send_every then
         since_sent = 0
         build(now)

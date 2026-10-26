@@ -88,8 +88,8 @@ looks.tune = {
     -- surface, so shadows fall across whatever is behind them.
     --
     -- Only the drawing changes. Clicks, drags, placement and maximizing all still work on the
-    -- window itself, so the padding can never be clicked. Per window: looks.shadow(f, i) below
-    -- decides, and this is its answer for every window.
+    -- window itself, so the padding can never be clicked. Per window: looks.shadow(frame, i)
+    -- below decides, and this is its answer for every window.
     shadows = true,
 
     -- Whether a resize stretches the window locally while the client catches up.
@@ -173,8 +173,8 @@ end
 
 -- Which shader slot draws a window and the four numbers handed to it (windowParams). Slot 0 and
 -- nothing by default; this is the place to decide per window.
-function looks.window_shader(f, i)
-    if tune.unfocused_desaturate > 0 and f.win_id[i] ~= f.focused then
+function looks.window_shader(frame, i)
+    if tune.unfocused_desaturate > 0 and frame.win_id[i] ~= frame.focused then
         return 1, tune.unfocused_desaturate
     end
     return 0, 0
@@ -203,10 +203,10 @@ looks.theme = tune.theme_default
 local desktop = require("desktop")
 
 local function system_theme()
-    local p = io.popen("gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null")
-    if not p then return nil end
-    local out = p:read("*a") or ""
-    p:close()
+    local pipe = io.popen("gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null")
+    if not pipe then return nil end
+    local out = pipe:read("*a") or ""
+    pipe:close()
     if string.find(out, "prefer%-dark") then return "dark" end
     if string.find(out, "prefer%-light") then return "light" end
     return nil
@@ -226,10 +226,12 @@ function looks.set_theme(name, publish)
             name == "dark" and "'Adwaita-dark'" or "'Adwaita'")
     end
     if tune.floor then
-        local c = tune.themes[name].dots
+        local dot_color = tune.themes[name].dots
         yk.shader_uniform(FLOOR_SLOT, "dotColor",
-            math.floor(c / 0x1000000) % 256 / 255, math.floor(c / 0x10000) % 256 / 255,
-            math.floor(c / 0x100) % 256 / 255, c % 256 / 255)
+            math.floor(dot_color / 0x1000000) % 256 / 255,
+            math.floor(dot_color / 0x10000) % 256 / 255,
+            math.floor(dot_color / 0x100) % 256 / 255,
+            dot_color % 256 / 255)
     end
 end
 
@@ -250,15 +252,15 @@ end
 -- The cursor over the canvas this frame, sent only when it changes.
 local cursor_now = nil
 
-local function canvas_cursor(f)
+local function canvas_cursor(frame)
     local want = tune.cursor
-    if f.resizing then
-        local v = f.resize_ey < 0 and "n" or "s"
-        local h = f.resize_ex < 0 and "w" or "e"
-        want = tune.cursor_resize[v .. h] or want
-    elseif f.dragging then
+    if frame.resizing then
+        local vertical = frame.resize_ey < 0 and "n" or "s"
+        local horizontal = frame.resize_ex < 0 and "w" or "e"
+        want = tune.cursor_resize[vertical .. horizontal] or want
+    elseif frame.dragging then
         want = tune.cursor_held
-    elseif f.super and f.under then
+    elseif frame.super and frame.under then
         want = tune.cursor_grab
     end
     if want ~= cursor_now then
@@ -269,29 +271,32 @@ end
 
 -- Whether a window draws its shadow padding. One answer for all of them by default, but this
 -- is the place to decide per window, by size or by whatever else the snapshot says.
-function looks.shadow(f, i)
+function looks.shadow(frame, i)
     return tune.shadows
 end
 
-local function ease(from, to, rate, dt)
-    local t = math.min(rate * dt, 1)
-    local v = from + (to - from) * t
-    if math.abs(to - v) < 0.002 then return to end
-    return v
+local function ease(from, target, rate, dt)
+    local fraction = math.min(rate * dt, 1)
+    local value = from + (target - from) * fraction
+    if math.abs(target - value) < 0.002 then return target end
+    return value
 end
 
 -- Which windows cover the focused one, as a set of indices.
 local covering = {}
 
-local function find_covers(f)
+local function find_covers(frame)
     for k in pairs(covering) do covering[k] = nil end
-    local fi = windows.index(f, f.focused)
-    if not fi then return end
-    local bx, by, bw, bh = f.win_x[fi], f.win_y[fi], f.win_w[fi], f.win_h[fi]
-    for i = 1, f.win_count do
-        if i ~= fi and f.win_order[i] > f.win_order[fi] then
-            local ax, ay, aw, ah = f.win_x[i], f.win_y[i], f.win_w[i], f.win_h[i]
-            if ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah then
+    local focused_i = windows.index(frame, frame.focused)
+    if not focused_i then return end
+    local focused_x, focused_y = frame.win_x[focused_i], frame.win_y[focused_i]
+    local focused_w, focused_h = frame.win_w[focused_i], frame.win_h[focused_i]
+    for i = 1, frame.win_count do
+        if i ~= focused_i and frame.win_order[i] > frame.win_order[focused_i] then
+            local cover_x, cover_y = frame.win_x[i], frame.win_y[i]
+            local cover_w, cover_h = frame.win_w[i], frame.win_h[i]
+            if cover_x < focused_x + focused_w and focused_x < cover_x + cover_w
+                and cover_y < focused_y + focused_h and focused_y < cover_y + cover_h then
                 covering[i] = true
             end
         end
@@ -299,41 +304,42 @@ local function find_covers(f)
 end
 
 -- A drag that ended sets its window down. Only a lifted window has anything to come down from.
-local function notice_drop(f)
-    if was_dragging and was_dragging ~= f.dragging then
+local function notice_drop(frame)
+    if was_dragging and was_dragging ~= frame.dragging then
         local id = was_dragging
-        local i = windows.index(f, id)
+        local i = windows.index(frame, id)
         if i and z[id] and math.abs(z[id]) > 0.5 then
-            local cx, cy = windows.center(f, i)
-            settling[id] = { cx = cx, cy = cy, z0 = z[id] }
+            local center_x, center_y = windows.center(frame, i)
+            settling[id] = { cx = center_x, cy = center_y, z0 = z[id] }
         end
         if lifted == id then lifted = nil end
     end
-    if f.dragging then settling[f.dragging] = nil end
+    if frame.dragging then settling[frame.dragging] = nil end
     -- A pick up whose drag never started (the engine starts it after this frame's scripts, so
     -- one frame of grace) is forgotten rather than left to lift some later drag.
-    if lifted and f.dragging ~= lifted then
+    if lifted and frame.dragging ~= lifted then
         if lifted_fresh then lifted_fresh = false else lifted = nil end
     else
         lifted_fresh = false
     end
-    was_dragging = f.dragging
+    was_dragging = frame.dragging
 end
 
 -- Whether a window is shown at the size a resize asks for: while the resize runs, and after it
 -- until the client has committed something new, or the hold runs out, or something else takes
 -- the window (a drag, maximizing).
-local function stretched(f, i, id)
+local function stretched(frame, i, id)
     if not tune.resize_stretch then
         holding[id] = nil
         return false
     end
-    if f.stretching == id then return true end
-    local h = holding[id]
-    if not h then return false end
-    h.frames = h.frames + 1
-    local answered = f.win_gw[i] ~= h.gw or f.win_gh[i] ~= h.gh
-    if answered or h.frames >= tune.stretch_hold_frames or f.dragging == id or f.win_max[i] then
+    if frame.stretching == id then return true end
+    local hold = holding[id]
+    if not hold then return false end
+    hold.frames = hold.frames + 1
+    local answered = frame.win_gw[i] ~= hold.gw or frame.win_gh[i] ~= hold.gh
+    if answered or hold.frames >= tune.stretch_hold_frames
+        or frame.dragging == id or frame.win_max[i] then
         holding[id] = nil
         return false
     end
@@ -342,60 +348,60 @@ end
 
 -- A resize that ended starts its hold, measured from what the client had committed on its last
 -- frame.
-local function notice_resize_end(f)
-    if was_stretching and was_stretching ~= f.stretching then
+local function notice_resize_end(frame)
+    if was_stretching and was_stretching ~= frame.stretching then
         holding[was_stretching] = { gw = stretch_seen_w, gh = stretch_seen_h, frames = 0 }
     end
-    was_stretching = f.stretching
-    local i = windows.index(f, f.stretching)
+    was_stretching = frame.stretching
+    local i = windows.index(frame, frame.stretching)
     if i then
-        stretch_seen_w, stretch_seen_h = f.win_gw[i], f.win_gh[i]
+        stretch_seen_w, stretch_seen_h = frame.win_gw[i], frame.win_gh[i]
     end
 end
 
-function looks.frame(f)
+function looks.frame(frame)
     yk.set_background(tune.themes[looks.theme].background)
     yk.floor_shader(tune.floor and FLOOR_SLOT or nil)
-    notice_drop(f)
-    notice_resize_end(f)
-    find_covers(f)
-    canvas_cursor(f)
+    notice_drop(frame)
+    notice_resize_end(frame)
+    find_covers(frame)
+    canvas_cursor(frame)
 
-    local dt = math.min(f.dt, 0.05)
+    local dt = math.min(frame.dt, 0.05)
     local cam = view.cam
     -- The camera's distance from the plane scales with 1/zoom, so it follows the view as it
     -- stands after this frame's moves.
-    local dist = f.cam_dist * f.zoom / cam.zoom
+    local dist = frame.cam_dist * frame.zoom / cam.zoom
 
     for id in pairs(seen) do seen[id] = nil end
-    for i = 1, f.win_count do
-        local id = f.win_id[i]
+    for i = 1, frame.win_count do
+        local id = frame.win_id[i]
         seen[id] = true
 
-        local a_to = covering[i] and tune.cover_opacity or 1
-        alpha[id] = ease(alpha[id] or 1, a_to, tune.fade_rate, dt)
+        local target_alpha = covering[i] and tune.cover_opacity or 1
+        alpha[id] = ease(alpha[id] or 1, target_alpha, tune.fade_rate, dt)
 
-        z_to[id] = (lifted == id and f.dragging == id) and -tune.lift_height or 0
-        z[id] = ease(z[id] or f.win_z[i], z_to[id], tune.lift_rate, dt)
+        z_to[id] = (lifted == id and frame.dragging == id) and -tune.lift_height or 0
+        z[id] = ease(z[id] or frame.win_z[i], z_to[id], tune.lift_rate, dt)
 
         -- Lowering in place: reproject the release-time centre onto the plane at the current
         -- lift, around the camera, so the window comes straight down on screen.
-        local st = settling[id]
-        if st then
+        local settle = settling[id]
+        if settle then
             local keep = math.abs(z[id]) > 0.5
-            local zz = keep and z[id] or 0
-            local k = (zz + dist) / (st.z0 + dist)
-            local cx = cam.cx + (st.cx - cam.cx) * k
-            local cy = cam.cy + (st.cy - cam.cy) * k
-            local x, y = cx - f.win_w[i] * 0.5, cy - f.win_h[i] * 0.5
-            f.win_x[i], f.win_y[i] = x, y
+            local lift = keep and z[id] or 0
+            local scale = (lift + dist) / (settle.z0 + dist)
+            local center_x = cam.cx + (settle.cx - cam.cx) * scale
+            local center_y = cam.cy + (settle.cy - cam.cy) * scale
+            local x, y = center_x - frame.win_w[i] * 0.5, center_y - frame.win_h[i] * 0.5
+            frame.win_x[i], frame.win_y[i] = x, y
             yk.move_window(id, x, y)
-            if not keep or f.win_max[i] then settling[id] = nil end
+            if not keep or frame.win_max[i] then settling[id] = nil end
         end
 
-        yk.window_look(id, alpha[id], z[id], looks.shadow(f, i), stretched(f, i, id))
-        local slot, p1, p2, p3, p4 = looks.window_shader(f, i)
-        yk.window_shader(id, slot, p1, p2, p3, p4)
+        yk.window_look(id, alpha[id], z[id], looks.shadow(frame, i), stretched(frame, i, id))
+        local slot, param1, param2, param3, param4 = looks.window_shader(frame, i)
+        yk.window_shader(id, slot, param1, param2, param3, param4)
     end
 
     -- Forget windows that have gone.

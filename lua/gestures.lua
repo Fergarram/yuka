@@ -66,53 +66,53 @@ local last_middle_ms = -100000
 -- Functions
 --
 
-local function swipe_way(f)
+local function swipe_way(frame)
     if tune.swipe_natural then
-        return -f.swipe_dx, -f.swipe_dy
+        return -frame.swipe_dx, -frame.swipe_dy
     end
-    return f.swipe_dx, f.swipe_dy
+    return frame.swipe_dx, frame.swipe_dy
 end
 
 -- Three fingers. While they move the view slides that way, part of the distance, so the
 -- gesture is something you can feel and take back by lifting early. Lifting past the
 -- threshold goes to the nearest window that way, or back where you started if there is none.
-local function swipe(f)
+local function swipe(frame)
     local cam = view.cam
-    if f.swiping then
+    if frame.swiping then
         if not preview then
             preview = { cx = cam.cx, cy = cam.cy }
         end
-        local p = f.swipe_progress
+        local progress = frame.swipe_progress
         local base = tune.swipe_preview_frac
         local travel
-        if p <= 1 then
-            travel = base * p
+        if progress <= 1 then
+            travel = base * progress
         else
             local room = math.max(1 + tune.swipe_stretch_frac - base, 0.0001)
             local give = base / tune.swipe_resist
-            travel = base + room * (1 - 1 / (1 + (p - 1) * give / room))
+            travel = base + room * (1 - 1 / (1 + (progress - 1) * give / room))
         end
-        local dx, dy = swipe_way(f)
+        local dx, dy = swipe_way(frame)
         local slide = travel * tune.swipe_nudge_px / math.max(cam.zoom, 0.0001)
         view.stop()
         view.set(preview.cx + dx * slide, preview.cy + dy * slide, cam.zoom)
     end
 
-    if f.swipe_fired then
-        local ox = preview and preview.cx or cam.cx
-        local oy = preview and preview.cy or cam.cy
-        local dx, dy = swipe_way(f)
-        local i = windows.nearest_in_direction(f, ox, oy, dx, dy)
+    if frame.swipe_fired then
+        local origin_x = preview and preview.cx or cam.cx
+        local origin_y = preview and preview.cy or cam.cy
+        local dx, dy = swipe_way(frame)
+        local i = windows.nearest_in_direction(frame, origin_x, origin_y, dx, dy)
         if i then
-            windows.go_to(f, i, true)
+            windows.go_to(frame, i, true)
         else
-            view.go_to(cam.zoom, ox, oy, true)
+            view.go_to(cam.zoom, origin_x, origin_y, true)
         end
         preview = nil
     end
 
     -- The fingers left without going far enough: back to where the view was.
-    if not f.swiping and preview then
+    if not frame.swiping and preview then
         view.go_to(cam.zoom, preview.cx, preview.cy, true)
         preview = nil
     end
@@ -123,18 +123,18 @@ end
 -- Over a window you are not already in, it goes to that window. Otherwise it is about the
 -- view and lets go of every window: from inside a window it steps back a little, at 1:1 it
 -- steps out to the overview, and from anywhere else it comes home to 1:1 where you point.
-local function tap(f)
-    if not f.tap3 then return end
+local function tap(frame)
+    if not frame.tap3 then return end
     local cam = view.cam
-    local x, y = f.x or 0, f.y or 0
-    local i = f.under ~= f.focused and windows.index(f, f.under) or nil
+    local x, y = frame.x or 0, frame.y or 0
+    local i = frame.under ~= frame.focused and windows.index(frame, frame.under) or nil
     if i then
-        windows.go_to(f, i, false)
+        windows.go_to(frame, i, false)
         return
     end
     yk.release_all()
     local target
-    if f.focused and tune.tap_step_out < 1 then
+    if frame.focused and tune.tap_step_out < 1 then
         target = math.max(cam.zoom * tune.tap_step_out, tune.overview_zoom)
     elseif math.abs(cam.zoom - cam.default) < view.HOME then
         target = tune.overview_zoom
@@ -148,41 +148,42 @@ end
 -- Super with a double click on a window brings it to you. It eats the press, so the second
 -- click cannot also pick the window up and move it out from under the view on its way there.
 -- Returns whether it did.
-local function double_click(f)
+local function double_click(frame)
     local eaten = false
-    if f.pressed and f.super and not f.dragging and f.under then
-        if f.time_ms - last_left_ms <= f.double_click_ms and last_left_id == f.under then
+    if frame.pressed and frame.super and not frame.dragging and frame.under then
+        if frame.time_ms - last_left_ms <= frame.double_click_ms
+            and last_left_id == frame.under then
             last_left_ms, last_left_id = -100000, nil
-            local i = windows.index(f, f.under)
+            local i = windows.index(frame, frame.under)
             if i then
-                yk.front(f.under)
-                windows.go_to(f, i, false)
+                yk.front(frame.under)
+                windows.go_to(frame, i, false)
                 yk.eat_press()
                 eaten = true
             end
         else
-            last_left_ms, last_left_id = f.time_ms, f.under
+            last_left_ms, last_left_id = frame.time_ms, frame.under
         end
     end
 
     -- Super with a double middle click resets the zoom around the pointer.
-    if f.middle_pressed then
-        if f.super and f.time_ms - last_middle_ms <= f.double_click_ms then
+    if frame.middle_pressed then
+        if frame.super and frame.time_ms - last_middle_ms <= frame.double_click_ms then
             last_middle_ms = -100000
             view.stop()
-            view.reset(f.x, f.y)
+            view.reset(frame.x, frame.y)
         else
-            last_middle_ms = f.time_ms
+            last_middle_ms = frame.time_ms
         end
     end
     return eaten
 end
 
 -- Returns whether the left press was taken, so nothing after this starts a drag from it.
-function gestures.frame(f)
-    swipe(f)
-    local eaten = double_click(f)
-    tap(f)
+function gestures.frame(frame)
+    swipe(frame)
+    local eaten = double_click(frame)
+    tap(frame)
     return eaten
 end
 

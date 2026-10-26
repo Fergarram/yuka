@@ -84,17 +84,17 @@ end
 apply()
 
 -- Step to the next layout, wrapping around.
-function layouts.next(f)
-    if f.layout_count < 2 then return end
-    yk.set_layout(f.layout % f.layout_count + 1)
+function layouts.next(frame)
+    if frame.layout_count < 2 then return end
+    yk.set_layout(frame.layout % frame.layout_count + 1)
 end
 
 -- Make the layout list names the active one. Already active, or not in list, does nothing.
-function layouts.select(f, name)
+function layouts.select(frame, name)
     local list = layouts.tune.list
     for i = 1, #list do
         if list[i] == name then
-            if i ~= f.layout and i <= f.layout_count then yk.set_layout(i) end
+            if i ~= frame.layout and i <= frame.layout_count then yk.set_layout(i) end
             return
         end
     end
@@ -104,48 +104,48 @@ end
 -- Frame
 --
 
-function layouts.frame(f)
-    if f.frame == 0 and layouts.tune.input_method ~= "" then
+function layouts.frame(frame)
+    if frame.frame == 0 and layouts.tune.input_method ~= "" then
         yk.spawn(layouts.tune.input_method)
     end
-    screen_w, screen_h = f.sw, f.sh
-    age = age + f.dt
-    if last ~= nil and f.layout ~= last then
+    screen_w, screen_h = frame.sw, frame.sh
+    age = age + frame.dt
+    if last ~= nil and frame.layout ~= last then
         age = 0
         -- Ours by the name it was asked for, otherwise whatever xkb calls it.
-        local ours = layouts.tune.list[f.layout]
-        label = ours and string.upper(ours) or f.layout_names[f.layout] or "?"
-        detail = f.layout_names[f.layout] or ""
+        local ours = layouts.tune.list[frame.layout]
+        label = ours and string.upper(ours) or frame.layout_names[frame.layout] or "?"
+        detail = frame.layout_names[frame.layout] or ""
         if detail == label then detail = "" end
     end
-    last = f.layout
+    last = frame.layout
 end
 
 --
 -- Draw
 --
 
--- c with its alpha scaled by a, 0 to 1.
-local function fade(c, a)
-    local alpha = math.floor((c % 256) * a + 0.5)
-    return c - c % 256 + alpha
+-- color with its alpha scaled by a, 0 to 1.
+local function fade(color, a)
+    local alpha = math.floor((color % 256) * a + 0.5)
+    return color - color % 256 + alpha
 end
 
 function layouts.draw()
-    local t = layouts.tune
-    if age >= t.hold_secs + t.fade_secs then return end
+    local tune = layouts.tune
+    if age >= tune.hold_secs + tune.fade_secs then return end
     local a = 1
-    if age > t.hold_secs then
-        a = 1 - (age - t.hold_secs) / t.fade_secs
+    if age > tune.hold_secs then
+        a = 1 - (age - tune.hold_secs) / tune.fade_secs
     end
     local pad = text.size
     local w = text.width(label)
-    local dw = detail ~= "" and text.width(detail) or 0
+    local detail_w = detail ~= "" and text.width(detail) or 0
     local gap = detail ~= "" and pad or 0
-    local box_w = w + gap + dw + pad * 2
+    local box_w = w + gap + detail_w + pad * 2
     local box_h = text.size + pad * 2
     local x = math.floor((screen_w - box_w) * 0.5)
-    local y = screen_h - t.margin - box_h
+    local y = screen_h - tune.margin - box_h
     yk.draw_rect(x, y, box_w, box_h, fade(0x0c0c10d8, a))
     text.draw(label, x + pad, y + pad, fade(0xf0f0f4ff, a))
     if detail ~= "" then

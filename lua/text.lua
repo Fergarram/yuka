@@ -40,13 +40,13 @@ if not font then print("yuka: text: " .. err .. ", using the built-in font") end
 --
 
 -- Draw a line of text with its top left at x, y, colour 0xRRGGBBAA. Only inside yk.draw.
-function text.draw(s, x, y, c)
-    yk.draw_text(s, x, y, text.size, c, font)
+function text.draw(line, x, y, color)
+    yk.draw_text(line, x, y, text.size, color, font)
 end
 
 -- Width of a line of text, in pixels.
-function text.width(s)
-    return (yk.measure_text(s, text.size, font))
+function text.width(line)
+    return (yk.measure_text(line, text.size, font))
 end
 
 return text

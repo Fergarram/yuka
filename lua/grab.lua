@@ -49,29 +49,30 @@ local tune = grab.tune
 -- It comes back under your hand rather than where it used to be: the remembered size is kept,
 -- with the grabbed point held at the same place in the window it was grabbed at. Grab the
 -- middle of a full-view window and you are still holding the middle of the small one.
-local function unmaximize_under(f, i, sx, sy)
-    if not f.win_max[i] then return end
-    local x, y, w, h = f.win_x[i], f.win_y[i], f.win_w[i], f.win_h[i]
-    local lx, ty, rx, by = view.rect()
-    if x > lx or y > ty or x + w < rx or y + h < by then return end
-    local rw, rh = f.win_rw[i], f.win_rh[i]
-    local gx, gy = view.to_canvas(sx, sy)
-    local fx = w > 0 and (gx - x) / w or 0.5
-    local fy = h > 0 and (gy - y) / h or 0.5
-    local nx, ny = gx - fx * rw, gy - fy * rh
-    yk.unmaximize(f.win_id[i])
-    yk.move_window(f.win_id[i], nx, ny)
-    f.win_x[i], f.win_y[i], f.win_w[i], f.win_h[i], f.win_max[i] = nx, ny, rw, rh, false
+local function unmaximize_under(frame, i, screen_x, screen_y)
+    if not frame.win_max[i] then return end
+    local x, y, w, h = frame.win_x[i], frame.win_y[i], frame.win_w[i], frame.win_h[i]
+    local view_left, view_top, view_right, view_bottom = view.rect()
+    if x > view_left or y > view_top or x + w < view_right or y + h < view_bottom then return end
+    local restored_w, restored_h = frame.win_rw[i], frame.win_rh[i]
+    local grab_x, grab_y = view.to_canvas(screen_x, screen_y)
+    local frac_x = w > 0 and (grab_x - x) / w or 0.5
+    local frac_y = h > 0 and (grab_y - y) / h or 0.5
+    local new_x, new_y = grab_x - frac_x * restored_w, grab_y - frac_y * restored_h
+    yk.unmaximize(frame.win_id[i])
+    yk.move_window(frame.win_id[i], new_x, new_y)
+    frame.win_x[i], frame.win_y[i], frame.win_w[i], frame.win_h[i], frame.win_max[i] =
+        new_x, new_y, restored_w, restored_h, false
 end
 
 -- Which corner of a window a canvas point pulls on, per axis: 1 for the far edge (right,
 -- bottom), -1 for the near one. split_x and split_y are where each axis divides, as a fraction
 -- of the window. Measured from the window's edges rather than tested against its bounds, so it
 -- still answers once the cursor has left the window, which it does for most of a drag.
-local function corner_at(px, py, x, y, w, h, split_x, split_y)
-    local ex = px < x + w * split_x and -1 or 1
-    local ey = py < y + h * split_y and -1 or 1
-    return ex, ey
+local function corner_at(point_x, point_y, x, y, w, h, split_x, split_y)
+    local edge_x = point_x < x + w * split_x and -1 or 1
+    local edge_y = point_y < y + h * split_y and -1 or 1
+    return edge_x, edge_y
 end
 
 -- Where an axis divides for a drag holding a given side of it. The side being held keeps
@@ -84,54 +85,56 @@ local function corner_split(edge, hold)
 end
 
 -- eaten is a press something earlier this frame already took, such as a double click.
-function grab.frame(f, eaten)
-    if f.super and f.under and f.x then
-        local i = windows.index(f, f.under)
-        local px, py = view.to_canvas(f.x, f.y)
+function grab.frame(frame, eaten)
+    if frame.super and frame.under and frame.x then
+        local i = windows.index(frame, frame.under)
+        local pointer_x, pointer_y = view.to_canvas(frame.x, frame.y)
 
         -- The corner from the quadrant the press landed in: grab near the top left and the
         -- top left is what moves, the way every other desktop does it. Always a corner, never
         -- a single edge, so there is no middle region where a drag resizes nothing.
-        if i and f.right_pressed and not f.resizing then
-            local ex, ey = corner_at(px, py, f.win_x[i], f.win_y[i], f.win_w[i], f.win_h[i], 0.5, 0.5)
-            yk.begin_resize(f.under, ex, ey)
+        if i and frame.right_pressed and not frame.resizing then
+            local edge_x, edge_y = corner_at(pointer_x, pointer_y,
+                frame.win_x[i], frame.win_y[i], frame.win_w[i], frame.win_h[i], 0.5, 0.5)
+            yk.begin_resize(frame.under, edge_x, edge_y)
         end
 
         -- In the overview, picking a window up lifts it toward the camera (looks.lua), which is the canvas
         -- idiom for having it in your hand. At 1:1 it only comes to the front: a lift there is
         -- perspective applied to something already filling the screen, so it swims rather than
         -- rises, and it takes the window off the pixel grid while you are close enough to see.
-        if i and f.pressed and not eaten and not f.dragging then
-            unmaximize_under(f, i, f.x, f.y)
-            yk.begin_move(f.under)
-            if f.zoom < f.zoom_default then looks.pick_up(f.under) end
+        if i and frame.pressed and not eaten and not frame.dragging then
+            unmaximize_under(frame, i, frame.x, frame.y)
+            yk.begin_move(frame.under)
+            if frame.zoom < frame.zoom_default then looks.pick_up(frame.under) end
         end
     end
 
     -- A client asking to be moved by its titlebar. Neither lifted nor raised: the client asked
     -- to be moved, not picked up, and a drag from inside a window is the same kind of act as a
     -- click in one. It says where the window goes, not what is in front of what.
-    for k = 1, f.move_count do
-        local id = f.move_id[k]
-        local i = windows.index(f, id)
-        if i and not f.dragging then
-            unmaximize_under(f, i, f.move_x[k], f.move_y[k])
-            yk.accept_move(id, f.move_x[k], f.move_y[k])
+    for k = 1, frame.move_count do
+        local id = frame.move_id[k]
+        local i = windows.index(frame, id)
+        if i and not frame.dragging then
+            unmaximize_under(frame, i, frame.move_x[k], frame.move_y[k])
+            yk.accept_move(id, frame.move_x[k], frame.move_y[k])
         end
     end
 
     -- The corner a resize holds follows your hand: cross the boundary and the opposite corner
     -- takes over. Going back the way you came undoes it, so it reads as pushing the window's
     -- edges around rather than as a mode.
-    if f.resizing and f.x then
-        local i = windows.index(f, f.resizing)
+    if frame.resizing and frame.x then
+        local i = windows.index(frame, frame.resizing)
         if i then
-            local px, py = view.to_canvas(f.x, f.y)
-            local ex, ey = corner_at(px, py, f.win_x[i], f.win_y[i], f.win_w[i], f.win_h[i],
-                corner_split(f.resize_ex, tune.resize_corner_hold),
-                corner_split(f.resize_ey, tune.resize_corner_hold))
-            if ex ~= f.resize_ex or ey ~= f.resize_ey then
-                yk.resize_corner(ex, ey)
+            local pointer_x, pointer_y = view.to_canvas(frame.x, frame.y)
+            local edge_x, edge_y = corner_at(pointer_x, pointer_y,
+                frame.win_x[i], frame.win_y[i], frame.win_w[i], frame.win_h[i],
+                corner_split(frame.resize_ex, tune.resize_corner_hold),
+                corner_split(frame.resize_ey, tune.resize_corner_hold))
+            if edge_x ~= frame.resize_ex or edge_y ~= frame.resize_ey then
+                yk.resize_corner(edge_x, edge_y)
             end
         end
     end

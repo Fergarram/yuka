@@ -36,12 +36,12 @@ local screen_w, screen_h = 0, 0
 -- Frame
 --
 
-function overlays.frame(f)
-    last_dt_ms = f.dt * 1000
+function overlays.frame(frame)
+    last_dt_ms = frame.dt * 1000
     ring[slot] = last_dt_ms
     slot = slot % RING + 1
-    zoom = f.zoom
-    screen_w, screen_h = f.sw, f.sh
+    zoom = frame.zoom
+    screen_w, screen_h = frame.sw, frame.sh
     if overlays.labels then yk.want_inspect() end
     if overlays.pad then yk.want_pad() end
 end
@@ -55,16 +55,16 @@ end
 -- Coloured by the worst, against a 60Hz budget: green while every frame fits, amber when one
 -- missed, red when one missed badly.
 local function draw_fps()
-    local sum, worst, n = 0, 0, 0
+    local sum, worst, count = 0, 0, 0
     for i = 1, RING do
-        local v = ring[i]
-        if v > 0 then
-            sum = sum + v
-            if v > worst then worst = v end
-            n = n + 1
+        local frame_ms = ring[i]
+        if frame_ms > 0 then
+            sum = sum + frame_ms
+            if frame_ms > worst then worst = frame_ms end
+            count = count + 1
         end
     end
-    local avg = n > 0 and sum / n or 0
+    local avg = count > 0 and sum / count or 0
     local fps = avg > 0 and 1000 / avg or 0
     local colour = 0xfa785aff
     if worst <= 17 then colour = 0x82e68cff elseif worst <= 25 then colour = 0xf0d26eff end
@@ -83,27 +83,29 @@ end
 -- sampler is set, and the scale it is really drawn at. The scale is measured off the quad
 -- through the camera, so a lifted window reports what perspective adds.
 local function draw_labels()
-    local fg, bg = 0xf0e678ff, 0x000000aa
+    local foreground, background = 0xf0e678ff, 0x000000aa
     local PAD = 3
     local list = yk.surfaces()
-    for n = 1, #list do
-        local s = list[n]
-        local ax, ay = yk.to_screen(s.x, s.y + s.h, s.z)
-        local rx = yk.to_screen(s.x + s.w, s.y + s.h, s.z)
-        local scale = s.w > 0 and (rx - ax) / s.w or zoom
+    for i = 1, #list do
+        local surface = list[i]
+        local left_x, bottom_y = yk.to_screen(surface.x, surface.y + surface.h, surface.z)
+        local right_x = yk.to_screen(surface.x + surface.w, surface.y + surface.h, surface.z)
+        local scale = surface.w > 0 and (right_x - left_x) / surface.w or zoom
         local lines = {
-            string.format("%s %s tex%d %dx%d", s.kind, s.source, s.tex_id, s.tex_w, s.tex_h),
-            string.format("%s  scale %.2fx", s.sampling, scale),
+            string.format("%s %s tex%d %dx%d", surface.kind, surface.source, surface.tex_id,
+                surface.tex_w, surface.tex_h),
+            string.format("%s  scale %.2fx", surface.sampling, scale),
             string.format("canvas %.1f,%.1f  geo %.0f,%.0f %.0fx%.0f  z %.2f",
-                s.canvas_x, s.canvas_y, s.geo_x, s.geo_y, s.geo_w, s.geo_h, s.z),
+                surface.canvas_x, surface.canvas_y, surface.geo_x, surface.geo_y,
+                surface.geo_w, surface.geo_h, surface.z),
         }
         local widest = 0
         for k = 1, #lines do widest = math.max(widest, text.width(lines[k])) end
         local line_h = text.size + PAD
-        local top = ay + PAD
-        yk.draw_rect(ax - PAD, top - PAD, widest + PAD * 2, line_h * #lines + PAD, bg)
+        local top = bottom_y + PAD
+        yk.draw_rect(left_x - PAD, top - PAD, widest + PAD * 2, line_h * #lines + PAD, background)
         for k = 1, #lines do
-            text.draw(lines[k], ax, top + line_h * (k - 1), fg)
+            text.draw(lines[k], left_x, top + line_h * (k - 1), foreground)
         end
     end
 end
@@ -115,89 +117,94 @@ end
 -- Bottom right: the surface at its real aspect ratio, the button regions, a dot per finger
 -- with its contact ellipse, and what the gesture code currently thinks is happening. An
 -- instrument, not content, so screen space.
-local function draw_pad(sw, sh)
-    local p = yk.pad()
-    if not p then return end
+local function draw_pad(screen_width, screen_height)
+    local trackpad = yk.pad()
+    if not trackpad then return end
     local WIDTH, MARGIN = 330, 16
     local LINE = text.size + 4
-    local bg, frame, region = 0x0c0c10d2, 0x5a5f6eff, 0x3c4150ff
+    local background, border, region = 0x0c0c10d2, 0x5a5f6eff, 0x3c4150ff
     local live, hot, dim = 0xf0e678ff, 0xfa785aff, 0x969baaff
 
     local pad_w = WIDTH
-    local pad_h = p.aspect > 0.1 and math.floor(WIDTH / p.aspect) or WIDTH / 2
+    local pad_h = trackpad.aspect > 0.1 and math.floor(WIDTH / trackpad.aspect) or WIDTH / 2
     local lines = 5
     local panel_h = pad_h + LINE * lines + MARGIN
-    local x0 = sw - WIDTH - MARGIN
-    local y0 = sh - panel_h - MARGIN
-    yk.draw_rect(x0 - 8, y0 - 8, WIDTH + 16, panel_h + 16, bg)
+    local panel_x = screen_width - WIDTH - MARGIN
+    local panel_y = screen_height - panel_h - MARGIN
+    yk.draw_rect(panel_x - 8, panel_y - 8, WIDTH + 16, panel_h + 16, background)
 
-    local px, py = x0, y0 + LINE * lines
-    yk.draw_rect_lines(px, py, pad_w, pad_h, frame)
+    local pad_x, pad_y = panel_x, panel_y + LINE * lines
+    yk.draw_rect_lines(pad_x, pad_y, pad_w, pad_h, border)
 
     -- The resting zone: below this line a still finger is treated as parked.
-    if p.rest_zone > 0 then
-        local rest_y = py + math.floor(pad_h * (1 - p.rest_zone))
-        yk.draw_line(px, rest_y, px + pad_w, rest_y, 0x2d323eff)
+    if trackpad.rest_zone > 0 then
+        local rest_y = pad_y + math.floor(pad_h * (1 - trackpad.rest_zone))
+        yk.draw_line(pad_x, rest_y, pad_x + pad_w, rest_y, 0x2d323eff)
     end
 
     -- Button regions: the strip along the bottom, split in two.
-    if p.software_buttons then
-        local strip_y = py + math.floor(pad_h * (1 - p.strip))
-        local split_x = px + math.floor(pad_w * p.split)
-        yk.draw_line(px, strip_y, px + pad_w, strip_y, region)
-        yk.draw_line(split_x, strip_y, split_x, py + pad_h, region)
-        local label_y = py + pad_h - text.size - 4
-        text.draw("L", px + 6, label_y, p.left and live or region)
-        text.draw("R", split_x + 6, label_y, p.right and live or region)
+    if trackpad.software_buttons then
+        local strip_y = pad_y + math.floor(pad_h * (1 - trackpad.strip))
+        local split_x = pad_x + math.floor(pad_w * trackpad.split)
+        yk.draw_line(pad_x, strip_y, pad_x + pad_w, strip_y, region)
+        yk.draw_line(split_x, strip_y, split_x, pad_y + pad_h, region)
+        local label_y = pad_y + pad_h - text.size - 4
+        text.draw("L", pad_x + 6, label_y, trackpad.left and live or region)
+        text.draw("R", split_x + 6, label_y, trackpad.right and live or region)
     end
 
-    -- Fingers. Parked ones are dim, faint ones (too small to count) are in the frame colour,
+    -- Fingers. Parked ones are dim, faint ones (too small to count) are in the border colour,
     -- and of the rest the lowest is marked, since it is the one that would decide a click.
-    local fingers = p.fingers
+    local fingers = trackpad.fingers
     local lowest = nil
     for i = 1, #fingers do
-        local c = fingers[i]
-        if not c.resting and not c.faint and (not lowest or c.y > fingers[lowest].y) then
+        local finger = fingers[i]
+        if not finger.resting and not finger.faint
+            and (not lowest or finger.y > fingers[lowest].y) then
             lowest = i
         end
     end
     for i = 1, #fingers do
-        local c = fingers[i]
-        local cx, cy = px + math.floor(c.x * pad_w), py + math.floor(c.y * pad_h)
+        local finger = fingers[i]
+        local finger_x = pad_x + math.floor(finger.x * pad_w)
+        local finger_y = pad_y + math.floor(finger.y * pad_h)
         local colour = live
-        if c.faint then
-            colour = frame
-        elseif c.resting then
+        if finger.faint then
+            colour = border
+        elseif finger.resting then
             colour = dim
-        elseif p.software_buttons and lowest == i then
+        elseif trackpad.software_buttons and lowest == i then
             colour = hot
         end
         -- The contact ellipse: how much of the finger is touching. This hardware reports no
         -- per-finger pressure, so the footprint is the only force-like signal there is.
-        if p.has_size then
-            local ry = math.max(c.major * 0.5 * pad_h, 2.5)
-            local rx = math.max(c.minor * 0.5 * pad_h, 2.0)
-            yk.draw_ellipse_lines(cx, cy, rx, ry, colour)
+        if trackpad.has_size then
+            local radius_y = math.max(finger.major * 0.5 * pad_h, 2.5)
+            local radius_x = math.max(finger.minor * 0.5 * pad_h, 2.0)
+            yk.draw_ellipse_lines(finger_x, finger_y, radius_x, radius_y, colour)
         end
-        yk.draw_circle(cx, cy, 1.5, colour)
+        yk.draw_circle(finger_x, finger_y, 1.5, colour)
     end
 
-    local function armed(on) return on and "armed" or "idle" end
+    local function armed(is_armed) return is_armed and "armed" or "idle" end
     local sizes = ""
     for i = 1, math.min(#fingers, 3) do sizes = sizes .. " " .. fingers[i].raw_major end
     if #fingers == 0 then sizes = " -" end
     local lines = {
         string.format("trackpad  %d finger%s  %d counted  max %d",
-            p.count, p.count == 1 and "" or "s", p.active, p.contact_max),
-        string.format("gesture %s  pan %s  zoom %s", p.mode, armed(p.pan_armed), armed(p.zoom_armed)),
-        string.format("pan %+.1f,%+.1f  zoom %.3f  cursor %s", p.pan_x, p.pan_y, p.zoom, armed(p.ptr_armed)),
-        string.format("size%s  load %d/%d", sizes, p.load, p.load_max),
-        string.format("buttons %s%s%s", p.software_buttons and "regions" or "physical",
-            p.left and "  LEFT" or "", p.right and "  RIGHT" or ""),
+            trackpad.count, trackpad.count == 1 and "" or "s", trackpad.active,
+            trackpad.contact_max),
+        string.format("gesture %s  pan %s  zoom %s", trackpad.mode, armed(trackpad.pan_armed),
+            armed(trackpad.zoom_armed)),
+        string.format("pan %+.1f,%+.1f  zoom %.3f  cursor %s", trackpad.pan_x, trackpad.pan_y,
+            trackpad.zoom, armed(trackpad.ptr_armed)),
+        string.format("size%s  load %d/%d", sizes, trackpad.load, trackpad.load_max),
+        string.format("buttons %s%s%s", trackpad.software_buttons and "regions" or "physical",
+            trackpad.left and "  LEFT" or "", trackpad.right and "  RIGHT" or ""),
     }
-    for n = 1, #lines do
-        local colour = (n == 5 and (p.left or p.right)) and live or dim
-        text.draw(lines[n], x0, y0 + LINE * (n - 1), colour)
+    for i = 1, #lines do
+        local colour = (i == 5 and (trackpad.left or trackpad.right)) and live or dim
+        text.draw(lines[i], panel_x, panel_y + LINE * (i - 1), colour)
     end
 end
 

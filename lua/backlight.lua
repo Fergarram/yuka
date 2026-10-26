@@ -9,7 +9,7 @@
 --
 -- The level lives in the device, not here, so a reload picks up where it was, and a change
 -- made elsewhere (the firmware, brightnessctl) is followed once nothing here is moving it.
--- Nested, or on a machine without a backlight yuka can set, f.backlight is nil and none of
+-- Nested, or on a machine without a backlight yuka can set, frame.backlight is nil and none of
 -- this runs.
 --
 
@@ -69,8 +69,8 @@ local function to_level(fraction)
     return fraction ^ (1 / backlight.tune.curve)
 end
 
-local function clamp(v)
-    return math.max(backlight.tune.min, math.min(1, v))
+local function clamp(value)
+    return math.max(backlight.tune.min, math.min(1, value))
 end
 
 -- Move by this many taps: positive brighter, negative dimmer. Rounded to a whole step so taps
@@ -83,36 +83,36 @@ end
 
 -- Every frame: a brightness key held past hold_delay, with no modifier, sweeps toward its end.
 -- The press itself is a step, bound in init.lua.
-function backlight.held(f)
+function backlight.held(frame)
     if level == nil then return end
-    local plain = not (f.super or f.ctrl or f.alt or f.shift)
-    local down = plain and yk.key_down(keys.brightnessdown)
-    local up = plain and yk.key_down(keys.brightnessup)
-    if down == up then
+    local plain = not (frame.super or frame.ctrl or frame.alt or frame.shift)
+    local down_held = plain and yk.key_down(keys.brightnessdown)
+    local up_held = plain and yk.key_down(keys.brightnessup)
+    if down_held == up_held then
         held_for = 0
         return
     end
-    held_for = held_for + f.dt
+    held_for = held_for + frame.dt
     if held_for < backlight.tune.hold_delay then return end
-    local move = backlight.tune.hold_speed * f.dt
-    level = clamp(level + (up and move or -move))
+    local move = backlight.tune.hold_speed * frame.dt
+    level = clamp(level + (up_held and move or -move))
 end
 
-function backlight.frame(f)
-    if f.backlight == nil then return end
+function backlight.frame(frame)
+    if frame.backlight == nil then return end
     if level == nil then
-        level = to_level(f.backlight)
+        level = to_level(frame.backlight)
         shown = level
-        sent = f.backlight
+        sent = frame.backlight
         return
     end
     -- Settled, and the device is somewhere we did not put it: someone else moved it, so
     -- follow rather than fight.
-    local one_step = 1 / f.backlight_steps
-    if shown == level and held_for == 0 and math.abs(f.backlight - sent) > one_step then
-        level = to_level(f.backlight)
+    local one_step = 1 / frame.backlight_steps
+    if shown == level and held_for == 0 and math.abs(frame.backlight - sent) > one_step then
+        level = to_level(frame.backlight)
         shown = level
-        sent = f.backlight
+        sent = frame.backlight
         return
     end
     if shown == level then return end
@@ -120,7 +120,7 @@ function backlight.frame(f)
     if math.abs(gap) < 0.002 then
         shown = level
     else
-        shown = shown + gap * math.min(1, backlight.tune.rate * f.dt)
+        shown = shown + gap * math.min(1, backlight.tune.rate * frame.dt)
     end
     sent = shown ^ backlight.tune.curve
     yk.backlight(sent)

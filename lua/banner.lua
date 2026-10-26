@@ -39,20 +39,20 @@ banner.tune = {
 -- Draw
 --
 
-function banner.draw(msg, sw, sh)
-    local t = banner.tune
-    local line_h = text.size + t.leading
+function banner.draw(msg, screen_w, screen_h)
+    local tune = banner.tune
+    local line_h = text.size + tune.leading
     local count = 0
     for _ in msg:gmatch("[^\n]+") do
         count = count + 1
-        if count == t.max_lines then break end
+        if count == tune.max_lines then break end
     end
-    yk.draw_rect(0, 0, sw, count * line_h - t.leading + t.pad * 2, t.bg)
-    local n = 0
+    yk.draw_rect(0, 0, screen_w, count * line_h - tune.leading + tune.pad * 2, tune.bg)
+    local drawn = 0
     for line in msg:gmatch("[^\n]+") do
-        text.draw(line, t.pad, t.pad + n * line_h, t.fg)
-        n = n + 1
-        if n == t.max_lines then break end
+        text.draw(line, tune.pad, tune.pad + drawn * line_h, tune.fg)
+        drawn = drawn + 1
+        if drawn == tune.max_lines then break end
     end
 end
 

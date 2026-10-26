@@ -57,24 +57,24 @@ local function config_dir()
 end
 
 local function read(path)
-    local f = io.open(path, "r")
-    if not f then return nil end
-    local text = f:read("*a")
-    f:close()
+    local file = io.open(path, "r")
+    if not file then return nil end
+    local text = file:read("*a")
+    file:close()
     return text
 end
 
 local function write(path, text)
-    local f = io.open(path, "w")
-    if not f then return false end
-    f:write(text)
-    f:close()
+    local file = io.open(path, "w")
+    if not file then return false end
+    file:write(text)
+    file:close()
     return true
 end
 
 -- Quoted for the shell, whatever is inside.
-local function sh(s)
-    return "'" .. string.gsub(s, "'", "'\\''") .. "'"
+local function shell_quote(value)
+    return "'" .. string.gsub(value, "'", "'\\''") .. "'"
 end
 
 -- Copy a file from the repo into place, only when it differs. false when it could not.
@@ -87,7 +87,7 @@ local function install(source_path, dir, name)
     local target = dir .. "/" .. name
     if read(target) == source then return true end
     if write(target, source) then return true end
-    os.execute("mkdir -p " .. sh(dir))
+    os.execute("mkdir -p " .. shell_quote(dir))
     if write(target, source) then return true end
     print("yuka: desktop: cannot write " .. target)
     return false
@@ -109,8 +109,8 @@ end
 -- Set one gsetting, in the background. For values that change while running, like the color
 -- scheme; the ones in the tune table go together at startup.
 function desktop.gsettings_set(schema, key, value)
-    os.execute("gsettings set " .. sh(schema) .. " " .. sh(key) .. " " .. sh(value)
-        .. " >/dev/null 2>&1 &")
+    os.execute("gsettings set " .. shell_quote(schema) .. " " .. shell_quote(key) .. " "
+        .. shell_quote(value) .. " >/dev/null 2>&1 &")
 end
 
 local function apply_gsettings()
@@ -118,8 +118,9 @@ local function apply_gsettings()
     if #list == 0 then return end
     local cmd = {}
     for i = 1, #list do
-        local s = list[i]
-        cmd[i] = "gsettings set " .. sh(s[1]) .. " " .. sh(s[2]) .. " " .. sh(s[3])
+        local setting = list[i]
+        cmd[i] = "gsettings set " .. shell_quote(setting[1]) .. " " .. shell_quote(setting[2])
+            .. " " .. shell_quote(setting[3])
     end
     os.execute("(" .. table.concat(cmd, "; ") .. ") >/dev/null 2>&1 &")
 end
@@ -136,8 +137,8 @@ if tune.portals_conf then
     install("desktop/yuka-portals.conf", config_dir() .. "/xdg-desktop-portal", "yuka-portals.conf")
 end
 
-function desktop.frame(f)
-    if f.frame == 0 then
+function desktop.frame(frame)
+    if frame.frame == 0 then
         apply_gsettings()
     end
 end
