@@ -66,6 +66,18 @@ windows.tune = {
     --   "last"    the window you were in before it, if it is still on screen
     --   "under"   whatever is under the pointer
     focus_after_close = "none",
+
+    -- Where a three-finger swipe goes (gestures.lua). First the window the swipe's line runs
+    -- into, nearest first, whatever its size or wherever its middle is. Failing that, anything
+    -- ahead, nearest first, with a penalty for being off the line, so a crooked swipe still
+    -- finds what is clearly there. Only with nothing ahead at all does the view spring back.
+    --
+    --   swipe_graze_px  how far the line may pass beside a window and still run into it, in
+    --                   screen pixels, so grazing an edge counts. 0 is exact, 100 generous
+    --   swipe_off_axis  what each unit off the line costs against a unit along it, for windows
+    --                   the line misses. 1 weighs them evenly, 3 strongly prefers straight ahead
+    swipe_graze_px = 48,
+    swipe_off_axis = 2.0,
 }
 
 local tune = windows.tune
@@ -87,25 +99,59 @@ function windows.center(frame, i)
     return frame.win_x[i] + frame.win_w[i] * 0.5, frame.win_y[i] + frame.win_h[i] * 0.5
 end
 
--- The nearest window in a direction from a canvas point, or nil when there is nothing that way.
---
--- A cone rather than a half plane: a window at right angles to the swipe is not "that way",
--- however close it is. Within the cone the score is how far along the direction it lies plus a
--- penalty for how far off the line, so a window straight ahead beats a nearer one to the side.
-local SPREAD = 1.0
-local OFF_AXIS = 2.0
+-- How far along a line from (from_x, from_y) in the direction (dx, dy) it enters a rectangle
+-- grown by margin on every side, or nil when it misses it or starts inside it.
+local function line_enters(from_x, from_y, dx, dy, x, y, w, h, margin)
+    local enter, leave = -math.huge, math.huge
+    if math.abs(dx) < 1e-6 then
+        if from_x < x - margin or from_x > x + w + margin then return nil end
+    else
+        local near_t, far_t = (x - margin - from_x) / dx, (x + w + margin - from_x) / dx
+        if near_t > far_t then near_t, far_t = far_t, near_t end
+        enter, leave = math.max(enter, near_t), math.min(leave, far_t)
+    end
+    if math.abs(dy) < 1e-6 then
+        if from_y < y - margin or from_y > y + h + margin then return nil end
+    else
+        local near_t, far_t = (y - margin - from_y) / dy, (y + h + margin - from_y) / dy
+        if near_t > far_t then near_t, far_t = far_t, near_t end
+        enter, leave = math.max(enter, near_t), math.min(leave, far_t)
+    end
+    if enter > leave or enter <= 0 then return nil end
+    return enter
+end
 
+-- The window a swipe from a canvas point in the direction (dx, dy), a unit vector, goes to, or
+-- nil when there is nothing that way (tune.swipe_graze_px, tune.swipe_off_axis).
 function windows.nearest_in_direction(frame, from_x, from_y, dx, dy)
+    local margin = tune.swipe_graze_px / math.max(view.cam.zoom, 0.0001)
+
+    -- The window the line runs into first.
+    local hit, hit_distance = nil, nil
+    for i = 1, frame.win_count do
+        if not frame.win_hidden[i] then
+            local distance = line_enters(from_x, from_y, dx, dy,
+                frame.win_x[i], frame.win_y[i], frame.win_w[i], frame.win_h[i], margin)
+            if distance and (not hit_distance or distance < hit_distance) then
+                hit, hit_distance = i, distance
+            end
+        end
+    end
+    if hit then return hit end
+
+    -- Anything ahead, by its nearest point: along the line, plus a penalty for off it.
     local best, best_score = nil, nil
     for i = 1, frame.win_count do
-        local center_x, center_y = windows.center(frame, i)
-        local offset_x, offset_y = center_x - from_x, center_y - from_y
-        local along = offset_x * dx + offset_y * dy
-        -- Behind you, or where you already are.
-        if along > 1 then
-            local across = math.abs(offset_x * dy - offset_y * dx)
-            if across <= along * SPREAD then
-                local score = along + across * OFF_AXIS
+        if not frame.win_hidden[i] then
+            local x, y, w, h = frame.win_x[i], frame.win_y[i], frame.win_w[i], frame.win_h[i]
+            local near_x = math.min(math.max(from_x, x), x + w)
+            local near_y = math.min(math.max(from_y, y), y + h)
+            local offset_x, offset_y = near_x - from_x, near_y - from_y
+            local along = offset_x * dx + offset_y * dy
+            -- Behind you, or where you already are.
+            if along > 1 then
+                local across = math.abs(offset_x * dy - offset_y * dx)
+                local score = along + across * tune.swipe_off_axis
                 if not best_score or score < best_score then
                     best, best_score = i, score
                 end

@@ -1279,7 +1279,7 @@ fn update_gesture(tp: &mut Touchpad, cursor: Option<&mut Cursor>, set: &Settings
                 // reaches 1 exactly at the trigger. sanitize keeps the trigger beyond the dead
                 // zone, so this span is never zero or backwards.
                 if far > dead && threshold > dead {
-                    out.swipe_progress = ((far - dead) / (threshold - dead)).min(8.0);
+                    out.swipe_progress = ((far - dead) / (threshold - dead)).min(1000.0);
                     out.swipe_dir = (dx / far, dy / far);
                 }
             }

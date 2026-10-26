@@ -29,23 +29,19 @@ gestures.tune = {
     -- the view the way your fingers went, a joystick rather than a sheet of paper.
     swipe_natural = true,
 
-    -- How far the view slides while the fingers are moving, as a fraction of swipe_nudge_px at
-    -- the moment the trigger is reached. Under 1 on purpose, so letting go still has
-    -- somewhere to go.
-    swipe_preview_frac = 0.7,
-
-    -- How far that slide reaches at full travel, in screen pixels, so the shove looks the same
-    -- however far out you are.
-    swipe_nudge_px = 140.0,
-
-    -- How far past the trigger the slide can be pulled, as a fraction of the distance to it.
-    -- The end of a rubber band rather than a wall: every further millimetre buys less than
-    -- the one before, approaching this and never reaching it.
-    swipe_stretch_frac = 0.5,
-
-    -- And how hard it fights past the trigger. 1.0 gives at the same rate as before it, 2.0
-    -- halves the give the moment you pass it, 5.0 is a firm step into resistance.
-    swipe_resist = 4.0,
+    -- While the fingers move, the view slides with them on a rubber band, the way a list
+    -- stretches past its end on a phone: one smooth curve from the first millimetre, with no
+    -- step at the trigger and no wall. Every further millimetre buys a little less than the one
+    -- before, so the pull keeps answering however far your hand goes. Letting go past the
+    -- trigger goes; short of it, the view springs back. Both in screen pixels, so it looks the
+    -- same at any zoom.
+    --
+    --   swipe_follow_px  how far the view slides for the travel to the trigger, before the band
+    --                    tightens: how directly it follows your fingers at first
+    --   swipe_reach_px   the most it can ever slide, which it approaches and never reaches.
+    --                    Around 3 times swipe_follow_px is a soft band, 1.5 times a tight one
+    swipe_follow_px = 140.0,
+    swipe_reach_px = 420.0,
 }
 
 local tune = gestures.tune
@@ -82,18 +78,13 @@ local function swipe(frame)
         if not preview then
             preview = { cx = cam.cx, cy = cam.cy }
         end
-        local progress = frame.swipe_progress
-        local base = tune.swipe_preview_frac
-        local travel
-        if progress <= 1 then
-            travel = base * progress
-        else
-            local room = math.max(1 + tune.swipe_stretch_frac - base, 0.0001)
-            local give = base / tune.swipe_resist
-            travel = base + room * (1 - 1 / (1 + (progress - 1) * give / room))
-        end
+        -- The rubber band: starts at the slope of swipe_follow_px per trigger distance and
+        -- flattens toward swipe_reach_px.
+        local reach = math.max(tune.swipe_reach_px, 1)
+        local pull = frame.swipe_progress * tune.swipe_follow_px
+        local slide_px = reach * (1 - 1 / (1 + pull / reach))
         local dx, dy = swipe_way(frame)
-        local slide = travel * tune.swipe_nudge_px / math.max(cam.zoom, 0.0001)
+        local slide = slide_px / math.max(cam.zoom, 0.0001)
         view.stop()
         view.set(preview.cx + dx * slide, preview.cy + dy * slide, cam.zoom)
     end
