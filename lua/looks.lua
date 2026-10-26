@@ -17,7 +17,7 @@ local looks = {}
 -- Tuning
 --
 
-looks.tune = {
+looks.config = {
     -- Light or dark: "dark", "light", or "system".
     --
     -- yuka is the session, so a fixed choice is published as the system's: written to gsettings
@@ -25,7 +25,7 @@ looks.tune = {
     -- set to follow the system, live. "system" only reads that setting as the scripts load,
     -- falling back to theme_default when it states no preference, and leaves it to whoever
     -- else sets it. looks.set_theme switches while running, and publishes too.
-    theme = "light",
+    theme = "dark",
     theme_default = "light",
 
     -- What each theme paints, 0xRRGGBBAA: behind the canvas, and the floor's dots. On the dark
@@ -142,7 +142,7 @@ looks.tune = {
     cursor_resize = { nw = "nw-resize", ne = "ne-resize", sw = "sw-resize", se = "se-resize" },
 }
 
-local tune = looks.tune
+local config = looks.config
 
 --
 -- State
@@ -181,17 +181,17 @@ function looks.pick_up(id)
     lifted_fresh = true
 end
 
--- The slot that rounds corners and draws the outline (tune.corners).
+-- The slot that rounds corners and draws the outline (config.corners).
 local CORNER_SLOT = 3
 
 -- Which shader slot draws a window and the four numbers handed to it (windowParams). Slot 0 and
 -- nothing by default; this is the place to decide per window.
 function looks.window_shader(frame, i)
-    if tune.unfocused_desaturate > 0 and frame.win_id[i] ~= frame.focused then
-        return 1, tune.unfocused_desaturate
+    if config.unfocused_desaturate > 0 and frame.win_id[i] ~= frame.focused then
+        return 1, config.unfocused_desaturate
     end
-    if tune.corners and not frame.win_max[i] and not frame.win_full[i] then
-        return CORNER_SLOT, tune.corners.radius, tune.corners.outline_px,
+    if config.corners and not frame.win_max[i] and not frame.win_full[i] then
+        return CORNER_SLOT, config.corners.radius, config.corners.outline_px,
             frame.win_w[i], frame.win_h[i]
     end
     return 0, 0
@@ -199,7 +199,7 @@ end
 
 -- Load every shader in the table into its slot. Run as the scripts load, so a reload
 -- recompiles them.
-for slot, files in pairs(tune.shaders) do
+for slot, files in pairs(config.shaders) do
     yk.shader(slot, files[1], files[2])
 end
 
@@ -212,8 +212,8 @@ end
 -- this file.
 local FLOOR_SLOT = 2
 
--- The theme in force, a key of tune.themes.
-looks.theme = tune.theme_default
+-- The theme in force, a key of config.themes.
+looks.theme = config.theme_default
 
 -- What gsettings says, "dark" or "light", or nil when it states no preference. Runs a process,
 -- so only as the scripts load, never per frame.
@@ -232,7 +232,7 @@ end
 -- Switch to a theme. publish (on unless false) also makes it the system's color scheme, so
 -- applications follow.
 function looks.set_theme(name, publish)
-    if not tune.themes[name] then return end
+    if not config.themes[name] then return end
     looks.theme = name
     if publish ~= false then
         desktop.gsettings_set("org.gnome.desktop.interface", "color-scheme",
@@ -242,16 +242,16 @@ function looks.set_theme(name, publish)
         desktop.gsettings_set("org.gnome.desktop.interface", "gtk-theme",
             name == "dark" and "'Adwaita-dark'" or "'Adwaita'")
     end
-    if tune.floor then
-        local dot_color = tune.themes[name].dots
+    if config.floor then
+        local dot_color = config.themes[name].dots
         yk.shader_uniform(FLOOR_SLOT, "dotColor",
             math.floor(dot_color / 0x1000000) % 256 / 255,
             math.floor(dot_color / 0x10000) % 256 / 255,
             math.floor(dot_color / 0x100) % 256 / 255,
             dot_color % 256 / 255)
     end
-    if tune.corners then
-        local outline = tune.themes[name].outline
+    if config.corners then
+        local outline = config.themes[name].outline
         yk.shader_uniform(CORNER_SLOT, "outlineColor",
             math.floor(outline / 0x1000000) % 256 / 255,
             math.floor(outline / 0x10000) % 256 / 255,
@@ -260,33 +260,33 @@ function looks.set_theme(name, publish)
     end
 end
 
-yk.client_shadows(tune.client_shadows)
-yk.client_decorations(tune.client_titlebars)
+yk.client_shadows(config.client_shadows)
+yk.client_decorations(config.client_titlebars)
 
-if tune.floor then
-    yk.shader_uniform(FLOOR_SLOT, "spacing", tune.floor.spacing)
-    yk.shader_uniform(FLOOR_SLOT, "dotPx", tune.floor.dot_px)
-    yk.shader_uniform(FLOOR_SLOT, "fadePx", tune.floor.fade_px)
+if config.floor then
+    yk.shader_uniform(FLOOR_SLOT, "spacing", config.floor.spacing)
+    yk.shader_uniform(FLOOR_SLOT, "dotPx", config.floor.dot_px)
+    yk.shader_uniform(FLOOR_SLOT, "fadePx", config.floor.fade_px)
 end
-if tune.theme == "system" then
-    looks.set_theme(system_theme() or tune.theme_default, false)
+if config.theme == "system" then
+    looks.set_theme(system_theme() or config.theme_default, false)
 else
-    looks.set_theme(tune.theme)
+    looks.set_theme(config.theme)
 end
 
 -- The cursor over the canvas this frame, sent only when it changes.
 local cursor_now = nil
 
 local function canvas_cursor(frame)
-    local want = tune.cursor
+    local want = config.cursor
     if frame.resizing then
         local vertical = frame.resize_ey < 0 and "n" or "s"
         local horizontal = frame.resize_ex < 0 and "w" or "e"
-        want = tune.cursor_resize[vertical .. horizontal] or want
+        want = config.cursor_resize[vertical .. horizontal] or want
     elseif frame.dragging then
-        want = tune.cursor_held
+        want = config.cursor_held
     elseif frame.super and frame.under then
-        want = tune.cursor_grab
+        want = config.cursor_grab
     end
     if want ~= cursor_now then
         cursor_now = want
@@ -297,7 +297,7 @@ end
 -- Whether a window draws its shadow padding. One answer for all of them by default, but this
 -- is the place to decide per window, by size or by whatever else the snapshot says.
 function looks.shadow(frame, i)
-    return tune.shadows
+    return config.shadows
 end
 
 local function ease(from, target, rate, dt)
@@ -354,7 +354,7 @@ end
 -- until the client has committed something new, or the hold runs out, or something else takes
 -- the window (a drag, maximizing).
 local function stretched(frame, i, id)
-    if not tune.resize_stretch then
+    if not config.resize_stretch then
         holding[id] = nil
         return false
     end
@@ -363,7 +363,7 @@ local function stretched(frame, i, id)
     if not hold then return false end
     hold.frames = hold.frames + 1
     local answered = frame.win_gw[i] ~= hold.gw or frame.win_gh[i] ~= hold.gh
-    if answered or hold.frames >= tune.stretch_hold_frames
+    if answered or hold.frames >= config.stretch_hold_frames
         or frame.dragging == id or frame.win_max[i] then
         holding[id] = nil
         return false
@@ -385,8 +385,8 @@ local function notice_resize_end(frame)
 end
 
 function looks.frame(frame)
-    yk.set_background(tune.themes[looks.theme].background)
-    yk.floor_shader(tune.floor and FLOOR_SLOT or nil)
+    yk.set_background(config.themes[looks.theme].background)
+    yk.floor_shader(config.floor and FLOOR_SLOT or nil)
     notice_drop(frame)
     notice_resize_end(frame)
     find_covers(frame)
@@ -395,7 +395,7 @@ function looks.frame(frame)
     local dt = math.min(frame.dt, 0.05)
     local cam = view.cam
     -- Every frame rather than on change: saving the shader reloads its slot, which forgets it.
-    if tune.corners then yk.shader_uniform(CORNER_SLOT, "screenScale", cam.zoom) end
+    if config.corners then yk.shader_uniform(CORNER_SLOT, "screenScale", cam.zoom) end
     -- The camera's distance from the plane scales with 1/zoom, so it follows the view as it
     -- stands after this frame's moves.
     local dist = frame.cam_dist * frame.zoom / cam.zoom
@@ -405,11 +405,11 @@ function looks.frame(frame)
         local id = frame.win_id[i]
         seen[id] = true
 
-        local target_alpha = covering[i] and tune.cover_opacity or 1
-        alpha[id] = ease(alpha[id] or 1, target_alpha, tune.fade_rate, dt)
+        local target_alpha = covering[i] and config.cover_opacity or 1
+        alpha[id] = ease(alpha[id] or 1, target_alpha, config.fade_rate, dt)
 
-        z_to[id] = (lifted == id and frame.dragging == id) and -tune.lift_height or 0
-        z[id] = ease(z[id] or frame.win_z[i], z_to[id], tune.lift_rate, dt)
+        z_to[id] = (lifted == id and frame.dragging == id) and -config.lift_height or 0
+        z[id] = ease(z[id] or frame.win_z[i], z_to[id], config.lift_rate, dt)
 
         -- Lowering in place: reproject the release-time centre onto the plane at the current
         -- lift, around the camera, so the window comes straight down on screen.
