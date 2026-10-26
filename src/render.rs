@@ -1659,6 +1659,11 @@ pub fn destroy_owned(windows: &mut Windows) {
 //   float windowAlpha                      the window's opacity (yk.window_look)
 //   vec4 windowParams                      the window's four numbers (yk.window_shader)
 //   vec2 windowSize                        drawn size in canvas units
+//   vec4 windowRect                        the window itself inside that: left, top, width,
+//                                          height, in canvas units from the drawn top-left.
+//                                          The drawn quad is bigger when a client pads its
+//                                          buffer (shadows), and frag_uv * windowSize is the
+//                                          point in the drawn quad.
 //   float time                             seconds since yuka started
 //
 // plus any the scripts set on the slot with yk.shader_uniform.
@@ -1673,6 +1678,7 @@ pub struct ShaderSlot {
     fade_loc: i32,
     params_loc: i32,
     size_loc: i32,
+    rect_loc: i32,
     time_loc: i32,
     // Only the floor sets this one: canvas to screen scale, for things meant to be a fixed
     // number of pixels on screen however far the view is zoomed.
@@ -1693,6 +1699,7 @@ fn slot_from(shader: ray::Shader) -> ShaderSlot {
         fade_loc: ray::shader_location(shader, "windowAlpha"),
         params_loc: ray::shader_location(shader, "windowParams"),
         size_loc: ray::shader_location(shader, "windowSize"),
+        rect_loc: ray::shader_location(shader, "windowRect"),
         time_loc: ray::shader_location(shader, "time"),
         zoom_loc: ray::shader_location(shader, "canvasZoom"),
         globals: Vec::new(),
@@ -1853,6 +1860,11 @@ pub fn draw_windows(windows: &Windows, cam3d: ray::Camera3D, shaders: &Shaders, 
         //
         // The stretch of a resize drag is anchored at the geometry's top-left, so the padding
         // is scaled about that same point rather than about itself.
+        let rect = if windows.shadow[i] {
+            [windows.geo_x[i] * windows.scale_x[i], windows.geo_y[i] * windows.scale_y[i], w, h]
+        } else {
+            [0.0, 0.0, w, h]
+        };
         let (x, y, w, h, u0, v0, u1, v1) = if windows.shadow[i] {
             let (sx, sy) = (windows.scale_x[i], windows.scale_y[i]);
             (
@@ -1901,6 +1913,9 @@ pub fn draw_windows(windows: &Windows, cam3d: ray::Camera3D, shaders: &Shaders, 
         }
         if sl.size_loc >= 0 {
             ray::set_shader_vec(shader, sl.size_loc, &[w, h]);
+        }
+        if sl.rect_loc >= 0 {
+            ray::set_shader_vec(shader, sl.rect_loc, &rect);
         }
         if sl.time_loc >= 0 {
             ray::set_shader_float(shader, sl.time_loc, time);

@@ -31,9 +31,18 @@ looks.tune = {
     -- What each theme paints, 0xRRGGBBAA: behind the canvas, and the floor's dots. On the dark
     -- background a dot alpha around 0x30 is a hint and 0x60 is plainly there.
     themes = {
-        dark = { background = 0x181820ff, dots = 0xc8c8d040 },
-        light = { background = 0xf2f2f5ff, dots = 0x30303a38 },
+        dark = { background = 0x181820ff, dots = 0xc8c8d040, outline = 0xffffff26 },
+        light = { background = 0xf2f2f5ff, dots = 0x30303a38, outline = 0x00000030 },
     },
+
+    -- Corners we round ourselves, and an outline around every window, drawn by
+    -- shaders/rounded.frag through slot 3; false for neither. Maximized and fullscreen windows
+    -- stay square. The outline's colour comes from the theme.
+    --
+    --   radius      corner radius in canvas units, so it zooms with the window: 24 is soft,
+    --               8 barely rounded, 0 square
+    --   outline_px  outline width on screen, the same at any zoom: 1 is a hairline, 0 none
+    corners = { radius = 18, outline_px = 1 },
 
     -- Whether windows draw their own drop shadows. false tells every window it is tiled, the one
     -- hint toolkits act on: GTK, libadwaita, Qt and Chromium then draw no shadow, square their
@@ -117,6 +126,7 @@ looks.tune = {
     shaders = {
         [1] = { "shaders/quad.vert", "shaders/desaturate.frag" },
         [2] = { "shaders/quad.vert", "shaders/grid.frag" },
+        [3] = { "shaders/quad.vert", "shaders/rounded.frag" },
     },
 
     -- How much colour drains out of windows you are not working in, through slot 1. 0 is off,
@@ -171,11 +181,18 @@ function looks.pick_up(id)
     lifted_fresh = true
 end
 
+-- The slot that rounds corners and draws the outline (tune.corners).
+local CORNER_SLOT = 3
+
 -- Which shader slot draws a window and the four numbers handed to it (windowParams). Slot 0 and
 -- nothing by default; this is the place to decide per window.
 function looks.window_shader(frame, i)
     if tune.unfocused_desaturate > 0 and frame.win_id[i] ~= frame.focused then
         return 1, tune.unfocused_desaturate
+    end
+    if tune.corners and not frame.win_max[i] and not frame.win_full[i] then
+        return CORNER_SLOT, tune.corners.radius, tune.corners.outline_px,
+            frame.win_w[i], frame.win_h[i]
     end
     return 0, 0
 end
@@ -232,6 +249,14 @@ function looks.set_theme(name, publish)
             math.floor(dot_color / 0x10000) % 256 / 255,
             math.floor(dot_color / 0x100) % 256 / 255,
             dot_color % 256 / 255)
+    end
+    if tune.corners then
+        local outline = tune.themes[name].outline
+        yk.shader_uniform(CORNER_SLOT, "outlineColor",
+            math.floor(outline / 0x1000000) % 256 / 255,
+            math.floor(outline / 0x10000) % 256 / 255,
+            math.floor(outline / 0x100) % 256 / 255,
+            outline % 256 / 255)
     end
 end
 
@@ -369,6 +394,8 @@ function looks.frame(frame)
 
     local dt = math.min(frame.dt, 0.05)
     local cam = view.cam
+    -- Every frame rather than on change: saving the shader reloads its slot, which forgets it.
+    if tune.corners then yk.shader_uniform(CORNER_SLOT, "screenScale", cam.zoom) end
     -- The camera's distance from the plane scales with 1/zoom, so it follows the view as it
     -- stands after this frame's moves.
     local dist = frame.cam_dist * frame.zoom / cam.zoom
