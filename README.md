@@ -158,6 +158,8 @@ cargo run --features windowed
 |----------|--------|
 | `YUKA_MAX_FRAMES=<n>` | Stop after n frames. Unset means run forever. |
 | `YUKA_SIZE=<W>x<H>` | DRM only: pick a specific connector mode, e.g. `1280x720`. Unset takes the whole screen (the connector's current mode), which on a virtual GPU can fall back to something tiny. |
+| `YUKA_CONNECTOR=<name>` | DRM only: drive this display, e.g. `HDMI-A-1` (names as in `/sys/class/drm/card0-*`). Unset takes the first connected one, usually the laptop panel. |
+| `YUKA_MODE=<W>x<H>[@<Hz>]` | DRM only: build a CVT reduced blanking mode and use it even if the display does not list it, e.g. `1920x1200@30`. 60 Hz unless named. `edid` or `edid:<n>` instead takes the nth detailed timing from the display's own EDID (needs `YUKA_CONNECTOR`). Wins over `YUKA_SIZE`. For a display whose real modes the kernel pruned. |
 | `YUKA_CARD=logind\|raylib` | Who opens the KMS device. Default `logind` (yuka opens it and hands raylib the fd); `raylib` lets raylib open the card itself. |
 | `YUKA_NO_SEAT=1` | Do not take session control. Implied when there is no keyboard; also what non-interactive runs want. |
 | `YUKA_SHOT[=<n>]` | Save a screenshot at frame n (a default frame if no number). |

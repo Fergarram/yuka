@@ -14,6 +14,7 @@ mod egl;
 mod gamma;
 mod input;
 mod lua;
+mod mode;
 mod ray;
 mod render;
 mod settings;
@@ -973,13 +974,49 @@ fn main() {
         // virtual GPU whose current mode is not a clean match (virtio-gpu in a VM)
         // can land on a tiny fallback, so YUKA_SIZE=WxH names the mode by hand and
         // raylib picks that exact connector mode instead.
-        let (w, h) = std::env::var("YUKA_SIZE")
+        let (mut w, mut h) = std::env::var("YUKA_SIZE")
             .ok()
             .and_then(|s| {
                 let (a, b) = s.split_once('x')?;
                 Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
             })
             .unwrap_or((0, 0));
+        // YUKA_CONNECTOR=HDMI-A-1 drives that display instead of the first connected
+        // one. YUKA_MODE=WxH[@Hz] builds a mode for it rather than picking a listed
+        // one, for a display whose good modes the kernel pruned; it wins over YUKA_SIZE.
+        let connector = std::env::var("YUKA_CONNECTOR").unwrap_or_default();
+        let forced = std::env::var("YUKA_MODE").ok();
+        if (!connector.is_empty() || forced.is_some()) && !ray::can_select_output() {
+            eprintln!("yuka: vendored raylib cannot pick a connector or mode, ignoring YUKA_CONNECTOR and YUKA_MODE");
+        }
+        if !connector.is_empty() {
+            ray::set_drm_connector(&connector);
+        }
+        if let Some(text) = forced {
+            // edid or edid:n takes the display's own nth timing; anything else is WxH[@Hz].
+            let built = match text.strip_prefix("edid") {
+                Some(rest) if !connector.is_empty() => {
+                    let index = rest.strip_prefix(':').and_then(|n| n.parse().ok()).unwrap_or(0);
+                    mode::from_edid(&connector, index)
+                }
+                Some(_) => None,
+                None => mode::parse(&text).map(|(mw, mh, hz)| mode::cvt_rb(mw, mh, hz)),
+            };
+            match built {
+                Some(m) => {
+                    println!(
+                        "yuka: forcing mode {}x{}@{} ({} kHz, {} x {} total)",
+                        m.hdisplay, m.vdisplay, m.vrefresh, m.clock, m.htotal, m.vtotal
+                    );
+                    ray::set_drm_mode(&m);
+                    w = m.hdisplay as i32;
+                    h = m.vdisplay as i32;
+                }
+                None => eprintln!(
+                    "yuka: YUKA_MODE={text} is not WxH, WxH@Hz, or edid[:n] with YUKA_CONNECTOR set, ignoring it"
+                ),
+            }
+        }
         ray::init_window(w, h, "yuka");
     }
     // No SetTargetFPS: the DRM page flip in EndDrawing already vsyncs to the

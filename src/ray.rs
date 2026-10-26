@@ -267,6 +267,76 @@ pub fn set_drm_fd(fd: i32) {
 pub fn set_drm_fd(_fd: i32) {}
 
 //
+// Connector and mode, in the DRM build only
+//
+// Also our patch to rcore_drm.c, detected the same way (raylib_output_select). By
+// default raylib drives the first connected display at a mode it lists; these name
+// the connector, and hand it a mode the kernel may never have listed.
+
+// drmModeModeInfo, field for field.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DrmMode {
+    pub clock: u32,
+    pub hdisplay: u16,
+    pub hsync_start: u16,
+    pub hsync_end: u16,
+    pub htotal: u16,
+    pub hskew: u16,
+    pub vdisplay: u16,
+    pub vsync_start: u16,
+    pub vsync_end: u16,
+    pub vtotal: u16,
+    pub vscan: u16,
+    pub vrefresh: u32,
+    pub flags: u32,
+    pub kind: u32,
+    pub name: [u8; 32],
+}
+
+#[cfg(raylib_output_select)]
+extern "C" {
+    fn SetDrmConnectorName(name: *const c_char);
+    fn SetDrmMode(mode: *const DrmMode);
+    fn GetDrmCrtcId() -> c_uint;
+}
+
+// Whether this build can be told the connector and mode.
+pub fn can_select_output() -> bool {
+    cfg!(raylib_output_select)
+}
+
+// Drive the connector with this kernel name (HDMI-A-1, eDP-1). Before init_window.
+#[cfg(raylib_output_select)]
+pub fn set_drm_connector(name: &str) {
+    let Ok(c_name) = CString::new(name) else { return };
+    unsafe { SetDrmConnectorName(c_name.as_ptr()) };
+}
+
+#[cfg(not(raylib_output_select))]
+pub fn set_drm_connector(_name: &str) {}
+
+// Use this mode rather than one from the connector's list. Before init_window.
+#[cfg(raylib_output_select)]
+pub fn set_drm_mode(mode: &DrmMode) {
+    unsafe { SetDrmMode(mode) };
+}
+
+#[cfg(not(raylib_output_select))]
+pub fn set_drm_mode(_mode: &DrmMode) {}
+
+// The CRTC raylib drives, or 0 when it cannot say (nested, unpatched, before init).
+#[cfg(raylib_output_select)]
+pub fn drm_crtc_id() -> u32 {
+    unsafe { GetDrmCrtcId() }
+}
+
+#[cfg(not(raylib_output_select))]
+pub fn drm_crtc_id() -> u32 {
+    0
+}
+
+//
 // GLFW, in the nested build only
 //
 // raylib links GLFW for its desktop platform and not for DRM, so these two are

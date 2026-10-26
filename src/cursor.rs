@@ -612,8 +612,14 @@ pub fn find_drm_fd() -> Option<i32> {
     None
 }
 
-// The CRTC currently scanning out a framebuffer (the one raylib set a mode on).
+// The CRTC raylib set a mode on: as raylib reports it, or else the first one scanning
+// out a framebuffer.
 pub fn find_active_crtc(fd: i32) -> Option<u32> {
+    // With two displays lit, the first CRTC that is on may not be ours.
+    let ours = crate::ray::drm_crtc_id();
+    if ours != 0 {
+        return Some(ours);
+    }
     let res = unsafe { drmModeGetResources(fd) };
     if res.is_null() {
         return None;

@@ -150,6 +150,44 @@ void SetGraphicDeviceFd(int fd)
     externalDeviceFd = fd;
 }
 
+// yuka patch: the connector to drive, by its kernel name (HDMI-A-1, eDP-1), or empty for
+// the first connected one as before. A mode the application built itself, used instead of
+// searching the connector's list: a display whose advertised modes the kernel pruned can
+// still take one it never listed.
+static char externalConnectorName[32] = { 0 };
+static drmModeModeInfo externalMode = { 0 };
+static bool hasExternalMode = false;
+
+// yuka patch: set before InitWindow(), which is the only time it is read.
+void SetDrmConnectorName(const char *name)
+{
+    snprintf(externalConnectorName, sizeof(externalConnectorName), "%s", name);
+}
+
+// yuka patch: set before InitWindow(), which is the only time it is read.
+void SetDrmMode(const drmModeModeInfo *mode)
+{
+    externalMode = *mode;
+    hasExternalMode = true;
+}
+
+// yuka patch: the CRTC we drive, or 0 before InitWindow(). The cursor plane and the gamma
+// ramp belong on this one, not on whichever CRTC happens to be lit first.
+unsigned int GetDrmCrtcId(void)
+{
+    return platform.crtc? platform.crtc->crtc_id : 0;
+}
+
+// The kernel's name for a connector: its type, a dash, its index among that type.
+static bool ConnectorNameIs(const drmModeConnector *con, const char *name)
+{
+    const char *type = drmModeGetConnectorTypeName(con->connector_type);
+    if (!type) return false;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%s-%u", type, con->connector_type_id);
+    return strcmp(buf, name) == 0;
+}
+
 //----------------------------------------------------------------------------------
 // Local Variables Definition
 //----------------------------------------------------------------------------------
@@ -787,6 +825,20 @@ int InitPlatform(void)
         drmModeConnector *con = drmModeGetConnector(platform.fd, res->connectors[i]);
         TRACELOG(LOG_TRACE, "DISPLAY: Connector modes detected: %i", con->count_modes);
 
+        // yuka patch: a connector named by the application is taken if it has a display
+        // on it, even when nothing drives it yet. Its CRTC is found below.
+        if (externalConnectorName[0])
+        {
+            if (ConnectorNameIs(con, externalConnectorName) && (con->connection != DRM_MODE_DISCONNECTED))
+            {
+                TRACELOG(LOG_INFO, "DISPLAY: Using connector %s", externalConnectorName);
+                platform.connector = con;
+                break;
+            }
+            drmModeFreeConnector(con);
+            continue;
+        }
+
         // In certain cases the status of the conneciton is reported as UKNOWN, but it is still connected.
         // This might be a hardware or software limitation like on Raspberry Pi Zero with composite output.
         if (((con->connection == DRM_MODE_CONNECTED) || (con->connection == DRM_MODE_UNKNOWNCONNECTION)) && (con->encoder_id))
@@ -809,15 +861,50 @@ int InitPlatform(void)
         return -1;
     }
 
-    drmModeEncoder *enc = drmModeGetEncoder(platform.fd, platform.connector->encoder_id);
-    if (!enc)
+    drmModeEncoder *enc = NULL;
+    uint32_t crtcId = 0;
+    if (platform.connector->encoder_id)
+    {
+        enc = drmModeGetEncoder(platform.fd, platform.connector->encoder_id);
+        if (enc) crtcId = enc->crtc_id;
+    }
+
+    // yuka patch: a connector nothing drives yet has no encoder or CRTC of its own, so pick
+    // them: the first encoder that can reach a CRTC, preferring a CRTC that is not lit,
+    // so another display keeps what it shows.
+    if (!crtcId)
+    {
+        if (enc) drmModeFreeEncoder(enc);
+        enc = NULL;
+        for (int i = 0; (i < platform.connector->count_encoders) && !crtcId; i++)
+        {
+            drmModeEncoder *e = drmModeGetEncoder(platform.fd, platform.connector->encoders[i]);
+            if (!e) continue;
+            uint32_t fallback = 0;
+            for (int j = 0; j < res->count_crtcs; j++)
+            {
+                if (!(e->possible_crtcs & (1u << j))) continue;
+                drmModeCrtc *c = drmModeGetCrtc(platform.fd, res->crtcs[j]);
+                bool lit = c && c->buffer_id;
+                if (c) drmModeFreeCrtc(c);
+                if (!fallback) fallback = res->crtcs[j];
+                if (!lit) { crtcId = res->crtcs[j]; break; }
+            }
+            if (!crtcId) crtcId = fallback;
+            if (crtcId) enc = e;
+            else drmModeFreeEncoder(e);
+        }
+    }
+
+    if (!enc || !crtcId)
     {
         TRACELOG(LOG_WARNING, "DISPLAY: Failed to get DRM mode encoder");
+        if (enc) drmModeFreeEncoder(enc);
         drmModeFreeResources(res);
         return -1;
     }
 
-    platform.crtc = drmModeGetCrtc(platform.fd, enc->crtc_id);
+    platform.crtc = drmModeGetCrtc(platform.fd, crtcId);
     if (!platform.crtc)
     {
         TRACELOG(LOG_WARNING, "DISPLAY: Failed to get DRM mode crtc");
@@ -826,8 +913,40 @@ int InitPlatform(void)
         return -1;
     }
 
+    // yuka patch: the application's own mode goes on the end of the connector's list, so
+    // everything that reads connector->modes[modeIndex] takes it unchanged. libdrm
+    // allocates that list with calloc and frees it with free, so realloc is safe.
+    if (hasExternalMode)
+    {
+        drmModeModeInfo *modes = realloc(platform.connector->modes, (platform.connector->count_modes + 1)*sizeof(drmModeModeInfo));
+        if (!modes)
+        {
+            TRACELOG(LOG_WARNING, "DISPLAY: Failed to add the application's mode");
+            drmModeFreeEncoder(enc);
+            drmModeFreeResources(res);
+            return -1;
+        }
+        modes[platform.connector->count_modes] = externalMode;
+        platform.connector->modes = modes;
+        platform.modeIndex = platform.connector->count_modes;
+        platform.connector->count_modes++;
+        CORE.Window.screen.width = externalMode.hdisplay;
+        CORE.Window.screen.height = externalMode.vdisplay;
+    }
+
+    // yuka patch: a CRTC we picked ourselves shows nothing yet, so there is no current
+    // mode to match: take the connector's preferred one, which the kernel lists first.
+    if (!hasExternalMode && !platform.crtc->mode_valid && ((CORE.Window.screen.width <= 0) || (CORE.Window.screen.height <= 0)))
+    {
+        if (platform.connector->count_modes > 0)
+        {
+            CORE.Window.screen.width = platform.connector->modes[0].hdisplay;
+            CORE.Window.screen.height = platform.connector->modes[0].vdisplay;
+        }
+    }
+
     // If InitWindow should use the current mode find it in the connector's mode list
-    if ((CORE.Window.screen.width <= 0) || (CORE.Window.screen.height <= 0))
+    if (!hasExternalMode && ((CORE.Window.screen.width <= 0) || (CORE.Window.screen.height <= 0)))
     {
         TRACELOG(LOG_TRACE, "DISPLAY: Selecting DRM connector mode for current used mode...");
 
@@ -849,7 +968,7 @@ int InitPlatform(void)
     const int fps = (CORE.Time.target > 0)? (1.0/CORE.Time.target) : 60;
 
     // Try to find an exact matching mode
-    platform.modeIndex = FindExactConnectorMode(platform.connector, CORE.Window.screen.width, CORE.Window.screen.height, fps, allowInterlaced);
+    if (!hasExternalMode) platform.modeIndex = FindExactConnectorMode(platform.connector, CORE.Window.screen.width, CORE.Window.screen.height, fps, allowInterlaced);
 
     // If nothing found, try to find a nearly matching mode
     if (platform.modeIndex < 0) platform.modeIndex = FindNearestConnectorMode(platform.connector, CORE.Window.screen.width, CORE.Window.screen.height, fps, allowInterlaced);

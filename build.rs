@@ -43,6 +43,17 @@ fn main() {
         );
     }
 
+    // The same, for the patch that picks the connector and its mode by hand
+    // (SetDrmConnectorName, SetDrmMode, GetDrmCrtcId). Without it YUKA_CONNECTOR and
+    // YUKA_MODE are ignored with a warning, and raylib takes the first display.
+    let output_select = fs::read_to_string(&drm_platform)
+        .map(|src| src.contains("void SetDrmConnectorName(const char *name)"))
+        .unwrap_or(false);
+    println!("cargo:rustc-check-cfg=cfg(raylib_output_select)");
+    if output_select && !windowed {
+        println!("cargo:rustc-cfg=raylib_output_select");
+    }
+
     let mut cfg = cmake::Config::new(&raylib_src);
     cfg.define("BUILD_EXAMPLES", "OFF")
         .define("BUILD_SHARED_LIBS", "OFF")
