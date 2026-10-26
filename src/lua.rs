@@ -91,6 +91,10 @@ pub enum Cmd {
     ResizeWindow(u64, f32, f32),
     // Put a window's visible top-left at a canvas point.
     MoveWindow(u64, f32, f32),
+    // For this frame only: where the move in progress puts the window's visible top-left,
+    // and the size the resize in progress asks for, instead of what the pointer says.
+    DragTo(f32, f32),
+    ResizeTo(f32, f32),
     // Fill a canvas rectangle with a window, remembering what to give back, and tell the
     // client. Or give it back. Answers a maximize request; also works unasked.
     Maximize(u64, f32, f32, f32, f32),
@@ -783,6 +787,14 @@ fn register(lua: &Lua, yk: &Table) -> mlua::Result<()> {
     })?)?;
     yk.set("resize_window", lua.create_function(|lua, (id, w, h): (u64, f32, f32)| {
         push(lua, Cmd::ResizeWindow(id, w, h));
+        Ok(())
+    })?)?;
+    yk.set("drag_to", lua.create_function(|lua, (x, y): (f32, f32)| {
+        push(lua, Cmd::DragTo(x, y));
+        Ok(())
+    })?)?;
+    yk.set("resize_to", lua.create_function(|lua, (w, h): (f32, f32)| {
+        push(lua, Cmd::ResizeTo(w, h));
         Ok(())
     })?)?;
     yk.set("maximize", lua.create_function(|lua, (id, x, y, w, h): (u64, f32, f32, f32, f32)| {

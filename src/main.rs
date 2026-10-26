@@ -1853,6 +1853,10 @@ fn main() {
         let mut begin_move: Option<(u64, Option<(f32, f32)>, bool)> = None;
         let mut begin_resize: Option<(u64, f32, f32)> = None;
         let mut resize_corner: Option<(f32, f32)> = None;
+        // Where the scripts put the move and the resize in progress this frame, if they
+        // overrode the pointer (snapping).
+        let mut drag_to: Option<(f32, f32)> = None;
+        let mut resize_to: Option<(f32, f32)> = None;
         max_answered.clear();
         full_answered.clear();
         for cmd in cmds.drain(..) {
@@ -1893,6 +1897,8 @@ fn main() {
                 }
                 lua::Cmd::BeginResize(id, ex, ey) => begin_resize = Some((id, ex, ey)),
                 lua::Cmd::ResizeCorner(ex, ey) => resize_corner = Some((ex, ey)),
+                lua::Cmd::DragTo(x, y) => drag_to = Some((x, y)),
+                lua::Cmd::ResizeTo(w, h) => resize_to = Some((w, h)),
                 lua::Cmd::WindowLook { id, alpha, z, shadow, stretch } => {
                     if let Some(surf) = render::surface_by_id(&windows, id) {
                         render::set_look(&mut windows, &surf, alpha, z, shadow, stretch);
@@ -2283,14 +2289,18 @@ fn main() {
             let floor_h = if r.stuck_small >= RESIZE_STUCK_COMMITS { r.least_h.max(min_h) } else { min_h };
             let ceil_w = if r.stuck_large >= RESIZE_STUCK_COMMITS { r.most_w.min(max_w) } else { max_w };
             let ceil_h = if r.stuck_large >= RESIZE_STUCK_COMMITS { r.most_h.min(max_h) } else { max_h };
-            let want = camera::screen_to_plane(cam3d, sxp, syp, 0.0).map(|(px, py)| {
-                // An edge direction of zero pins that axis; -1 means the near edge is the
-                // one under the cursor, so moving it left or up makes the window bigger.
-                let dw = r.edge_x * (px - r.grab_x);
-                let dh = r.edge_y * (py - r.grab_y);
+            // The scripts' size when they gave one (snapping), else the pointer's.
+            let asked = resize_to.or_else(|| {
+                camera::screen_to_plane(cam3d, sxp, syp, 0.0).map(|(px, py)| {
+                    // An edge direction of zero pins that axis; -1 means the near edge is the
+                    // one under the cursor, so moving it left or up makes the window bigger.
+                    (r.from_w + r.edge_x * (px - r.grab_x), r.from_h + r.edge_y * (py - r.grab_y))
+                })
+            });
+            let want = asked.map(|(w, h)| {
                 (
-                    (r.from_w + dw).min(ceil_w).max(floor_w.min(ceil_w)),
-                    (r.from_h + dh).min(ceil_h).max(floor_h.min(ceil_h)),
+                    w.min(ceil_w).max(floor_w.min(ceil_w)),
+                    h.min(ceil_h).max(floor_h.min(ceil_h)),
                 )
             });
             let held = if r.right_button { ptr.right } else { ptr.left };
@@ -2427,8 +2437,11 @@ fn main() {
             // Projected onto the plane at the window's own lift, so the grabbed point stays under
             // the cursor at any zoom: projecting onto z=0 while drawing lifted makes it out-run
             // the cursor through perspective parallax.
+            // Unless the scripts put it somewhere else this frame (snapping).
             let z = render::window_lift(&windows, &surf);
-            if let Some((px, py)) = camera::screen_to_plane(cam3d, sxp, syp, z) {
+            if let Some((x, y)) = drag_to {
+                render::set_window_origin(&mut windows, &surf, x, y);
+            } else if let Some((px, py)) = camera::screen_to_plane(cam3d, sxp, syp, z) {
                 render::set_window_pos(&mut windows, &surf, px + offx, py + offy);
             }
             // Setting it down again, lift and all, is the scripts': they see the drag end.

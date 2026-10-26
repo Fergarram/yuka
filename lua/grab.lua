@@ -13,6 +13,7 @@
 local view = require("view")
 local windows = require("windows")
 local looks = require("looks")
+local snap = require("snap")
 
 local grab = {}
 
@@ -32,6 +33,12 @@ grab.tune = {
     --
     -- 0.5 is an even split and no bias. Values near 1.0 make it very hard to change corners.
     resize_corner_hold = 0.75,
+
+    -- Whether a window picked up while zoomed out lifts toward the camera (looks.lua), the
+    -- canvas idiom for having it in your hand. Never at 1:1 or closer: a lift there is
+    -- perspective applied to something already filling the screen, so it swims rather than
+    -- rises, and it takes the window off the pixel grid. A lifted window is not snapped.
+    lift_when_zoomed_out = false,
 }
 
 local tune = grab.tune
@@ -97,16 +104,18 @@ function grab.frame(frame, eaten)
             local edge_x, edge_y = corner_at(pointer_x, pointer_y,
                 frame.win_x[i], frame.win_y[i], frame.win_w[i], frame.win_h[i], 0.5, 0.5)
             yk.begin_resize(frame.under, edge_x, edge_y)
+            snap.begin_resize(frame, i, edge_x, edge_y)
         end
 
-        -- In the overview, picking a window up lifts it toward the camera (looks.lua), which is the canvas
-        -- idiom for having it in your hand. At 1:1 it only comes to the front: a lift there is
-        -- perspective applied to something already filling the screen, so it swims rather than
-        -- rises, and it takes the window off the pixel grid while you are close enough to see.
+        -- Picking a window up brings it to the front, and zoomed out it may lift too
+        -- (tune.lift_when_zoomed_out).
         if i and frame.pressed and not eaten and not frame.dragging then
             unmaximize_under(frame, i, frame.x, frame.y)
             yk.begin_move(frame.under)
-            if frame.zoom < frame.zoom_default then looks.pick_up(frame.under) end
+            snap.begin_move(frame, i, frame.x, frame.y)
+            if tune.lift_when_zoomed_out and frame.zoom < frame.zoom_default then
+                looks.pick_up(frame.under)
+            end
         end
     end
 
@@ -119,6 +128,7 @@ function grab.frame(frame, eaten)
         if i and not frame.dragging then
             unmaximize_under(frame, i, frame.move_x[k], frame.move_y[k])
             yk.accept_move(id, frame.move_x[k], frame.move_y[k])
+            snap.begin_move(frame, i, frame.move_x[k], frame.move_y[k])
         end
     end
 
@@ -135,6 +145,7 @@ function grab.frame(frame, eaten)
                 corner_split(frame.resize_ey, tune.resize_corner_hold))
             if edge_x ~= frame.resize_ex or edge_y ~= frame.resize_ey then
                 yk.resize_corner(edge_x, edge_y)
+                snap.begin_resize(frame, i, edge_x, edge_y)
             end
         end
     end

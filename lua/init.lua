@@ -24,6 +24,10 @@
 --   yk.accept_move(id, x, y)      answer a titlebar move request, held at that screen point
 --   yk.begin_resize(id, ex, ey)   resize from the pointer holding a corner, 1 or -1 per axis
 --   yk.resize_corner(ex, ey)      change the corner the resize in progress holds
+--   yk.drag_to(x, y)              this frame, put the window being moved here (its visible
+--                                 top-left, canvas units) instead of under the pointer
+--   yk.resize_to(w, h)            this frame, ask the window being resized for this size
+--                                 instead of the pointer's (snap.lua does both for you)
 --   yk.spawn(cmd)                 start a program as a client
 --   yk.window_look(id, alpha, z, shadow, stretch)
 --                                 how a window is drawn: opacity, lift (negative is nearer),
@@ -163,6 +167,7 @@ local view = require("view")
 local windows = require("windows")
 local gestures = require("gestures")
 local grab = require("grab")
+local snap = require("snap")
 local looks = require("looks")
 local overlays = require("overlays")
 local layouts = require("layouts")
@@ -443,7 +448,8 @@ end
 
 -- The order matters where two things touch the same state: window events first, so a window
 -- that just opened is focused before anything asks; input next; then the view settles, and
--- only once it has does a focused window that left it let go.
+-- only once it has does a focused window that left it let go. Snapping comes after the view,
+-- since it reads the pointer through the camera the frame will be drawn with.
 function yk.frame(frame)
     view.begin(frame)
     windows.events(frame)
@@ -457,6 +463,7 @@ function yk.frame(frame)
     windows.fullscreen_requests(frame)
     windows.popup_bounds(frame)
     view.step(frame, frame.pinch ~= 1, frame.swiping)
+    snap.frame(frame)
     windows.drop_unseen_focus(frame)
     looks.frame(frame)
     overlays.frame(frame)
