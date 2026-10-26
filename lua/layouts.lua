@@ -18,10 +18,10 @@ local text = require("text")
 local layouts = {}
 
 --
--- Tuning
+-- Settings
 --
 
-layouts.tune = {
+layouts.settings = {
     -- The layouts to step through, in order, by xkb name. A variant goes in brackets the way
     -- setxkbmap prints it: "us(intl)", "de(nodeadkeys)". Empty leaves the keymap to the
     -- XKB_DEFAULT_LAYOUT environment variable, or plain us without one.
@@ -67,10 +67,10 @@ local screen_w, screen_h = 0, 0
 -- Keymap
 --
 
--- The tune list as the comma separated layout and variant strings xkb takes. Runs once, on
+-- settings.list as the comma separated layout and variant strings xkb takes. Runs once, on
 -- load: the engine keeps the keymap across reloads unless these strings change.
 local function apply()
-    local list = layouts.tune.list
+    local list = layouts.settings.list
     if #list == 0 then return end
     local names, variants = {}, {}
     for i = 1, #list do
@@ -78,7 +78,7 @@ local function apply()
         names[i] = name or list[i]
         variants[i] = variant or ""
     end
-    yk.set_layouts(table.concat(names, ","), table.concat(variants, ","), layouts.tune.options)
+    yk.set_layouts(table.concat(names, ","), table.concat(variants, ","), layouts.settings.options)
 end
 
 apply()
@@ -91,7 +91,7 @@ end
 
 -- Make the layout list names the active one. Already active, or not in list, does nothing.
 function layouts.select(frame, name)
-    local list = layouts.tune.list
+    local list = layouts.settings.list
     for i = 1, #list do
         if list[i] == name then
             if i ~= frame.layout and i <= frame.layout_count then yk.set_layout(i) end
@@ -105,15 +105,15 @@ end
 --
 
 function layouts.frame(frame)
-    if frame.frame == 0 and layouts.tune.input_method ~= "" then
-        yk.spawn(layouts.tune.input_method)
+    if frame.frame == 0 and layouts.settings.input_method ~= "" then
+        yk.spawn(layouts.settings.input_method)
     end
     screen_w, screen_h = frame.sw, frame.sh
     age = age + frame.dt
     if last ~= nil and frame.layout ~= last then
         age = 0
         -- Ours by the name it was asked for, otherwise whatever xkb calls it.
-        local ours = layouts.tune.list[frame.layout]
+        local ours = layouts.settings.list[frame.layout]
         label = ours and string.upper(ours) or frame.layout_names[frame.layout] or "?"
         detail = frame.layout_names[frame.layout] or ""
         if detail == label then detail = "" end
@@ -132,11 +132,11 @@ local function fade(color, a)
 end
 
 function layouts.draw()
-    local tune = layouts.tune
-    if age >= tune.hold_secs + tune.fade_secs then return end
+    local settings = layouts.settings
+    if age >= settings.hold_secs + settings.fade_secs then return end
     local a = 1
-    if age > tune.hold_secs then
-        a = 1 - (age - tune.hold_secs) / tune.fade_secs
+    if age > settings.hold_secs then
+        a = 1 - (age - settings.hold_secs) / settings.fade_secs
     end
     local pad = text.size
     local w = text.width(label)
@@ -145,7 +145,7 @@ function layouts.draw()
     local box_w = w + gap + detail_w + pad * 2
     local box_h = text.size + pad * 2
     local x = math.floor((screen_w - box_w) * 0.5)
-    local y = screen_h - tune.margin - box_h
+    local y = screen_h - settings.margin - box_h
     yk.draw_rect(x, y, box_w, box_h, fade(0x0c0c10d8, a))
     text.draw(label, x + pad, y + pad, fade(0xf0f0f4ff, a))
     if detail ~= "" then

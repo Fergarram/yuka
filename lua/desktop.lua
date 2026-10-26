@@ -21,10 +21,10 @@
 local desktop = {}
 
 --
--- Tuning
+-- Settings
 --
 
-desktop.tune = {
+desktop.settings = {
     -- Install the stylesheets from desktop/. false leaves every gtk.css alone.
     gtk_css = true,
 
@@ -42,7 +42,7 @@ desktop.tune = {
     },
 }
 
-local tune = desktop.tune
+local settings = desktop.settings
 
 --
 -- Files
@@ -107,14 +107,14 @@ local function install_css(version)
 end
 
 -- Set one gsetting, in the background. For values that change while running, like the color
--- scheme; the ones in the tune table go together at startup.
+-- scheme; the ones in the settings table go together at startup.
 function desktop.gsettings_set(schema, key, value)
     os.execute("gsettings set " .. shell_quote(schema) .. " " .. shell_quote(key) .. " "
         .. shell_quote(value) .. " >/dev/null 2>&1 &")
 end
 
 local function apply_gsettings()
-    local list = tune.gsettings
+    local list = settings.gsettings
     if #list == 0 then return end
     local cmd = {}
     for i = 1, #list do
@@ -129,11 +129,11 @@ end
 -- Load and frame
 --
 
-if tune.gtk_css then
+if settings.gtk_css then
     install_css("3.0")
     install_css("4.0")
 end
-if tune.portals_conf then
+if settings.portals_conf then
     install("desktop/yuka-portals.conf", config_dir() .. "/xdg-desktop-portal", "yuka-portals.conf")
 end
 

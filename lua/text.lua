@@ -13,10 +13,10 @@
 local text = {}
 
 --
--- Tuning
+-- Settings
 --
 
-text.tune = {
+text.settings = {
     -- The font file. A monospace face keeps the numbers in the overlays from jittering as
     -- they change. The same directory has the other weights: JetBrainsMono-Medium.ttf holds up
     -- better light on dark, -Light is thinner.
@@ -31,8 +31,8 @@ text.tune = {
 -- Font
 --
 
-text.size = text.tune.size
-local font, err = yk.font(text.tune.path, text.tune.size)
+text.size = text.settings.size
+local font, err = yk.font(text.settings.path, text.settings.size)
 if not font then print("yuka: text: " .. err .. ", using the built-in font") end
 
 --

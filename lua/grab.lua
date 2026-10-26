@@ -18,10 +18,10 @@ local snap = require("snap")
 local grab = {}
 
 --
--- Tuning
+-- Settings
 --
 
-grab.tune = {
+grab.settings = {
     -- A resize drag can change corners without letting go: whichever side of the window the
     -- cursor is on is the side that moves. Splitting the window down the middle makes that
     -- too easy to trigger, because shrinking inward walks the cursor toward the middle and
@@ -41,7 +41,7 @@ grab.tune = {
     lift_when_zoomed_out = false,
 }
 
-local tune = grab.tune
+local settings = grab.settings
 
 --
 -- Functions
@@ -108,12 +108,12 @@ function grab.frame(frame, eaten)
         end
 
         -- Picking a window up brings it to the front, and zoomed out it may lift too
-        -- (tune.lift_when_zoomed_out).
+        -- (settings.lift_when_zoomed_out).
         if i and frame.pressed and not eaten and not frame.dragging then
             unmaximize_under(frame, i, frame.x, frame.y)
             yk.begin_move(frame.under)
             snap.begin_move(frame, i, frame.x, frame.y)
-            if tune.lift_when_zoomed_out and frame.zoom < frame.zoom_default then
+            if settings.lift_when_zoomed_out and frame.zoom < frame.zoom_default then
                 looks.pick_up(frame.under)
             end
         end
@@ -141,8 +141,8 @@ function grab.frame(frame, eaten)
             local pointer_x, pointer_y = view.to_canvas(frame.x, frame.y)
             local edge_x, edge_y = corner_at(pointer_x, pointer_y,
                 frame.win_x[i], frame.win_y[i], frame.win_w[i], frame.win_h[i],
-                corner_split(frame.resize_ex, tune.resize_corner_hold),
-                corner_split(frame.resize_ey, tune.resize_corner_hold))
+                corner_split(frame.resize_ex, settings.resize_corner_hold),
+                corner_split(frame.resize_ey, settings.resize_corner_hold))
             if edge_x ~= frame.resize_ex or edge_y ~= frame.resize_ey then
                 yk.resize_corner(edge_x, edge_y)
                 snap.begin_resize(frame, i, edge_x, edge_y)

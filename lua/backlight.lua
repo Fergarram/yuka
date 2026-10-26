@@ -18,10 +18,10 @@ local keys = require("keys")
 local backlight = {}
 
 --
--- Tuning
+-- Settings
 --
 
-backlight.tune = {
+backlight.settings = {
     -- How a level here maps to the device: device = level ^ curve. 1 is the device's own
     -- steps, even in light, which crowd all the change at the dark end. 2 spreads it out so
     -- every step looks about the same; 2.5 gives the dark end finer still.
@@ -66,18 +66,18 @@ local held_for = 0
 --
 
 local function to_level(fraction)
-    return fraction ^ (1 / backlight.tune.curve)
+    return fraction ^ (1 / backlight.settings.curve)
 end
 
 local function clamp(value)
-    return math.max(backlight.tune.min, math.min(1, value))
+    return math.max(backlight.settings.min, math.min(1, value))
 end
 
 -- Move by this many taps: positive brighter, negative dimmer. Rounded to a whole step so taps
 -- land on the same levels every time.
 function backlight.step(steps)
     if level == nil then return end
-    local step = backlight.tune.step
+    local step = backlight.settings.step
     level = clamp(math.floor((level + steps * step) / step + 0.5) * step)
 end
 
@@ -93,8 +93,8 @@ function backlight.held(frame)
         return
     end
     held_for = held_for + frame.dt
-    if held_for < backlight.tune.hold_delay then return end
-    local move = backlight.tune.hold_speed * frame.dt
+    if held_for < backlight.settings.hold_delay then return end
+    local move = backlight.settings.hold_speed * frame.dt
     level = clamp(level + (up_held and move or -move))
 end
 
@@ -120,9 +120,9 @@ function backlight.frame(frame)
     if math.abs(gap) < 0.002 then
         shown = level
     else
-        shown = shown + gap * math.min(1, backlight.tune.rate * frame.dt)
+        shown = shown + gap * math.min(1, backlight.settings.rate * frame.dt)
     end
-    sent = shown ^ backlight.tune.curve
+    sent = shown ^ backlight.settings.curve
     yk.backlight(sent)
 end
 

@@ -12,10 +12,10 @@ local windows = require("windows")
 local gestures = {}
 
 --
--- Tuning
+-- Settings
 --
 
-gestures.tune = {
+gestures.settings = {
     -- Where a three-finger tap at 1:1 steps back to, and the scale of the overview.
     overview_zoom = 0.4,
 
@@ -51,7 +51,7 @@ gestures.tune = {
     key_chord_ms = 70,
 }
 
-local tune = gestures.tune
+local settings = gestures.settings
 
 --
 -- State
@@ -75,7 +75,7 @@ local last_middle_ms = -100000
 --
 
 local function swipe_way(frame)
-    if tune.swipe_natural then
+    if settings.swipe_natural then
         return -frame.swipe_dx, -frame.swipe_dy
     end
     return frame.swipe_dx, frame.swipe_dy
@@ -92,8 +92,8 @@ local function swipe(frame)
         end
         -- The rubber band: starts at the slope of swipe_follow_px per trigger distance and
         -- flattens toward swipe_reach_px.
-        local reach = math.max(tune.swipe_reach_px, 1)
-        local pull = frame.swipe_progress * tune.swipe_follow_px
+        local reach = math.max(settings.swipe_reach_px, 1)
+        local pull = frame.swipe_progress * settings.swipe_follow_px
         local slide_px = reach * (1 - 1 / (1 + pull / reach))
         local dx, dy = swipe_way(frame)
         local slide = slide_px / math.max(cam.zoom, 0.0001)
@@ -139,7 +139,7 @@ local function key_swipe(frame)
     chord.start_ms = chord.start_ms or frame.time_ms
     chord.left, chord.right = chord.left or left, chord.right or right
     chord.up, chord.down = chord.up or up, chord.down or down
-    if frame.time_ms - chord.start_ms < tune.key_chord_ms then return end
+    if frame.time_ms - chord.start_ms < settings.key_chord_ms then return end
 
     chord.done = true
     local dx = (chord.right and 1 or 0) - (chord.left and 1 or 0)
@@ -167,10 +167,10 @@ local function tap(frame)
     end
     yk.release_all()
     local target
-    if frame.focused and tune.tap_step_out < 1 then
-        target = math.max(cam.zoom * tune.tap_step_out, tune.overview_zoom)
+    if frame.focused and settings.tap_step_out < 1 then
+        target = math.max(cam.zoom * settings.tap_step_out, settings.overview_zoom)
     elseif math.abs(cam.zoom - cam.default) < view.HOME then
-        target = tune.overview_zoom
+        target = settings.overview_zoom
     else
         target = cam.default
     end

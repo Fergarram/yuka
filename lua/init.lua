@@ -182,10 +182,10 @@ yk.config = require("config")
 local cfg = yk.config
 
 --
--- Tuning
+-- Settings
 --
 
-local tune = {
+local settings = {
     -- Canvas pixels panned per horizontal wheel notch, at zoom 1.
     hwheel_pan = 60.0,
 
@@ -281,22 +281,22 @@ bind("super+p", function() overlays.pad = not overlays.pad end)
 
 bind("super+s", function() yk.screenshot() end)
 
--- The backlight, a step per tap of the brightness keys; holding sweeps (backlight.tune).
+-- The backlight, a step per tap of the brightness keys; holding sweeps (backlight.settings).
 bind("brightnessdown", function() backlight.step(-1) end)
 bind("brightnessup", function() backlight.step(1) end)
 
 -- Night light as a range, like brightness: Super with brightness down steps toward night,
--- with brightness up back toward day, eased in. screen.tune says what each end looks like.
+-- with brightness up back toward day, eased in. screen.settings says what each end looks like.
 bind("super+brightnessdown", function() screen.step_night(1) end)
 bind("super+brightnessup", function() screen.step_night(-1) end)
 
--- Next keyboard layout, from layouts.tune.list.
+-- Next keyboard layout, from layouts.settings.list.
 bind("super+space", function(frame) layouts.next(frame) end)
 
 -- The JIS Mac keys beside the space bar pick a layout outright, as on macOS: 英数 for Latin,
--- かな for Japanese. Which ones is layouts.tune.eisu and kana.
-bind("eisu", function(frame) layouts.select(frame, layouts.tune.eisu) end)
-bind("kana", function(frame) layouts.select(frame, layouts.tune.kana) end)
+-- かな for Japanese. Which ones is layouts.settings.eisu and kana.
+bind("eisu", function(frame) layouts.select(frame, layouts.settings.eisu) end)
+bind("kana", function(frame) layouts.select(frame, layouts.settings.kana) end)
 
 -- Asks the focused window to close, the way every desktop's close chord does.
 bind("super+w", function(frame) yk.close(frame.focused) end)
@@ -329,7 +329,7 @@ local function held_keys(frame)
     local zoom_in = yk.key_down(keys.equal) or yk.key_down(keys.kpplus)
     local zoom_out = yk.key_down(keys.minus) or yk.key_down(keys.kpminus)
     if zoom_in == zoom_out then return end
-    local step = 1 + view.tune.zoom_rate_per_sec * frame.dt
+    local step = 1 + view.settings.zoom_rate_per_sec * frame.dt
     view.stop()
     view.zoom_at(zoom_in and step or 1 / step, frame.sw * 0.5, frame.sh * 0.5)
 end
@@ -354,19 +354,19 @@ local lock = { axes = "none", tx = 0, ty = 0 }
 -- Shape this frame's finger scroll for a client: the axis lock, the sensitivity, and the
 -- client's sign, which is Wayland's (positive down) flipped by invert_scroll like the wheel.
 local function scroll_for_client(frame)
-    lock.tx = lock.tx * tune.scroll_travel_decay + math.abs(frame.scroll_x)
-    lock.ty = lock.ty * tune.scroll_travel_decay + math.abs(frame.scroll_y)
+    lock.tx = lock.tx * settings.scroll_travel_decay + math.abs(frame.scroll_x)
+    lock.ty = lock.ty * settings.scroll_travel_decay + math.abs(frame.scroll_y)
     -- The first frame decides which axis holds it, a tie going to the vertical.
     if lock.axes == "none" then
         lock.axes = math.abs(frame.scroll_y) >= math.abs(frame.scroll_x) and "v" or "h"
     end
     -- The minor axis takes it back once it is doing real work, and once both are going they
     -- stay going: dropping an axis under a hand still moving is worse than carrying one.
-    local frac = tune.scroll_axis_lock_frac
+    local frac = settings.scroll_axis_lock_frac
     if lock.axes == "v" and lock.tx >= lock.ty * frac then lock.axes = "both" end
     if lock.axes == "h" and lock.ty >= lock.tx * frac then lock.axes = "both" end
     local sign = cfg.invert_scroll == false and -1 or 1
-    local sens = tune.window_scroll_sens
+    local sens = settings.window_scroll_sens
     local vertical = (lock.axes == "v" or lock.axes == "both")
         and frame.scroll_y * sign * sens or 0
     local horizontal = (lock.axes == "h" or lock.axes == "both")
@@ -426,7 +426,7 @@ local function route(frame)
         end
         if frame.hwheel ~= 0 then
             local hwheel = cfg.invert_scroll == false and frame.hwheel or -frame.hwheel
-            view.pan(hwheel * tune.hwheel_pan, 0)
+            view.pan(hwheel * settings.hwheel_pan, 0)
         end
         if frame.pinch ~= 1 then
             view.stop()

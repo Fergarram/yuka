@@ -22,10 +22,10 @@ local windows = require("windows")
 local snap = {}
 
 --
--- Tuning
+-- Settings
 --
 
-snap.tune = {
+snap.settings = {
     -- Whether moving and resizing a window snaps it to the grid. false and every drag goes
     -- exactly where the pointer puts it.
     enabled = true,
@@ -47,7 +47,7 @@ snap.tune = {
     spring_damping = 1.0,
 }
 
-local tune = snap.tune
+local settings = snap.settings
 
 --
 -- State
@@ -81,8 +81,8 @@ local STEPS_PER_RADIAN = 4
 -- One axis of a spring: where it is and how fast it is going, carried toward target over dt.
 local function spring(position, velocity, target, dt)
     if dt <= 0 then return position, velocity end
-    local omega = 2 * math.pi * tune.spring_hz
-    local damping = 2 * tune.spring_damping * omega
+    local omega = 2 * math.pi * settings.spring_hz
+    local damping = 2 * settings.spring_damping * omega
     local steps = math.ceil(dt * math.max(omega, damping) * STEPS_PER_RADIAN)
     local step = dt / steps
     for _ = 1, steps do
@@ -99,7 +99,7 @@ end
 
 -- The grid line nearest a canvas coordinate.
 local function to_grid(value)
-    return math.floor(value / tune.grid + 0.5) * tune.grid
+    return math.floor(value / settings.grid + 0.5) * settings.grid
 end
 
 -- A move picked up, by Super+drag or a titlebar: at screen_x, screen_y, which is the point
@@ -150,7 +150,7 @@ local function step_move(frame, dt)
 
     local pointer_x, pointer_y = view.to_canvas(frame.x, frame.y)
     local raw_x, raw_y = pointer_x + move.grab_dx, pointer_y + move.grab_dy
-    if not tune.enabled then
+    if not settings.enabled then
         -- The engine follows the pointer; keep up with it in case snapping comes back on.
         move.x, move.y, move.target_x, move.target_y = raw_x, raw_y, raw_x, raw_y
         move.vx, move.vy = 0, 0
@@ -193,7 +193,7 @@ local function step_resize(frame, dt)
     local pointer_x, pointer_y = view.to_canvas(frame.x, frame.y)
     local raw_w = resize.from_w + resize.edge_x * (pointer_x - resize.grab_x)
     local raw_h = resize.from_h + resize.edge_y * (pointer_y - resize.grab_y)
-    if not tune.enabled then
+    if not settings.enabled then
         resize.w, resize.h, resize.vw, resize.vh = raw_w, raw_h, 0, 0
         return
     end

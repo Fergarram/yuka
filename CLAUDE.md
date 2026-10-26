@@ -201,10 +201,10 @@
 	Use the same heading comments, with -- instead of //:
 
 	--
-	-- Tuning
+	-- Settings
 	--
 
-	Behaviour knobs live in a tune table at the top of the module that
+	Behaviour knobs live in a settings table at the top of the module that
 	uses them, each with a comment saying what it does and what the
 	values feel like. lua/config.lua is only for settings the engine
 	reads.

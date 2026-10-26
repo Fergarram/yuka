@@ -15,10 +15,10 @@ local keys = require("keys")
 local screen = {}
 
 --
--- Tuning
+-- Settings
 --
 
-screen.tune = {
+screen.settings = {
     -- The two ends of the night range: day at 0, night at 1, and every step between is the
     -- two mixed. Each is:
     --
@@ -65,7 +65,7 @@ screen.tune = {
 --
 
 -- Where on the range we are, 0 for day and 1 for night.
-local night = screen.tune.night_start
+local night = screen.settings.night_start
 
 -- How long a range key has been held, in seconds, 0 when none is.
 local held_for = 0
@@ -125,7 +125,7 @@ local function build(look)
         return
     end
     local white_r, white_g, white_b = white(look.kelvin)
-    local points = screen.tune.points
+    local points = screen.settings.points
     for i = 1, points do
         local x = (i - 1) / (points - 1)
         local level = x ^ look.gamma
@@ -142,7 +142,7 @@ end
 local FIELDS = { "kelvin", "dim", "contrast", "gamma" }
 
 local function target()
-    local day_look, night_look = screen.tune.day, screen.tune.night
+    local day_look, night_look = screen.settings.day, screen.settings.night
     for i = 1, #FIELDS do
         local name = FIELDS[i]
         want[name] = day_look[name] + (night_look[name] - day_look[name]) * night
@@ -156,7 +156,7 @@ local DONE = { kelvin = 5, dim = 0.002, contrast = 0.002, gamma = 0.002 }
 -- Move along the range by this many steps: positive toward night, negative toward day.
 -- Rounded to a whole step so presses land on the same points every time.
 function screen.step_night(steps)
-    local step = screen.tune.night_step
+    local step = screen.settings.night_step
     local stepped = math.floor((night + steps * step) / step + 0.5) * step
     night = math.max(0, math.min(1, stepped))
 end
@@ -171,8 +171,8 @@ function screen.held(frame)
         return
     end
     held_for = held_for + frame.dt
-    if held_for < screen.tune.hold_delay then return end
-    local move = screen.tune.hold_speed * frame.dt
+    if held_for < screen.settings.hold_delay then return end
+    local move = screen.settings.hold_speed * frame.dt
     night = math.max(0, math.min(1, night + (down_held and move or -move)))
 end
 
@@ -190,7 +190,7 @@ function screen.frame(frame)
         return
     end
     local moving = false
-    local ease = math.min(1, screen.tune.rate * frame.dt)
+    local ease = math.min(1, screen.settings.rate * frame.dt)
     for i = 1, #FIELDS do
         local name = FIELDS[i]
         local gap = want[name] - now[name]
@@ -213,7 +213,7 @@ function screen.frame(frame)
         if now[FIELDS[i]] ~= want[FIELDS[i]] then settled = false end
     end
     since_sent = since_sent + frame.dt
-    if settled or since_sent >= screen.tune.send_every then
+    if settled or since_sent >= screen.settings.send_every then
         since_sent = 0
         build(now)
     end

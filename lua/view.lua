@@ -11,10 +11,10 @@
 local view = {}
 
 --
--- Tuning
+-- Settings
 --
 
-view.tune = {
+view.settings = {
     -- The spring that carries the view when something sends it somewhere: being sent to a
     -- window, the 1:1 detent, a three-finger tap. A pinch is never followed by a journey,
     -- and neither is Super+Escape.
@@ -68,7 +68,7 @@ view.tune = {
     zoom_rate_per_sec = 2.0,
 }
 
-local tune = view.tune
+local settings = view.settings
 
 --
 -- State
@@ -215,8 +215,8 @@ function view.fit(w, h, maximized)
     if maximized then
         zoom = math.min(cam.sw / w, cam.sh / h)
     else
-        local room_w = math.max(cam.sw - tune.fit_padding_px * 2, 1)
-        local room_h = math.max(cam.sh - tune.fit_padding_px * 2, 1)
+        local room_w = math.max(cam.sw - settings.fit_padding_px * 2, 1)
+        local room_h = math.max(cam.sh - settings.fit_padding_px * 2, 1)
         zoom = math.min(cam.default, math.min(room_w / w, room_h / h))
     end
     return clamp(zoom)
@@ -226,10 +226,10 @@ end
 -- a journey. pinching and swiping are the fingers owning the zoom, which keeps the detent out.
 function view.step(frame, pinching, swiping)
     local sits_where_placed = placed and math.abs(cam.zoom - placed) < 0.001
-    if tune.zoom_detent > 0 and not journey and not pinching and not swiping
+    if settings.zoom_detent > 0 and not journey and not pinching and not swiping
         and not sits_where_placed then
         local off = cam.zoom - cam.default
-        if off ~= 0 and math.abs(off) <= tune.zoom_detent then
+        if off ~= 0 and math.abs(off) <= settings.zoom_detent then
             view.turn_to(cam.default, frame.x or 0, frame.y or 0, false)
         end
     end
@@ -240,8 +240,8 @@ function view.step(frame, pinching, swiping)
     -- dt is capped, because a frame that took a long time is a stall rather than a slow moment,
     -- and integrating one whole would fling the spring somewhere absurd.
     local dt = math.min(frame.dt, 0.05)
-    local spring_hz = trip.swipe and tune.swipe_spring_hz or tune.spring_hz
-    local damping = trip.swipe and tune.swipe_spring_damping or tune.spring_damping
+    local spring_hz = trip.swipe and settings.swipe_spring_hz or settings.spring_hz
+    local damping = trip.swipe and settings.swipe_spring_damping or settings.spring_damping
     local omega = 2 * math.pi * spring_hz
     trip.v = trip.v + (omega * omega * (1 - trip.p) - 2 * damping * omega * trip.v) * dt
     trip.p = trip.p + trip.v * dt

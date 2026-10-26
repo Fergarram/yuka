@@ -18,10 +18,10 @@ local text = require("text")
 local notch = {}
 
 --
--- Tuning
+-- Settings
 --
 
-notch.tune = {
+notch.settings = {
     -- How wide the stretch of the top edge that opens it is, in pixels, centred on the screen.
     -- About the notch's own width feels like touching it; wider is easier to hit by flinging
     -- the pointer up.
@@ -95,10 +95,10 @@ end
 -- The battery's sysfs directory and its name there, found once as the scripts load, nil
 -- without one.
 local battery_dir, battery_name = nil, nil
-for i = 1, #notch.tune.batteries do
-    local dir = "/sys/class/power_supply/" .. notch.tune.batteries[i]
+for i = 1, #notch.settings.batteries do
+    local dir = "/sys/class/power_supply/" .. notch.settings.batteries[i]
     if read_line(dir .. "/capacity") then
-        battery_dir, battery_name = dir, notch.tune.batteries[i]
+        battery_dir, battery_name = dir, notch.settings.batteries[i]
         break
     end
 end
@@ -161,18 +161,18 @@ end
 
 -- The tab's size in pixels.
 local function size()
-    local tune = notch.tune
-    local w = date_w + tune.gap + time_w + tune.pad_x * 2
-    if battery_s ~= "" then w = w + tune.gap + battery_w end
-    return w, text.size + tune.pad_y * 2
+    local settings = notch.settings
+    local w = date_w + settings.gap + time_w + settings.pad_x * 2
+    if battery_s ~= "" then w = w + settings.gap + battery_w end
+    return w, text.size + settings.pad_y * 2
 end
 
 local function refresh_clock()
     local now = os.time()
     if now == stamp then return end
     stamp = now
-    date_s = os.date(notch.tune.date_format, now)
-    time_s = os.date(notch.tune.time_format, now)
+    date_s = os.date(notch.settings.date_format, now)
+    time_s = os.date(notch.settings.time_format, now)
     date_w = text.width(date_s)
     time_w = text.width(time_s)
 end
@@ -180,9 +180,9 @@ end
 -- Whether the pointer is on the trigger strip, or on the tab while it is out.
 local function pointed(frame)
     if frame.x == nil then return false end
-    local tune = notch.tune
+    local settings = notch.settings
     local mid = frame.sw * 0.5
-    if frame.y < tune.trigger_h and math.abs(frame.x - mid) <= tune.trigger_w * 0.5 then
+    if frame.y < settings.trigger_h and math.abs(frame.x - mid) <= settings.trigger_w * 0.5 then
         return true
     end
     if open == 0 then return false end
@@ -195,7 +195,7 @@ end
 --
 
 function notch.frame(frame)
-    local tune = notch.tune
+    local settings = notch.settings
     screen_w = frame.sw
     refresh_clock()
     if pointed(frame) then
@@ -204,10 +204,10 @@ function notch.frame(frame)
     else
         away = away + frame.dt
     end
-    if away < tune.linger_secs then
-        open = math.min(1, open + frame.dt / tune.open_secs)
+    if away < settings.linger_secs then
+        open = math.min(1, open + frame.dt / settings.open_secs)
     else
-        open = math.max(0, open - frame.dt / tune.close_secs)
+        open = math.max(0, open - frame.dt / settings.close_secs)
     end
 end
 
@@ -217,24 +217,24 @@ end
 
 function notch.draw()
     if open == 0 then return end
-    local tune = notch.tune
+    local settings = notch.settings
     local w, h = size()
     -- Eased out, so it arrives softly and leaves the same way backwards.
     local eased = 1 - (1 - open) ^ 3
     local x = math.floor((screen_w - w) * 0.5)
     local y = math.floor(-h * (1 - eased))
-    local radius = tune.radius
+    local radius = settings.radius
     -- Square at the top, where it meets the edge, and round at the bottom.
-    yk.draw_rect(x, y, w, h - radius, tune.bg)
-    yk.draw_rect(x + radius, y + h - radius, w - radius * 2, radius, tune.bg)
-    yk.draw_circle(x + radius, y + h - radius, radius, tune.bg)
-    yk.draw_circle(x + w - radius, y + h - radius, radius, tune.bg)
-    local text_y = y + tune.pad_y
-    text.draw(date_s, x + tune.pad_x, text_y, tune.fg)
-    text.draw(time_s, x + tune.pad_x + date_w + tune.gap, text_y, tune.fg)
+    yk.draw_rect(x, y, w, h - radius, settings.bg)
+    yk.draw_rect(x + radius, y + h - radius, w - radius * 2, radius, settings.bg)
+    yk.draw_circle(x + radius, y + h - radius, radius, settings.bg)
+    yk.draw_circle(x + w - radius, y + h - radius, radius, settings.bg)
+    local text_y = y + settings.pad_y
+    text.draw(date_s, x + settings.pad_x, text_y, settings.fg)
+    text.draw(time_s, x + settings.pad_x + date_w + settings.gap, text_y, settings.fg)
     if battery_s ~= "" then
-        text.draw(battery_s, x + tune.pad_x + date_w + tune.gap + time_w + tune.gap, text_y,
-            tune.fg)
+        text.draw(battery_s, x + settings.pad_x + date_w + settings.gap + time_w + settings.gap, text_y,
+            settings.fg)
     end
 end
 

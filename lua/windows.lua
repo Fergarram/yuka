@@ -11,10 +11,10 @@ local view = require("view")
 local windows = {}
 
 --
--- Tuning
+-- Settings
 --
 
-windows.tune = {
+windows.settings = {
     -- Which new windows take the keyboard as they appear.
     --
     --   "never"         none of them. Every window waits to be clicked, which is the only
@@ -80,7 +80,7 @@ windows.tune = {
     swipe_off_axis = 2.0,
 }
 
-local tune = windows.tune
+local settings = windows.settings
 
 --
 -- Lookups
@@ -122,9 +122,9 @@ local function line_enters(from_x, from_y, dx, dy, x, y, w, h, margin)
 end
 
 -- The window a swipe from a canvas point in the direction (dx, dy), a unit vector, goes to, or
--- nil when there is nothing that way (tune.swipe_graze_px, tune.swipe_off_axis).
+-- nil when there is nothing that way (settings.swipe_graze_px, settings.swipe_off_axis).
 function windows.nearest_in_direction(frame, from_x, from_y, dx, dy)
-    local margin = tune.swipe_graze_px / math.max(view.cam.zoom, 0.0001)
+    local margin = settings.swipe_graze_px / math.max(view.cam.zoom, 0.0001)
 
     -- The window the line runs into first.
     local hit, hit_distance = nil, nil
@@ -151,7 +151,7 @@ function windows.nearest_in_direction(frame, from_x, from_y, dx, dy)
             -- Behind you, or where you already are.
             if along > 1 then
                 local across = math.abs(offset_x * dy - offset_y * dx)
-                local score = along + across * tune.swipe_off_axis
+                local score = along + across * settings.swipe_off_axis
                 if not best_score or score < best_score then
                     best, best_score = i, score
                 end
@@ -179,8 +179,8 @@ end
 
 -- How much a direction is preferred, lower being sooner. Unlisted comes after everything listed.
 local function direction_rank(dir)
-    for rank = 1, #tune.spawn_order do
-        if tune.spawn_order[rank] == dir then return rank end
+    for rank = 1, #settings.spawn_order do
+        if settings.spawn_order[rank] == dir then return rank end
     end
     return 99
 end
@@ -217,7 +217,7 @@ local function free_spot(frame, skip, center_x, center_y, w, h)
                     local candidate_x, candidate_y = center_x + dx * step, center_y + dy * step
                     local x = math.floor(candidate_x - w * 0.5 + 0.5)
                     local y = math.floor(candidate_y - h * 0.5 + 0.5)
-                    if spot_free(frame, skip, x, y, w, h, tune.spawn_gap) then
+                    if spot_free(frame, skip, x, y, w, h, settings.spawn_gap) then
                         local rank = direction_rank(direction_of(dx, dy))
                         local distance_sq = (candidate_x - center_x) ^ 2
                             + (candidate_y - center_y) ^ 2
@@ -246,7 +246,7 @@ local function place(frame, i)
     local cam = view.cam
     local w, h = frame.win_w[i], frame.win_h[i]
     local x, y
-    if tune.spawn_clear then
+    if settings.spawn_clear then
         x, y = free_spot(frame, i, cam.cx, cam.cy, w, h)
     else
         local step = (cascade % CASCADE_WRAP) * CASCADE_STEP
@@ -276,8 +276,8 @@ end
 --
 
 local function welcome(frame, k)
-    if tune.focus_new == "never" then return false end
-    if tune.focus_new == "same-client" then return frame.mapped_welcome[k] end
+    if settings.focus_new == "never" then return false end
+    if settings.focus_new == "same-client" then return frame.mapped_welcome[k] end
     return true
 end
 
@@ -303,9 +303,9 @@ end
 -- The focused window closed and the engine let go of the keyboard: hand it on, if asked to.
 local function focus_after_close(frame)
     if frame.closed_count == 0 or frame.focused then return end
-    if tune.focus_after_close == "under" and frame.under then
+    if settings.focus_after_close == "under" and frame.under then
         yk.focus(frame.under)
-    elseif tune.focus_after_close == "last" then
+    elseif settings.focus_after_close == "last" then
         for k = #history, 1, -1 do
             local i = windows.index(frame, history[k])
             if i and on_screen(frame, i) then
@@ -321,8 +321,8 @@ function windows.events(frame)
     remember_focus(frame)
     focus_after_close(frame)
     if frame.frame == 0 then
-        for k = 1, #tune.startup do
-            yk.spawn(tune.startup[k])
+        for k = 1, #settings.startup do
+            yk.spawn(settings.startup[k])
         end
     end
 
@@ -331,7 +331,7 @@ function windows.events(frame)
         local i = windows.index(frame, id)
         if i then place(frame, i) end
         if welcome(frame, k) then
-            if tune.spawn_travel and i then
+            if settings.spawn_travel and i then
                 windows.go_to(frame, i, false)
             else
                 yk.focus(id)
@@ -386,7 +386,7 @@ end
 
 -- The canvas rectangle menus are kept inside: the view, less the margin.
 function windows.popup_bounds(frame)
-    local margin = tune.popup_margin
+    local margin = settings.popup_margin
     if not margin then
         yk.popup_bounds(nil)
         return

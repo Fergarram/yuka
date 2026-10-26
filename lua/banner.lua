@@ -17,10 +17,10 @@ local text = require("text")
 local banner = {}
 
 --
--- Tuning
+-- Settings
 --
 
-banner.tune = {
+banner.settings = {
     -- The bar and the text, 0xRRGGBBAA. Dark red with pale text is hard to miss without
     -- being a flashing alarm.
     bg = 0x3c0c10ff,
@@ -40,19 +40,19 @@ banner.tune = {
 --
 
 function banner.draw(msg, screen_w, screen_h)
-    local tune = banner.tune
-    local line_h = text.size + tune.leading
+    local settings = banner.settings
+    local line_h = text.size + settings.leading
     local count = 0
     for _ in msg:gmatch("[^\n]+") do
         count = count + 1
-        if count == tune.max_lines then break end
+        if count == settings.max_lines then break end
     end
-    yk.draw_rect(0, 0, screen_w, count * line_h - tune.leading + tune.pad * 2, tune.bg)
+    yk.draw_rect(0, 0, screen_w, count * line_h - settings.leading + settings.pad * 2, settings.bg)
     local drawn = 0
     for line in msg:gmatch("[^\n]+") do
-        text.draw(line, tune.pad, tune.pad + drawn * line_h, tune.fg)
+        text.draw(line, settings.pad, settings.pad + drawn * line_h, settings.fg)
         drawn = drawn + 1
-        if drawn == tune.max_lines then break end
+        if drawn == settings.max_lines then break end
     end
 end
 

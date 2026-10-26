@@ -184,7 +184,7 @@ return {
     -- Smallest a Super+right-drag will ask a window to be, in canvas units. Clients
     -- that declared their own minimum through set_min_size keep it; this is the floor
     -- for the ones that did not. Whether a resize stretches the window while the client
-    -- catches up is looks.tune.resize_stretch.
+    -- catches up is looks.settings.resize_stretch.
     resize_min_px = 120.0,
     -- How often the client is asked to re-render during a drag: the next ask waits for it
     -- to answer the last one, or for this many frames, whichever comes first. This does
