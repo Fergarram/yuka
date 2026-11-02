@@ -45,7 +45,7 @@ looks.settings = {
     --   outline_maximized  whether maximized and fullscreen windows are outlined too. Theirs
     --                      lies just outside the window rather than over its edge, so one that
     --                      fills the screen shows none, and it appears as the view zooms out
-    corners = { radius = 18, outline_px = 1, outline_maximized = true },
+    corners = { radius = 16, outline_px = 1, outline_maximized = true },
 
     -- Whether windows draw their own drop shadows. false tells every window it is tiled, the one
     -- hint toolkits act on: GTK, libadwaita, Qt and Chromium then draw no shadow, square their
