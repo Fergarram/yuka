@@ -73,6 +73,8 @@
 -- Drawing, only inside yk.draw (screen pixels, colours 0xRRGGBBAA):
 --
 --   yk.draw_rect(x, y, w, h, c)   yk.draw_rect_lines(x, y, w, h, c)
+--   yk.draw_rect_rounded(x, y, w, h, r, c)
+--                                 corners of radius r; r past half the shorter side is a pill
 --   yk.draw_line(x1, y1, x2, y2, c)   yk.draw_circle(x, y, r, c)
 --   yk.draw_text(text, x, y, size, c [, font])
 --                                 in a font from yk.font, raylib's built-in one without
@@ -176,6 +178,8 @@ local desktop = require("desktop")
 local banner = require("banner")
 local screen = require("screen")
 local backlight = require("backlight")
+local volume = require("volume")
+local meter = require("meter")
 local notch = require("notch")
 
 yk.config = require("config")
@@ -291,8 +295,14 @@ bind("brightnessup", function() backlight.step(1) end)
 bind("super+brightnessdown", function() screen.step_night(1) end)
 bind("super+brightnessup", function() screen.step_night(-1) end)
 
--- Next keyboard layout, from layouts.settings.list.
-bind("super+space", function(frame) layouts.next(frame) end)
+-- The volume keys, a step per tap; holding sweeps, and a step unmutes (volume.settings).
+bind("volumedown", function() volume.step(-1) end)
+bind("volumeup", function() volume.step(1) end)
+bind("mute", function() volume.toggle_mute() end)
+
+-- Next keyboard layout, from layouts.settings.list. Super+Space alone is kept free for a
+-- command palette.
+bind("super+alt+space", function(frame) layouts.next(frame) end)
 
 -- The JIS Mac keys beside the space bar pick a layout outright, as on macOS: 英数 for Latin,
 -- かな for Japanese. Which ones is layouts.settings.eisu and kana.
@@ -326,6 +336,7 @@ bind("super+escape", function() yk.release_all() end)
 local function held_keys(frame)
     screen.held(frame)
     backlight.held(frame)
+    volume.held(frame)
     if not frame.super then return end
     local zoom_in = yk.key_down(keys.equal) or yk.key_down(keys.kpplus)
     local zoom_out = yk.key_down(keys.minus) or yk.key_down(keys.kpminus)
@@ -475,6 +486,7 @@ function yk.frame(frame)
     desktop.frame(frame)
     screen.frame(frame)
     backlight.frame(frame)
+    meter.frame(frame)
     notch.frame(frame)
     view.finish()
 end
@@ -482,6 +494,7 @@ end
 function yk.draw()
     overlays.draw()
     layouts.draw()
+    meter.draw()
     notch.draw()
 end
 

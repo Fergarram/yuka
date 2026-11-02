@@ -14,6 +14,7 @@
 --
 
 local keys = require("keys")
+local meter = require("meter")
 
 local backlight = {}
 
@@ -79,6 +80,7 @@ function backlight.step(steps)
     if level == nil then return end
     local step = backlight.settings.step
     level = clamp(math.floor((level + steps * step) / step + 0.5) * step)
+    meter.show("backlight", level)
 end
 
 -- Every frame: a brightness key held past hold_delay, with no modifier, sweeps toward its end.
@@ -96,6 +98,7 @@ function backlight.held(frame)
     if held_for < backlight.settings.hold_delay then return end
     local move = backlight.settings.hold_speed * frame.dt
     level = clamp(level + (up_held and move or -move))
+    meter.show("backlight", level)
 end
 
 function backlight.frame(frame)

@@ -11,6 +11,7 @@
 --
 
 local keys = require("keys")
+local meter = require("meter")
 
 local screen = {}
 
@@ -159,6 +160,7 @@ function screen.step_night(steps)
     local step = screen.settings.night_step
     local stepped = math.floor((night + steps * step) / step + 0.5) * step
     night = math.max(0, math.min(1, stepped))
+    meter.show("night", 1 - night)
 end
 
 -- Every frame: Super with a brightness key held past hold_delay sweeps toward that end. The
@@ -174,6 +176,7 @@ function screen.held(frame)
     if held_for < screen.settings.hold_delay then return end
     local move = screen.settings.hold_speed * frame.dt
     night = math.max(0, math.min(1, night + (down_held and move or -move)))
+    meter.show("night", 1 - night)
 end
 
 -- Where on the range we are, 0 for day and 1 for night.

@@ -26,6 +26,7 @@ local keys = {
     home = 102, up = 103, pageup = 104, left = 105, right = 106,
     ["end"] = 107, down = 108, pagedown = 109, insert = 110, delete = 111,
     leftmeta = 125, rightmeta = 126,
+    mute = 113, volumedown = 114, volumeup = 115,
     hangeul = 122, hanja = 123,
     brightnessdown = 224, brightnessup = 225,
 }

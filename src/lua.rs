@@ -895,6 +895,8 @@ fn register_draw(lua: &Lua, yk: &Table) -> mlua::Result<()> {
             ray::draw_rectangle(x as i32, y as i32, w as i32, h as i32, color(c));
         draw_rect_lines(x: f32, y: f32, w: f32, h: f32, c: u32) =>
             ray::draw_rectangle_lines(x as i32, y as i32, w as i32, h as i32, color(c));
+        draw_rect_rounded(x: f32, y: f32, w: f32, h: f32, r: f32, c: u32) =>
+            ray::draw_rectangle_rounded(x, y, w, h, r, color(c));
         draw_line(x1: f32, y1: f32, x2: f32, y2: f32, c: u32) =>
             ray::draw_line(x1 as i32, y1 as i32, x2 as i32, y2 as i32, color(c));
         draw_circle(x: f32, y: f32, r: f32, c: u32) =>

@@ -61,6 +61,15 @@ pub struct Vector2 {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct Rectangle {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct Vector3 {
     pub x: f32,
     pub y: f32,
@@ -202,6 +211,7 @@ extern "C" {
     fn SetTextureFilter(texture: Texture, filter: c_int);
     fn DrawRectangle(x: c_int, y: c_int, w: c_int, h: c_int, color: Color);
     fn DrawRectangleLines(x: c_int, y: c_int, w: c_int, h: c_int, color: Color);
+    fn DrawRectangleRounded(rec: Rectangle, roundness: f32, segments: c_int, color: Color);
     fn DrawLine(x1: c_int, y1: c_int, x2: c_int, y2: c_int, color: Color);
     fn DrawCircle(x: c_int, y: c_int, radius: f32, color: Color);
     fn DrawEllipseLines(x: c_int, y: c_int, rx: f32, ry: f32, color: Color);
@@ -483,6 +493,20 @@ pub fn draw_rectangle(x: i32, y: i32, w: i32, h: i32, color: Color) {
 
 pub fn draw_rectangle_lines(x: i32, y: i32, w: i32, h: i32, color: Color) {
     unsafe { DrawRectangleLines(x, y, w, h, color) };
+}
+
+// Corners of this radius in pixels. raylib takes roundness as a fraction of half the shorter
+// side, so a radius past that is a pill. The segments per corner follow the radius, so a
+// small corner stays cheap and a large one stays smooth.
+pub fn draw_rectangle_rounded(x: f32, y: f32, w: f32, h: f32, radius: f32, color: Color) {
+    let half = w.min(h) * 0.5;
+    if half <= 0.0 {
+        return;
+    }
+    let roundness = (radius / half).clamp(0.0, 1.0);
+    let segments = (radius * 0.5).clamp(4.0, 32.0) as c_int;
+    let rec = Rectangle { x, y, width: w, height: h };
+    unsafe { DrawRectangleRounded(rec, roundness, segments, color) };
 }
 
 pub fn draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: Color) {
